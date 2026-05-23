@@ -128,6 +128,31 @@ class CleanupJob:
 
 
 @dataclass(frozen=True)
+class TextForegroundSegmentationMask:
+    """Dense visible-text foreground evidence for cleanup mask construction."""
+
+    page_id: str
+    image_size: tuple[int, int] | list[int] | None
+    raw_mask_ref: str = ""
+    refined_mask_ref: str = ""
+    threshold_used: int | float | None = None
+    provider: str = ""
+    backend: str = ""
+    runtime_ms: float | None = None
+    text_pixel_count: int = 0
+    connected_component_stats: dict[str, Any] = field(default_factory=dict)
+    block_associations: list[dict[str, Any]] = field(default_factory=list)
+    keep_undetected_mask: bool = False
+    confidence: dict[str, Any] = field(default_factory=dict)
+    provenance: dict[str, Any] = field(default_factory=dict)
+    raw_mask: Any = field(default=None, repr=False, compare=False)
+    refined_mask: Any = field(default=None, repr=False, compare=False)
+
+    def to_audit_dict(self) -> dict[str, Any]:
+        return _dataclass_audit_dict(self, omit={"raw_mask", "refined_mask"})
+
+
+@dataclass(frozen=True)
 class CleanupMask:
     """Foreground and erase-mask evidence for one cleanup job."""
 
@@ -170,6 +195,14 @@ class CleanupMask:
     recovered_component_count: int | None = None
     rejected_component_count: int | None = None
     rejected_component_reasons: list[str] = field(default_factory=list)
+    segmentation_mask_status: str = ""
+    segmentation_mask_failure_reason: str = ""
+    segmentation_provider: str = ""
+    segmentation_mask_ref: str = ""
+    segmentation_text_pixels: int | None = None
+    segmentation_component_count: int | None = None
+    segmentation_binding_method: str = ""
+    segmentation_block_associations: list[dict[str, Any]] = field(default_factory=list)
     foreground_mask: Any = field(default=None, repr=False, compare=False)
     erase_mask: Any = field(default=None, repr=False, compare=False)
 

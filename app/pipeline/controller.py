@@ -624,6 +624,23 @@ class PipelineWorker(QtCore.QThread):
                     source_image_size = _get_image_size(source_path)
                     if not source_image_size or source_image_size[0] <= 0 or source_image_size[1] <= 0:
                         source_image_size = None
+                    segmentation_start = time.time()
+                    _page014_timeout_checkpoint("text_foreground_segmentation", "start", page_id=page_id)
+                    text_foreground_segmentation_mask = _build_text_foreground_segmentation_mask(
+                        detector=detector,
+                        source_path=source_path,
+                        image_size=source_image_size,
+                        input_size=int(getattr(self._settings, "detector_input_size", 1024) or 1024),
+                        page_id=page_id,
+                        debug_context=debug_context,
+                    )
+                    _page014_timeout_checkpoint(
+                        "text_foreground_segmentation",
+                        "end",
+                        page_id=page_id,
+                        text_pixel_count=getattr(text_foreground_segmentation_mask, "text_pixel_count", 0),
+                        elapsed_ms=round((time.time() - segmentation_start) * 1000.0, 3),
+                    )
                     cleanup_mask_start = time.time()
                     _page014_timeout_checkpoint(
                         "cleanup_mask_build",
@@ -638,6 +655,7 @@ class PipelineWorker(QtCore.QThread):
                         source_glyph_masks=source_glyph_mask_result,
                         image_size=source_image_size,
                         source_image_path=source_path,
+                        text_foreground_segmentation=text_foreground_segmentation_mask,
                     )
                     _page014_timeout_checkpoint(
                         "cleanup_mask_build",
@@ -1802,6 +1820,96 @@ def _debug_page_dir(debug_context: dict | None) -> str:
     page_dir = os.path.join(root_dir, page_id)
     os.makedirs(page_dir, exist_ok=True)
     return page_dir
+
+
+def _build_text_foreground_segmentation_mask(
+    *,
+    detector,
+    source_path: str,
+    image_size: tuple[int, int] | None,
+    input_size: int,
+    page_id: str,
+    debug_context: dict | None,
+):
+    from app.pipeline.cleanup_contracts import TextForegroundSegmentationMask
+
+    if detector is None or not hasattr(detector, "detect_with_segmentation"):
+        return TextForegroundSegmentationMask(
+            page_id=page_id,
+            image_size=image_size,
+            provider=getattr(detector, "__class__", type("", (), {})).__name__ if detector is not None else "",
+            provenance={"status": "segmentation_api_unavailable"},
+        )
+    try:
+        try:
+            result = detector.detect_with_segmentation(
+                source_path,
+                input_size=input_size,
+                keep_undetected_mask=True,
+            )
+        except TypeError:
+            result = detector.detect_with_segmentation(source_path)
+    except Exception as exc:
+        return TextForegroundSegmentationMask(
+            page_id=page_id,
+            image_size=image_size,
+            provider=detector.__class__.__name__,
+            provenance={"status": "segmentation_failed", "error": f"{type(exc).__name__}: {exc}"},
+        )
+
+    raw_ref = ""
+    refined_ref = ""
+    page_dir = _debug_page_dir(debug_context)
+    if page_dir:
+        seg_dir = os.path.join(page_dir, "text_foreground_segmentation")
+        os.makedirs(seg_dir, exist_ok=True)
+        raw_ref = _save_segmentation_mask_ref(getattr(result, "raw_mask", None), seg_dir, f"{page_id}_ctd_raw_mask.png")
+        refined_ref = _save_segmentation_mask_ref(
+            getattr(result, "refined_mask", None),
+            seg_dir,
+            f"{page_id}_ctd_refined_mask.png",
+        )
+    contract = TextForegroundSegmentationMask(
+        page_id=page_id,
+        image_size=getattr(result, "image_size", None) or image_size,
+        raw_mask_ref=raw_ref,
+        refined_mask_ref=refined_ref,
+        threshold_used=getattr(result, "threshold_used", None),
+        provider=getattr(result, "provider", "") or detector.__class__.__name__,
+        backend=getattr(result, "backend", ""),
+        runtime_ms=getattr(result, "runtime_ms", None),
+        text_pixel_count=int(getattr(result, "text_pixel_count", 0) or 0),
+        connected_component_stats=dict(getattr(result, "connected_component_stats", {}) or {}),
+        block_associations=list(getattr(result, "blocks", []) or []),
+        keep_undetected_mask=bool(getattr(result, "keep_undetected_mask", False)),
+        confidence=dict(getattr(result, "confidence", {}) or {}),
+        provenance=dict(getattr(result, "provenance", {}) or {}),
+        raw_mask=getattr(result, "raw_mask", None),
+        refined_mask=getattr(result, "refined_mask", None),
+    )
+    if debug_context is not None:
+        debug_context["text_foreground_segmentation_mask"] = contract.to_audit_dict()
+    return contract
+
+
+def _save_segmentation_mask_ref(mask, directory: str, filename: str) -> str:
+    if mask is None:
+        return ""
+    try:
+        import numpy as np
+        from PIL import Image
+
+        arr = np.asarray(mask)
+        if arr.ndim == 3:
+            arr = np.any(arr > 0, axis=2)
+        elif arr.ndim != 2:
+            return ""
+        out = (arr > 0).astype("uint8") * 255
+        path = os.path.join(directory, filename)
+        Image.fromarray(out, mode="L").save(path)
+        return path
+    except Exception:
+        return ""
 
 
 def _ocr_trace_outcome(text: str, confidence: float, route_intent: str) -> tuple[str, str, str]:

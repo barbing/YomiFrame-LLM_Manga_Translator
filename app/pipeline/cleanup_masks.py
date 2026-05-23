@@ -27,7 +27,12 @@ try:  # pragma: no cover - exercised in target conda env
 except Exception:  # pragma: no cover
     Image = None  # type: ignore
 
-from app.pipeline.cleanup_contracts import CleanupClass, CleanupJob, CleanupMask
+from app.pipeline.cleanup_contracts import (
+    CleanupClass,
+    CleanupJob,
+    CleanupMask,
+    TextForegroundSegmentationMask,
+)
 
 
 CLEANUP_MASK_CONTRACT_VERSION = "cleanup_masks_phase2"
@@ -101,12 +106,14 @@ class CleanupMaskBuildResult:
     protected_records: list[dict[str, Any]] = field(default_factory=list)
     skipped_records: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    text_foreground_segmentation: dict[str, Any] | None = None
 
     def to_audit_dict(self) -> dict[str, Any]:
         return {
             "version": self.version,
             "page_id": self.page_id,
             "renderer_consumed": False,
+            "text_foreground_segmentation": _json_safe(self.text_foreground_segmentation or {}),
             "masks": [_json_safe(mask) for mask in self.masks],
             "masks_by_job_id": {
                 str(job_id): [_json_safe(mask) for mask in masks]
@@ -145,6 +152,89 @@ class _EffectiveMaskBuild:
     rejected: bool = False
 
 
+def _segmentation_foreground_mask(segmentation: TextForegroundSegmentationMask | Any | None) -> tuple[np.ndarray | None, dict[str, Any]]:
+    if segmentation is None:
+        return None, {
+            "segmentation_mask_status": "segmentation_mask_missing",
+            "segmentation_mask_failure_reason": "text_foreground_segmentation_missing",
+        }
+    refined = _get_value(segmentation, "refined_mask")
+    if refined is None:
+        refined = _get_value(segmentation, "mask_refined")
+    if refined is None:
+        refined = _get_value(segmentation, "mask")
+    mask = _to_binary_mask(refined)
+    audit = _segmentation_audit(segmentation)
+    if mask is None or int(np.count_nonzero(mask)) <= 0:
+        audit.update(
+            {
+                "segmentation_mask_status": "segmentation_mask_missing",
+                "segmentation_mask_failure_reason": "refined_segmentation_mask_empty_or_missing",
+            }
+        )
+        return None, audit
+    audit.setdefault("segmentation_mask_status", "segmentation_mask_ready")
+    audit.setdefault("segmentation_mask_failure_reason", "")
+    audit.setdefault("text_pixel_count", int(np.count_nonzero(mask)))
+    return mask.astype(np.uint8), audit
+
+
+def _segmentation_audit(segmentation: Any) -> dict[str, Any]:
+    if hasattr(segmentation, "to_audit_dict"):
+        raw = segmentation.to_audit_dict()
+        if isinstance(raw, Mapping):
+            audit = dict(raw)
+        else:
+            audit = {}
+    elif isinstance(segmentation, Mapping):
+        audit = dict(segmentation)
+    else:
+        audit = {}
+        for key in (
+            "page_id",
+            "image_size",
+            "raw_mask_ref",
+            "refined_mask_ref",
+            "threshold_used",
+            "provider",
+            "backend",
+            "runtime_ms",
+            "text_pixel_count",
+            "connected_component_stats",
+            "block_associations",
+            "keep_undetected_mask",
+            "confidence",
+            "provenance",
+        ):
+            value = _get_value(segmentation, key)
+            if value is not None:
+                audit[key] = value
+    stats = audit.get("connected_component_stats")
+    component_count = None
+    if isinstance(stats, Mapping):
+        component_count = stats.get("component_count")
+    return {
+        "page_id": audit.get("page_id", ""),
+        "image_size": audit.get("image_size"),
+        "raw_mask_ref": audit.get("raw_mask_ref", ""),
+        "refined_mask_ref": audit.get("refined_mask_ref", ""),
+        "threshold_used": audit.get("threshold_used"),
+        "provider": audit.get("provider", ""),
+        "backend": audit.get("backend", ""),
+        "runtime_ms": audit.get("runtime_ms"),
+        "text_pixel_count": audit.get("text_pixel_count", 0),
+        "connected_component_stats": stats or {},
+        "block_associations": list(audit.get("block_associations") or []),
+        "keep_undetected_mask": bool(audit.get("keep_undetected_mask", False)),
+        "confidence": audit.get("confidence", {}),
+        "provenance": audit.get("provenance", {}),
+        "segmentation_provider": audit.get("provider", ""),
+        "segmentation_mask_ref": audit.get("refined_mask_ref", ""),
+        "segmentation_text_pixels": audit.get("text_pixel_count", 0),
+        "segmentation_component_count": component_count,
+    }
+
+
 def build_cleanup_masks(
     *,
     page_id: str,
@@ -153,11 +243,13 @@ def build_cleanup_masks(
     image_size: tuple[int, int] | None = None,
     source_image_path: str | Path | None = None,
     source_image: Any | None = None,
+    text_foreground_segmentation: TextForegroundSegmentationMask | Any | None = None,
 ) -> CleanupMaskBuildResult:
-    """Build CleanupMask contracts from source-glyph seeds and local image evidence."""
+    """Build CleanupMask contracts from segmentation foreground and source-glyph provenance."""
 
     started = time.time()
     evidence_records = _index_source_evidence(source_glyph_masks)
+    segmentation_mask, segmentation_audit = _segmentation_foreground_mask(text_foreground_segmentation)
     source_np, source_error = _source_image_array(source_image=source_image, source_image_path=source_image_path)
     _cleanup_perf_contract_checkpoint(
         "cleanup_mask_build",
@@ -165,6 +257,8 @@ def build_cleanup_masks(
         page_id=page_id,
         job_count=len(job_candidates or []),
         source_evidence_count=len(evidence_records),
+        segmentation_available=segmentation_mask is not None,
+        segmentation_text_pixels=segmentation_audit.get("text_pixel_count", 0),
         source_image_available=source_np is not None,
         source_image_error=source_error,
     )
@@ -239,37 +333,63 @@ def build_cleanup_masks(
                 rejected_records.append({**base, "reason": allowed_rejection, "allowed_area": allowed})
                 continue
 
-            (
-                foreground,
-                erase,
-                foreground_source_keys,
-                erase_source_keys,
-                consumed_source_ids,
-                missing_foreground_source_ids,
-                used_transitional_erase,
-            ) = _union_masks_from_evidence(
+            source_seed_foreground, source_seed_erase, foreground_source_keys, erase_source_keys, consumed_source_ids, missing_foreground_source_ids, used_transitional_erase = _union_masks_from_evidence(
                 matched,
                 allowed=allowed,
             )
-            if foreground is None:
-                rejected_records.append(
-                    {
-                        **base,
-                        "reason": "foreground_mask_missing_for_required_sourceglyph",
-                        "required_source_glyph_mask_ids": required_source_ids,
-                        "missing_source_glyph_mask_ids": missing_foreground_source_ids,
-                    }
-                )
-                continue
-            effective = _build_effective_text_mask(
+            effective = _build_segmentation_text_mask(
                 job=job,
-                source_np=source_np,
-                source_error=source_error,
-                seed_foreground=foreground,
-                seed_erase=erase if erase is not None else foreground,
+                segmentation_mask=segmentation_mask,
+                segmentation_audit=segmentation_audit,
+                seed_foreground=source_seed_foreground,
                 allowed=allowed,
                 matched=matched,
             )
+            if effective.foreground is None:
+                if source_seed_foreground is None:
+                    rejected_records.append(
+                        {
+                            **base,
+                            "reason": effective.failure_reason
+                            or "segmentation_mask_missing",
+                            "required_source_glyph_mask_ids": required_source_ids,
+                            "missing_source_glyph_mask_ids": missing_foreground_source_ids,
+                            **effective.audit,
+                        }
+                    )
+                    continue
+                fallback = _build_effective_text_mask(
+                    job=job,
+                    source_np=source_np,
+                    source_error=source_error,
+                    seed_foreground=source_seed_foreground,
+                    seed_erase=source_seed_erase if source_seed_erase is not None else source_seed_foreground,
+                    allowed=allowed,
+                    matched=matched,
+                )
+                fallback_audit = {
+                    **fallback.audit,
+                    "segmentation_mask_status": effective.audit.get("segmentation_mask_status", ""),
+                    "segmentation_mask_failure_reason": effective.failure_reason
+                    or effective.audit.get("segmentation_mask_failure_reason", ""),
+                    "mask_completion_method": (
+                        f"local_contrast_fallback_after_{effective.audit.get('segmentation_mask_status') or 'segmentation_unavailable'}"
+                    ),
+                }
+                effective = _EffectiveMaskBuild(
+                    foreground=fallback.foreground,
+                    erase=fallback.erase,
+                    status=(
+                        "cleanup_mask_unresolved_after_segmentation"
+                        if fallback.foreground is not None and fallback.erase is not None
+                        else fallback.status
+                    ),
+                    failure_reason=effective.failure_reason
+                    or fallback.failure_reason
+                    or "segmentation_unavailable_local_contrast_fallback",
+                    audit=fallback_audit,
+                    rejected=fallback.rejected,
+                )
             if effective.foreground is None or effective.erase is None:
                 rejected_records.append(
                     {
@@ -337,7 +457,11 @@ def build_cleanup_masks(
                 continue
 
             seed_source = "source_glyph_transitional_erase_mask_evidence" if used_transitional_erase else "source_glyph_foreground_evidence"
-            mask_source = f"cleanup_effective_mask_from_{seed_source}"
+            mask_source = (
+                "cleanup_mask_from_text_foreground_segmentation"
+                if str(effective.audit.get("mask_completion_method") or "").startswith("text_foreground_segmentation")
+                else f"cleanup_effective_mask_from_{seed_source}"
+            )
             seed_method = _mask_method_union(matched, erase_source_keys or foreground_source_keys)
             completion_method = str(effective.audit.get("mask_completion_method") or "")
             mask_method = (
@@ -389,6 +513,14 @@ def build_cleanup_masks(
                 recovered_component_count=effective.audit.get("recovered_component_count"),
                 rejected_component_count=effective.audit.get("rejected_component_count"),
                 rejected_component_reasons=effective.audit.get("rejected_component_reasons", []),
+                segmentation_mask_status=effective.audit.get("segmentation_mask_status", ""),
+                segmentation_mask_failure_reason=effective.audit.get("segmentation_mask_failure_reason", ""),
+                segmentation_provider=effective.audit.get("segmentation_provider", ""),
+                segmentation_mask_ref=effective.audit.get("segmentation_mask_ref", ""),
+                segmentation_text_pixels=effective.audit.get("segmentation_text_pixels"),
+                segmentation_component_count=effective.audit.get("segmentation_component_count"),
+                segmentation_binding_method=effective.audit.get("segmentation_binding_method", ""),
+                segmentation_block_associations=effective.audit.get("segmentation_block_associations", []),
                 foreground_mask=foreground.copy(),
                 erase_mask=erase.copy(),
             )
@@ -459,6 +591,7 @@ def build_cleanup_masks(
         protected_records=protected_records,
         skipped_records=skipped_records,
         errors=errors,
+        text_foreground_segmentation=segmentation_audit,
     )
 
 
@@ -678,6 +811,279 @@ def _union_masks_from_evidence(
         missing_foreground_source_ids,
         used_transitional_erase,
     )
+
+
+def _build_segmentation_text_mask(
+    *,
+    job: CleanupJob,
+    segmentation_mask: np.ndarray | None,
+    segmentation_audit: Mapping[str, Any],
+    seed_foreground: np.ndarray | None,
+    allowed: list[int],
+    matched: Sequence[_SourceEvidence],
+) -> _EffectiveMaskBuild:
+    seed = (
+        _clip_mask_to_bbox((seed_foreground > 0).astype(np.uint8), allowed)
+        if seed_foreground is not None
+        else None
+    )
+    seed_pixels = int(np.count_nonzero(seed)) if seed is not None else 0
+    seed_stats = _component_stats(seed) if seed is not None else {"component_count": 0, "largest_component_pixels": 0}
+    base_audit = {
+        "seed_foreground_pixels": seed_pixels,
+        "component_count_before": seed_stats["component_count"],
+        "largest_component_pixels_before": seed_stats["largest_component_pixels"],
+        "bbox_fill_ratio_before": _mask_fill_ratio(seed) if seed is not None else 0.0,
+        "source_seed_mask_ids": [source.mask_id for source in matched if source.mask_id],
+        "segmentation_provider": segmentation_audit.get("segmentation_provider") or segmentation_audit.get("provider", ""),
+        "segmentation_mask_ref": segmentation_audit.get("segmentation_mask_ref") or segmentation_audit.get("refined_mask_ref", ""),
+        "segmentation_text_pixels": segmentation_audit.get("segmentation_text_pixels") or segmentation_audit.get("text_pixel_count", 0),
+        "segmentation_component_count": segmentation_audit.get("segmentation_component_count"),
+        "segmentation_block_associations": [],
+    }
+    if segmentation_mask is None:
+        audit = {
+            **base_audit,
+            "completed_foreground_pixels": 0,
+            "component_count_after": 0,
+            "largest_component_pixels_after": 0,
+            "text_block_coverage_estimate": 0.0,
+            "bbox_fill_ratio_after": 0.0,
+            "analysis_scope_bbox": allowed,
+            "executable_erase_bbox": None,
+            "mask_completion_method": "segmentation_mask_missing",
+            "polarity_mode": "segmentation",
+            "recovered_component_count": 0,
+            "rejected_component_count": 1,
+            "rejected_component_reasons": ["segmentation_mask_missing"],
+            "segmentation_mask_status": "segmentation_mask_missing",
+            "segmentation_mask_failure_reason": str(
+                segmentation_audit.get("segmentation_mask_failure_reason") or "text_foreground_segmentation_missing"
+            ),
+            "segmentation_binding_method": "not_attempted",
+        }
+        return _EffectiveMaskBuild(
+            foreground=None,
+            erase=None,
+            status="segmentation_mask_missing",
+            failure_reason="segmentation_mask_missing",
+            audit=audit,
+            rejected=True,
+        )
+    binding_scope = _segmentation_binding_scope(job=job, allowed=allowed)
+    foreground = _clip_mask_to_bbox((segmentation_mask > 0).astype(np.uint8), binding_scope)
+    binding_method = "segmentation_source_erasure_bbox_clip"
+    if int(np.count_nonzero(foreground)) <= 0 and binding_scope != allowed:
+        allowed_foreground = _clip_mask_to_bbox((segmentation_mask > 0).astype(np.uint8), allowed)
+        if int(np.count_nonzero(allowed_foreground)) > 0:
+            foreground = allowed_foreground
+            binding_scope = allowed
+            binding_method = "segmentation_allowed_area_clip_after_empty_source_erasure_scope"
+    foreground = _group_segmentation_text_components(foreground, binding_scope, job)
+    pixels = int(np.count_nonzero(foreground))
+    if pixels <= 0:
+        audit = {
+            **base_audit,
+            "completed_foreground_pixels": 0,
+            "component_count_after": 0,
+            "largest_component_pixels_after": 0,
+            "text_block_coverage_estimate": 0.0,
+            "bbox_fill_ratio_after": 0.0,
+            "analysis_scope_bbox": binding_scope,
+            "executable_erase_bbox": None,
+            "mask_completion_method": "text_foreground_segmentation_clipped_empty",
+            "polarity_mode": "segmentation",
+            "recovered_component_count": 0,
+            "rejected_component_count": 1,
+            "rejected_component_reasons": ["segmentation_mask_under_coverage"],
+            "segmentation_mask_status": "segmentation_mask_under_coverage",
+            "segmentation_mask_failure_reason": "no_segmentation_pixels_inside_cleanup_allowed_area",
+            "segmentation_binding_method": binding_method,
+        }
+        return _EffectiveMaskBuild(
+            foreground=None,
+            erase=None,
+            status="segmentation_mask_under_coverage",
+            failure_reason="segmentation_mask_under_coverage",
+            audit=audit,
+            rejected=True,
+        )
+    unsafe_reason = _segmentation_foreground_unsafe_reason(foreground, allowed, job)
+    if unsafe_reason:
+        audit = _effective_audit(
+            seed=seed if seed is not None else np.zeros_like(foreground, dtype=np.uint8),
+            completed=foreground,
+            erase=foreground,
+            allowed=allowed,
+            analysis_scope=binding_scope,
+            method="text_foreground_segmentation_rejected",
+            polarity="segmentation",
+            rejected_reasons=[unsafe_reason],
+            recovered_count=0,
+        )
+        return _EffectiveMaskBuild(
+            foreground=None,
+            erase=None,
+            status="segmentation_mask_wrong_owner",
+            failure_reason=unsafe_reason,
+            audit={
+                **base_audit,
+                **audit,
+                "segmentation_mask_status": "segmentation_mask_wrong_owner",
+                "segmentation_mask_failure_reason": unsafe_reason,
+                "segmentation_binding_method": f"{binding_method}_safety_rejected",
+                "segmentation_block_associations": _segmentation_blocks_for_scope(segmentation_audit, binding_scope),
+            },
+            rejected=True,
+        )
+    erase_seed = np.zeros_like(foreground, dtype=np.uint8)
+    erase = _effective_erase_from_foreground(foreground, erase_seed, allowed, job)
+    audit = _effective_audit(
+        seed=seed if seed is not None else np.zeros_like(foreground, dtype=np.uint8),
+        completed=foreground,
+        erase=erase,
+        allowed=allowed,
+        analysis_scope=binding_scope,
+        method="text_foreground_segmentation_refined_allowed_area_clip",
+        polarity="segmentation",
+        rejected_reasons=[],
+        recovered_count=0,
+    )
+    return _EffectiveMaskBuild(
+        foreground=foreground,
+        erase=erase,
+        status="cleanup_mask_ready_from_segmentation",
+        failure_reason="",
+        audit={
+            **base_audit,
+            **audit,
+            "segmentation_mask_status": "segmentation_mask_ready",
+            "segmentation_mask_failure_reason": "",
+            "segmentation_binding_method": f"{binding_method}_sourceglyph_provenance",
+            "segmentation_block_associations": _segmentation_blocks_for_scope(segmentation_audit, binding_scope),
+        },
+        rejected=False,
+    )
+
+
+def _segmentation_binding_scope(*, job: CleanupJob, allowed: list[int]) -> list[int]:
+    candidates: list[list[int]] = []
+    for attr in ("source_glyph_erasure_expected_area_bbox", "source_glyph_erasure_bbox"):
+        box = _valid_bbox(getattr(job, attr, None))
+        if box is not None:
+            candidates.append(box)
+    if not candidates:
+        return allowed
+    scope = _union_bboxes(candidates) or allowed
+    scope = _expand_bbox(scope, 6)
+    intersected = _intersect_bboxes(scope, allowed)
+    return intersected or allowed
+
+
+def _expand_bbox(bbox: list[int], margin: int) -> list[int]:
+    return [
+        int(bbox[0]) - margin,
+        int(bbox[1]) - margin,
+        int(bbox[2]) + margin,
+        int(bbox[3]) + margin,
+    ]
+
+
+def _intersect_bboxes(a: list[int], b: list[int]) -> list[int] | None:
+    box_a = _valid_bbox(a)
+    box_b = _valid_bbox(b)
+    if box_a is None or box_b is None:
+        return None
+    x0 = max(box_a[0], box_b[0])
+    y0 = max(box_a[1], box_b[1])
+    x1 = min(box_a[2], box_b[2])
+    y1 = min(box_a[3], box_b[3])
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return [x0, y0, x1, y1]
+
+
+def _segmentation_blocks_for_scope(segmentation_audit: Mapping[str, Any], scope: list[int]) -> list[dict[str, Any]]:
+    blocks = list(segmentation_audit.get("block_associations") or [])
+    output: list[dict[str, Any]] = []
+    for block in blocks:
+        if not isinstance(block, Mapping):
+            continue
+        bbox = _valid_bbox(block.get("line_bbox")) or _valid_bbox(block.get("xyxy"))
+        if bbox is None:
+            continue
+        if _intersect_bboxes(bbox, scope) is not None:
+            output.append(dict(block))
+    return output[:20]
+
+
+def _segmentation_foreground_unsafe_reason(
+    foreground: np.ndarray,
+    allowed: list[int],
+    job: CleanupJob,
+) -> str:
+    bbox = _mask_bbox(foreground)
+    if bbox is None:
+        return "segmentation_mask_under_coverage"
+    pixels = int(np.count_nonzero(foreground > 0))
+    allowed_area = max(1, _bbox_area(allowed))
+    bbox_area = max(1, _bbox_area(bbox))
+    pixel_ratio = pixels / float(allowed_area)
+    fill_ratio = pixels / float(bbox_area)
+    cleanup_value = _enum_value(getattr(job, "cleanup_class", ""))
+    speech_like = cleanup_value in {
+        CleanupClass.SPEECH_FLAT_BUBBLE.value,
+        CleanupClass.SPEECH_COMPLEX_BUBBLE.value,
+        CleanupClass.SMALL_REACTION.value,
+    }
+    max_pixel_ratio = 0.48 if speech_like else 0.34
+    if pixel_ratio > max_pixel_ratio:
+        return "segmentation_mask_wrong_owner_broad_background_capture"
+    if fill_ratio > 0.72 and bbox_area > 1800:
+        return "segmentation_mask_wrong_owner_rectangular_background_capture"
+    return ""
+
+
+def _group_segmentation_text_components(
+    foreground: np.ndarray,
+    scope: list[int],
+    job: CleanupJob,
+) -> np.ndarray:
+    if cv2 is None or not np.any(foreground > 0):
+        return foreground
+    stats = _component_stats(foreground)
+    if int(stats.get("component_count") or 0) <= 4:
+        return foreground
+    axis = _text_axis(foreground, scope, job)
+    if axis == "vertical":
+        kernel = np.ones((5, 13), dtype=np.uint8)
+    elif axis == "horizontal":
+        kernel = np.ones((13, 5), dtype=np.uint8)
+    else:
+        kernel = np.ones((5, 5), dtype=np.uint8)
+    grouped = cv2.morphologyEx((foreground > 0).astype(np.uint8), cv2.MORPH_CLOSE, kernel, iterations=1)
+    grouped = _clip_mask_to_bbox(grouped.astype(np.uint8), scope)
+    unsafe = _grouped_segmentation_too_broad(grouped, foreground, scope)
+    if unsafe:
+        return foreground
+    return grouped
+
+
+def _grouped_segmentation_too_broad(
+    grouped: np.ndarray,
+    original: np.ndarray,
+    scope: list[int],
+) -> bool:
+    original_pixels = max(1, int(np.count_nonzero(original > 0)))
+    grouped_pixels = int(np.count_nonzero(grouped > 0))
+    if grouped_pixels <= original_pixels:
+        return False
+    if grouped_pixels / float(original_pixels) > 2.35:
+        return True
+    scope_area = max(1, _bbox_area(scope))
+    if grouped_pixels / float(scope_area) > 0.42:
+        return True
+    return False
 
 
 def _source_image_array(

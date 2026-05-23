@@ -3,10 +3,32 @@
 from __future__ import annotations
 import os
 import sys
-from typing import List, Tuple
+import time
+from dataclasses import dataclass, field
+from typing import Any, List, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ComicTextSegmentationResult:
+    """ComicTextDetector boxes plus dense text foreground masks."""
+
+    detections: List[Tuple[List[List[float]], float]]
+    raw_mask: Any = field(default=None, repr=False, compare=False)
+    refined_mask: Any = field(default=None, repr=False, compare=False)
+    blocks: list[dict[str, Any]] = field(default_factory=list)
+    image_size: tuple[int, int] | None = None
+    provider: str = "ComicTextDetector"
+    backend: str = ""
+    threshold_used: int = 30
+    runtime_ms: float | None = None
+    text_pixel_count: int = 0
+    connected_component_stats: dict[str, Any] = field(default_factory=dict)
+    keep_undetected_mask: bool = True
+    confidence: dict[str, Any] = field(default_factory=dict)
+    provenance: dict[str, Any] = field(default_factory=dict)
 
 
 def _repo_root() -> str:
@@ -157,19 +179,72 @@ class ComicTextDetector:
             refine_mode=self._refine_mode,
             keep_undetected_mask=False,
         )
-        output: List[Tuple[List[List[float]], float]] = []
-        for blk in blk_list:
-            # Use real probability from detector (default to 1.0 if missing)
-            score = getattr(blk, "prob", 1.0)
-            
-            line_box = _lines_bounds(getattr(blk, "lines", []) or [])
-            if line_box:
-                output.append((_bbox_to_polygon(line_box), score))
-                continue
-            xyxy = getattr(blk, "xyxy", None)
-            if xyxy:
-                output.append((_bbox_to_polygon(xyxy), score))
-        return output
+        return _detections_from_blocks(blk_list)
+
+    def detect_with_segmentation(
+        self,
+        image_path: str,
+        input_size: int = 1024,
+        *,
+        keep_undetected_mask: bool = True,
+    ) -> ComicTextSegmentationResult:
+        image = _read_image(image_path)
+        if image is None:
+            return ComicTextSegmentationResult(
+                detections=[],
+                keep_undetected_mask=keep_undetected_mask,
+                backend=os.path.basename(str(getattr(self, "_model_path", "") or "")),
+                provenance={"image_path": image_path, "status": "image_unavailable"},
+            )
+        return self.detect_image_with_segmentation(
+            image,
+            input_size=input_size,
+            keep_undetected_mask=keep_undetected_mask,
+            provenance={"image_path": image_path},
+        )
+
+    def detect_image_with_segmentation(
+        self,
+        image,
+        input_size: int = 1024,
+        *,
+        keep_undetected_mask: bool = True,
+        provenance: dict[str, Any] | None = None,
+    ) -> ComicTextSegmentationResult:
+        """Return CTD detections and raw/refined text masks without changing detect_image."""
+
+        if image is None:
+            return ComicTextSegmentationResult(
+                detections=[],
+                keep_undetected_mask=keep_undetected_mask,
+                backend=os.path.basename(str(getattr(self, "_model_path", "") or "")),
+                provenance={"status": "image_unavailable", **(provenance or {})},
+            )
+        if input_size != self._detector.input_size:
+            self._detector.input_size = (input_size, input_size)
+        started = time.time()
+        mask, mask_refined, blk_list = self._detector(
+            image,
+            refine_mode=self._refine_mode,
+            keep_undetected_mask=keep_undetected_mask,
+        )
+        detections = _detections_from_blocks(blk_list)
+        height, width = _image_hw(image)
+        return ComicTextSegmentationResult(
+            detections=detections,
+            raw_mask=mask,
+            refined_mask=mask_refined,
+            blocks=[_block_audit_dict(blk, index) for index, blk in enumerate(blk_list or [])],
+            image_size=(width, height) if width > 0 and height > 0 else None,
+            backend=os.path.basename(str(getattr(self, "_model_path", "") or "")),
+            threshold_used=30,
+            runtime_ms=round((time.time() - started) * 1000.0, 3),
+            text_pixel_count=_mask_text_pixels(mask_refined),
+            connected_component_stats=_mask_component_stats(mask_refined),
+            keep_undetected_mask=keep_undetected_mask,
+            confidence=_confidence_stats(blk_list),
+            provenance={"model_path": str(getattr(self, "_model_path", "") or ""), **(provenance or {})},
+        )
 
 
 def _read_image(image_path: str):
@@ -187,6 +262,95 @@ def _read_image(image_path: str):
         except Exception:
             image = None
     return image
+
+
+def _detections_from_blocks(blk_list) -> List[Tuple[List[List[float]], float]]:
+    output: List[Tuple[List[List[float]], float]] = []
+    for blk in blk_list or []:
+        score = getattr(blk, "prob", 1.0)
+        line_box = _lines_bounds(getattr(blk, "lines", []) or [])
+        if line_box:
+            output.append((_bbox_to_polygon(line_box), score))
+            continue
+        xyxy = getattr(blk, "xyxy", None)
+        if xyxy:
+            output.append((_bbox_to_polygon(xyxy), score))
+    return output
+
+
+def _image_hw(image) -> tuple[int, int]:
+    shape = getattr(image, "shape", None)
+    if shape is not None and len(shape) >= 2:
+        return int(shape[0]), int(shape[1])
+    return 0, 0
+
+
+def _mask_text_pixels(mask) -> int:
+    try:
+        import numpy as np
+
+        arr = np.asarray(mask)
+        if arr.ndim == 3:
+            arr = np.any(arr > 30, axis=2)
+        else:
+            arr = arr > 30
+        return int(np.count_nonzero(arr))
+    except Exception:
+        return 0
+
+
+def _mask_component_stats(mask) -> dict[str, Any]:
+    try:
+        import cv2
+        import numpy as np
+
+        arr = np.asarray(mask)
+        if arr.ndim == 3:
+            arr = np.any(arr > 30, axis=2)
+        elif arr.ndim == 2:
+            arr = arr > 30
+        else:
+            return {"component_count": 0, "largest_component_pixels": 0}
+        labels_count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            arr.astype("uint8"),
+            connectivity=8,
+        )
+        areas = [int(stats[label, cv2.CC_STAT_AREA]) for label in range(1, labels_count)]
+        return {
+            "component_count": len(areas),
+            "largest_component_pixels": max(areas) if areas else 0,
+            "total_component_pixels": int(sum(areas)),
+        }
+    except Exception:
+        pixels = _mask_text_pixels(mask)
+        return {
+            "component_count": 1 if pixels > 0 else 0,
+            "largest_component_pixels": pixels,
+            "total_component_pixels": pixels,
+        }
+
+
+def _block_audit_dict(blk, index: int) -> dict[str, Any]:
+    xyxy = getattr(blk, "xyxy", None)
+    line_box = _lines_bounds(getattr(blk, "lines", []) or [])
+    return {
+        "block_index": index,
+        "prob": float(getattr(blk, "prob", 1.0) or 0.0),
+        "xyxy": [float(v) for v in xyxy] if xyxy is not None else [],
+        "line_bbox": line_box or [],
+    }
+
+
+def _confidence_stats(blk_list) -> dict[str, Any]:
+    scores = [float(getattr(blk, "prob", 1.0) or 0.0) for blk in (blk_list or [])]
+    if not scores:
+        return {"block_count": 0}
+    return {
+        "block_count": len(scores),
+        "min": min(scores),
+        "max": max(scores),
+        "mean": sum(scores) / float(len(scores)),
+    }
 
 
 def _ensure_utils_package(repo_root: str) -> None:

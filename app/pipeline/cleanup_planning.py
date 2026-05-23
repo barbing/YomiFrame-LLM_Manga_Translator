@@ -2431,6 +2431,14 @@ def _effective_mask_kwargs(cleanup_mask: CleanupMask) -> dict[str, Any]:
         "recovered_component_count": getattr(cleanup_mask, "recovered_component_count", None),
         "rejected_component_count": getattr(cleanup_mask, "rejected_component_count", None),
         "rejected_component_reasons": list(getattr(cleanup_mask, "rejected_component_reasons", []) or []),
+        "segmentation_mask_status": str(getattr(cleanup_mask, "segmentation_mask_status", "") or ""),
+        "segmentation_mask_failure_reason": str(getattr(cleanup_mask, "segmentation_mask_failure_reason", "") or ""),
+        "segmentation_provider": str(getattr(cleanup_mask, "segmentation_provider", "") or ""),
+        "segmentation_mask_ref": str(getattr(cleanup_mask, "segmentation_mask_ref", "") or ""),
+        "segmentation_text_pixels": getattr(cleanup_mask, "segmentation_text_pixels", None),
+        "segmentation_component_count": getattr(cleanup_mask, "segmentation_component_count", None),
+        "segmentation_binding_method": str(getattr(cleanup_mask, "segmentation_binding_method", "") or ""),
+        "segmentation_block_associations": list(getattr(cleanup_mask, "segmentation_block_associations", []) or []),
     }
 
 
@@ -2466,6 +2474,11 @@ def _runtime_glyph_precision_mask(
 
     if np is None:
         return cleanup_mask
+    runtime_mask_source = (
+        "text_foreground_segmentation_runtime_precision"
+        if str(getattr(cleanup_mask, "mask_source", "") or "") == "cleanup_mask_from_text_foreground_segmentation"
+        else "source_glyph_foreground_runtime_precision"
+    )
     effective_status = str(getattr(cleanup_mask, "effective_mask_status", "") or "")
     if effective_status.startswith("effective_mask_failed_"):
         return _runtime_rejected_mask(
@@ -2530,7 +2543,7 @@ def _runtime_glyph_precision_mask(
         erase_mask_pixels=erase_pixels,
         allowed_area=allowed,
         growth_ratio=_growth_ratio(erase_pixels, foreground_pixels),
-        mask_source="source_glyph_foreground_runtime_precision",
+        mask_source=runtime_mask_source,
         mask_method="phase5_phase6_runtime_sourceglyph_foreground_glyph_precision",
         rejection_reason="",
         mask_contract_exception_reason=cleanup_mask.mask_contract_exception_reason,
@@ -2561,7 +2574,7 @@ def _runtime_glyph_precision_mask(
             erase_mask_pixels=foreground_pixels,
             allowed_area=allowed,
             growth_ratio=1.0,
-            mask_source="source_glyph_foreground_runtime_precision",
+            mask_source=runtime_mask_source,
             mask_method="phase5_phase6_runtime_sourceglyph_foreground_minimal_erasure",
             rejection_reason="",
             mask_contract_exception_reason=cleanup_mask.mask_contract_exception_reason,
@@ -2619,6 +2632,11 @@ def _runtime_rejected_mask(
 ) -> CleanupMask:
     foreground_arr = foreground if foreground is not None else cleanup_mask.foreground_mask
     erase_arr = erase if erase is not None else cleanup_mask.erase_mask
+    runtime_mask_source = (
+        "text_foreground_segmentation_runtime_precision"
+        if str(getattr(cleanup_mask, "mask_source", "") or "") == "cleanup_mask_from_text_foreground_segmentation"
+        else "source_glyph_foreground_runtime_precision"
+    )
     return CleanupMask(
         cleanup_mask_id=f"{cleanup_mask.cleanup_mask_id}_phase5_runtime",
         cleanup_job_id=str(cleanup_mask.cleanup_job_id),
@@ -2632,7 +2650,7 @@ def _runtime_rejected_mask(
         erase_mask_pixels=int(np.count_nonzero(erase_arr)) if np is not None and erase_arr is not None else cleanup_mask.erase_mask_pixels,
         allowed_area=_valid_bbox(cleanup_mask.allowed_area),
         growth_ratio=cleanup_mask.growth_ratio,
-        mask_source="source_glyph_foreground_runtime_precision",
+        mask_source=runtime_mask_source,
         mask_method=f"phase5_phase6_runtime_sourceglyph_foreground_rejected:{method_suffix}",
         rejection_reason=reason,
         mask_contract_exception_reason=cleanup_mask.mask_contract_exception_reason,
