@@ -203,6 +203,33 @@ class CleanupMask:
     segmentation_component_count: int | None = None
     segmentation_binding_method: str = ""
     segmentation_block_associations: list[dict[str, Any]] = field(default_factory=list)
+    ownership_binding_status: str = ""
+    ownership_binding_method: str = ""
+    cleanup_owned_unit_bbox: list[int] | None = None
+    cleanup_owned_unit_mask_ref: str = ""
+    protected_mask_ref: str = ""
+    protected_overlap_pixels: int | None = None
+    segmentation_pixels_before_binding: int | None = None
+    segmentation_pixels_after_owner_clip: int | None = None
+    segmentation_pixels_after_protection_subtract: int | None = None
+    sourceglyph_overlap_pixels: int | None = None
+    sourceglyph_overlap_ratio: float | None = None
+    segmentation_outside_sourceglyph_pixels: int | None = None
+    effective_coverage_ratio: float | None = None
+    effective_coverage_status: str = ""
+    component_ownership_status: str = ""
+    owned_component_ids: list[str] = field(default_factory=list)
+    protected_component_ids: list[str] = field(default_factory=list)
+    ambiguous_component_ids: list[str] = field(default_factory=list)
+    unowned_component_ids: list[str] = field(default_factory=list)
+    component_projection_method: str = ""
+    owned_component_pixel_count: int | None = None
+    protected_component_pixel_count: int | None = None
+    ambiguous_component_pixel_count: int | None = None
+    sourceglyph_overlap_component_ids: list[str] = field(default_factory=list)
+    sourceglyph_missing_component_ids: list[str] = field(default_factory=list)
+    ownership_projection_failure_reason: str = ""
+    effective_component_coverage_ratio: float | None = None
     foreground_mask: Any = field(default=None, repr=False, compare=False)
     erase_mask: Any = field(default=None, repr=False, compare=False)
 

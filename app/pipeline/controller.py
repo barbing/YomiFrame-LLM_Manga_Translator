@@ -656,6 +656,7 @@ class PipelineWorker(QtCore.QThread):
                         image_size=source_image_size,
                         source_image_path=source_path,
                         text_foreground_segmentation=text_foreground_segmentation_mask,
+                        page_region_records=regions,
                     )
                     _page014_timeout_checkpoint(
                         "cleanup_mask_build",

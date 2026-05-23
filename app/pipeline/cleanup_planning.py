@@ -82,6 +82,7 @@ VALID_CLEANUP_VISUAL_SCOPES = {
     "source_glyph_local",
     "source_glyph_union",
     "source_glyph_union_partition",
+    "segmentation_component",
 }
 LEGACY_CLEANUP_VISUAL_SCOPE_MAP = {
     "glyph_local": "source_glyph_local",
@@ -2439,6 +2440,37 @@ def _effective_mask_kwargs(cleanup_mask: CleanupMask) -> dict[str, Any]:
         "segmentation_component_count": getattr(cleanup_mask, "segmentation_component_count", None),
         "segmentation_binding_method": str(getattr(cleanup_mask, "segmentation_binding_method", "") or ""),
         "segmentation_block_associations": list(getattr(cleanup_mask, "segmentation_block_associations", []) or []),
+        "ownership_binding_status": str(getattr(cleanup_mask, "ownership_binding_status", "") or ""),
+        "ownership_binding_method": str(getattr(cleanup_mask, "ownership_binding_method", "") or ""),
+        "cleanup_owned_unit_bbox": list(getattr(cleanup_mask, "cleanup_owned_unit_bbox", None) or []),
+        "cleanup_owned_unit_mask_ref": str(getattr(cleanup_mask, "cleanup_owned_unit_mask_ref", "") or ""),
+        "protected_mask_ref": str(getattr(cleanup_mask, "protected_mask_ref", "") or ""),
+        "protected_overlap_pixels": getattr(cleanup_mask, "protected_overlap_pixels", None),
+        "segmentation_pixels_before_binding": getattr(cleanup_mask, "segmentation_pixels_before_binding", None),
+        "segmentation_pixels_after_owner_clip": getattr(cleanup_mask, "segmentation_pixels_after_owner_clip", None),
+        "segmentation_pixels_after_protection_subtract": getattr(
+            cleanup_mask,
+            "segmentation_pixels_after_protection_subtract",
+            None,
+        ),
+        "sourceglyph_overlap_pixels": getattr(cleanup_mask, "sourceglyph_overlap_pixels", None),
+        "sourceglyph_overlap_ratio": getattr(cleanup_mask, "sourceglyph_overlap_ratio", None),
+        "segmentation_outside_sourceglyph_pixels": getattr(cleanup_mask, "segmentation_outside_sourceglyph_pixels", None),
+        "effective_coverage_ratio": getattr(cleanup_mask, "effective_coverage_ratio", None),
+        "effective_coverage_status": str(getattr(cleanup_mask, "effective_coverage_status", "") or ""),
+        "component_ownership_status": str(getattr(cleanup_mask, "component_ownership_status", "") or ""),
+        "owned_component_ids": list(getattr(cleanup_mask, "owned_component_ids", []) or []),
+        "protected_component_ids": list(getattr(cleanup_mask, "protected_component_ids", []) or []),
+        "ambiguous_component_ids": list(getattr(cleanup_mask, "ambiguous_component_ids", []) or []),
+        "unowned_component_ids": list(getattr(cleanup_mask, "unowned_component_ids", []) or []),
+        "component_projection_method": str(getattr(cleanup_mask, "component_projection_method", "") or ""),
+        "owned_component_pixel_count": getattr(cleanup_mask, "owned_component_pixel_count", None),
+        "protected_component_pixel_count": getattr(cleanup_mask, "protected_component_pixel_count", None),
+        "ambiguous_component_pixel_count": getattr(cleanup_mask, "ambiguous_component_pixel_count", None),
+        "sourceglyph_overlap_component_ids": list(getattr(cleanup_mask, "sourceglyph_overlap_component_ids", []) or []),
+        "sourceglyph_missing_component_ids": list(getattr(cleanup_mask, "sourceglyph_missing_component_ids", []) or []),
+        "ownership_projection_failure_reason": str(getattr(cleanup_mask, "ownership_projection_failure_reason", "") or ""),
+        "effective_component_coverage_ratio": getattr(cleanup_mask, "effective_component_coverage_ratio", None),
     }
 
 
@@ -4120,15 +4152,19 @@ def _mask_exclusion_reason(cleanup_mask: CleanupMask, image_size: tuple[int, int
         return "cleanup_job_id_missing"
     consumed_source_ids = _unique_texts(cleanup_mask.consumed_source_glyph_mask_ids)
     missing_source_ids = _unique_texts(cleanup_mask.missing_source_glyph_mask_ids)
-    if missing_source_ids:
+    component_projected = (
+        visual_scope == "segmentation_component"
+        or str(getattr(cleanup_mask, "component_projection_method", "") or "") == "segmentation_component_ownership_projection"
+    )
+    if missing_source_ids and not component_projected:
         return "missing_required_source_glyph_evidence"
-    if not consumed_source_ids:
+    if not consumed_source_ids and not component_projected:
         return "consumed_source_glyph_evidence_missing"
-    if visual_scope == "source_glyph_local" and len(consumed_source_ids) != 1:
+    if visual_scope == "source_glyph_local" and len(consumed_source_ids) != 1 and not component_projected:
         return "source_glyph_local_membership_count_mismatch"
-    if visual_scope == "source_glyph_union" and len(consumed_source_ids) <= 1:
+    if visual_scope == "source_glyph_union" and len(consumed_source_ids) <= 1 and not component_projected:
         return "source_glyph_union_membership_count_mismatch"
-    if visual_scope == "source_glyph_union_partition" and len(consumed_source_ids) <= 1:
+    if visual_scope == "source_glyph_union_partition" and len(consumed_source_ids) <= 1 and not component_projected:
         return "source_glyph_union_partition_membership_count_mismatch"
     if cleanup_mask.foreground_mask is None or cleanup_mask.erase_mask is None:
         return "mask_raw_arrays_missing"
