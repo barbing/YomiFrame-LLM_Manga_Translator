@@ -14,6 +14,7 @@ YomiFrame is a Windows desktop app for local manga translation. It detects text,
 - Optional `Build Glossary Before Translation` mode for stronger volume-wide consistency
 - Experimental Deep Discovery for difficult extraction cases
 - Automatic first-launch pre-downloader for fixed runtime model assets
+- Optional AI inpainting support
 - Project JSON output plus `style_guide.json`
 
 ## Current Workflow
@@ -54,8 +55,10 @@ Covered assets:
 - `ComicTextDetector`
 - `PaddleOCR`
 - `MangaOCR`
-- `Big-LAMA`
 - Japanese NER model
+
+Optional asset:
+- `Big-LAMA` for default AI inpainting
 
 Resolution order:
 1. Existing system cache / environment cache
@@ -103,6 +106,13 @@ pip install -r requirements.txt
 
 Notes:
 - `requirements.txt` keeps CPU-safe defaults where possible
+- use `torch 2.6+` with current `transformers` releases; older Torch versions can fail when MangaOCR loads its legacy `.bin` checkpoint
+- AI inpainting is optional because current `simple-lama-inpainting` packaging still conflicts with `Pillow>=10`
+- to enable `ai` inpainting mode, install:
+
+```powershell
+```
+
 - for GPU acceleration on Windows, install the correct CUDA-enabled `torch`, `paddlepaddle-gpu`, and GPU-capable `llama-cpp-python` build in your own environment as needed
 
 ## Run
@@ -119,6 +129,11 @@ Each run can generate:
 - `style_guide.json` when Auto-Glossary is enabled
 
 `project.json` stores regions, OCR text, translations, and render settings so results can be reviewed and re-applied later.
+
+## Documentation
+- overview and architecture: [docs/README.md](docs/README.md)
+- technical notes: [TECHNICAL.md](TECHNICAL.md)
+- guarded validation workflow: [SAFE_FULL_RUN.md](SAFE_FULL_RUN.md)
 
 ## Performance
 Reference validation on the current local test volume:

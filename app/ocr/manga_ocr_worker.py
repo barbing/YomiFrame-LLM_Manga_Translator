@@ -6,6 +6,7 @@ import tempfile
 import threading
 import uuid
 from multiprocessing import get_context
+from queue import Empty
 from typing import Optional
 from pathlib import Path
 import sys
@@ -59,7 +60,12 @@ def _worker_main(requests, responses, use_gpu: bool) -> None:
     from PIL import Image as PILImage
     from app.ocr.manga_ocr_engine import create_manga_ocr_instance
 
-    ocr = create_manga_ocr_instance(use_gpu)
+    try:
+        ocr = create_manga_ocr_instance(use_gpu)
+    except Exception as exc:
+        responses.put(("__init__", "", str(exc)))
+        return
+    responses.put(("__ready__", "", None))
     while True:
         item = requests.get()
         if item is None:
@@ -87,10 +93,23 @@ class MangaOcrWorker:
         )
         self._proc.start()
         self._lock = threading.Lock()
+        self._wait_until_ready()
+
+    def _wait_until_ready(self, timeout: float = 120.0) -> None:
+        try:
+            request_id, _text, error = self._responses.get(timeout=timeout)
+        except Empty as exc:
+            self.close()
+            raise RuntimeError("MangaOCR worker failed to start in time.") from exc
+        if request_id != "__ready__":
+            self.close()
+            raise RuntimeError(error or "MangaOCR worker failed during startup.")
 
     def recognize(self, image) -> str:
         if Image is None:
             raise RuntimeError("Pillow is not installed.")
+        if not self._proc.is_alive():
+            raise RuntimeError("MangaOCR worker is not running.")
         if not hasattr(image, "save"):
             try:
                 import numpy as np

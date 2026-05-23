@@ -141,6 +141,32 @@ class MeCabExtractor:
         # Extra extraction controls (optional terms.json alongside suffixes.json)
         self.whitelist_terms = set()
         self.blacklist_terms = set()
+        self.whitelist_terms.update(
+            {
+                "アルファ",
+                "ベータ",
+                "ガンマ",
+                "デルタ",
+                "イプシロン",
+                "ゼータ",
+                "イータ",
+                "シータ",
+                "ラムダ",
+                "ミュー",
+                "ニュー",
+                "クシー",
+                "オミクロン",
+                "パイ",
+                "ロー",
+                "シグマ",
+                "タウ",
+                "ウプシロン",
+                "ファイ",
+                "カイ",
+                "プサイ",
+                "オメガ",
+            }
+        )
         self.title_suffixes = {
             "王", "姫", "皇", "王女", "王子",
             "魔王", "勇者", "魔女", "剣士", "騎士",

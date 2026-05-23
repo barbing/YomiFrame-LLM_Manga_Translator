@@ -46,6 +46,7 @@ class AppDefaults:
     gguf_n_gpu_layers: int = -1
     gguf_n_threads: int = 8
     gguf_n_batch: int = 256
+    gguf_cross_page_context: bool = False
     fast_mode: bool = False
     auto_glossary: bool = True
     

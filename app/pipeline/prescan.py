@@ -21,6 +21,32 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+_GREEK_CODENAME_MAP = {
+    "アルファ": "阿尔法",
+    "ベータ": "贝塔",
+    "ガンマ": "伽玛",
+    "デルタ": "德尔塔",
+    "イプシロン": "伊普西龙",
+    "ゼータ": "泽塔",
+    "イータ": "伊塔",
+    "シータ": "西塔",
+    "ラムダ": "拉姆达",
+    "ミュー": "缪",
+    "ニュー": "纽",
+    "クシー": "克西",
+    "オミクロン": "奥密克戎",
+    "パイ": "派",
+    "ロー": "罗",
+    "シグマ": "西格玛",
+    "タウ": "陶",
+    "ウプシロン": "玉普西龙",
+    "ファイ": "斐",
+    "カイ": "凯",
+    "プサイ": "普赛",
+    "オメガ": "欧米伽",
+}
+
+
 class PrescanWorker(QtCore.QThread):
     """
     Worker thread that performs pre-scanning of manga pages.
@@ -311,6 +337,7 @@ def prescan_for_glossary(
                                 _coerce_confidence(score),
                                 ner_conf_map.get(normalized_surface, 0.0),
                                 name.reading or "",
+                                name.pos or "",
                             )
         
         except Exception as e:
@@ -376,7 +403,12 @@ def prescan_for_glossary(
                 graph.add_context_sentence(canonical, ctx)
 
     candidate_count = len(candidate_stats)
-    graph, accepted_surfaces = _filter_graph_by_confidence(graph, candidate_stats, preserved_canonicals)
+    graph, accepted_surfaces = _filter_graph_by_confidence(
+        graph,
+        candidate_stats,
+        preserved_canonicals,
+        total_pages=total,
+    )
     accepted_count = len(accepted_surfaces)
     filtered_count = max(0, candidate_count - accepted_count)
 
@@ -424,13 +456,13 @@ def prescan_for_glossary(
             continue
         translated_name = str(char.get("translation") or "").strip()
         reading = str(char.get("reading", "")).strip()
-        aliases_raw = sorted(set(char.get("aliases", []) or []))
+        aliases_raw = set(char.get("aliases", []) or [])
+        aliases_raw.update(_honorific_aliases_for_canonical(canonical, reading, candidate_stats))
+        aliases_raw = sorted(aliases_raw)
         if not _looks_like_exportable_canonical(canonical, reading, translated_name):
             continue
-        if not translated_name and canonical not in preserved_canonicals:
-            continue
         if not translated_name and _is_all_kana_candidate(canonical):
-            if not _has_non_kana_alias(aliases_raw, canonical):
+            if not _has_non_kana_alias(aliases_raw, canonical) and not _direct_codename_translation(canonical, settings.target_lang):
                 continue
         alias_objs = []
         for alias in aliases_raw:
@@ -439,6 +471,11 @@ def prescan_for_glossary(
                 continue
             if not _looks_like_clean_name_surface(alias_source):
                 continue
+            if _is_katakana_only(canonical) and _is_katakana_only(alias_source):
+                alias_stats = candidate_stats.get(alias_source) or {}
+                alias_count = int(alias_stats.get("count", 0) or 0)
+                if len(alias_source) < 4 or alias_count < 2:
+                    continue
             alias_obj = _build_alias_object(
                 alias_source,
                 canonical,
@@ -582,6 +619,7 @@ def _update_candidate_stats(
     ocr_conf: float,
     ner_conf: float,
     reading: str,
+    pos: str = "",
 ) -> None:
     item = stats.setdefault(
         surface,
@@ -591,6 +629,7 @@ def _update_candidate_stats(
             "ocr_sum": 0.0,
             "ner_sum": 0.0,
             "reading": "",
+            "pos_tags": set(),
         },
     )
     item["count"] += 1
@@ -599,6 +638,8 @@ def _update_candidate_stats(
     item["ner_sum"] += _coerce_confidence(ner_conf)
     if reading and (not item["reading"] or len(reading) > len(item["reading"])):
         item["reading"] = reading
+    if pos:
+        item["pos_tags"].add(str(pos).strip())
 
 
 def _pick_character_canonical(char_data: dict) -> str:
@@ -704,6 +745,55 @@ def _has_honorific_suffix(text: str) -> bool:
     return False
 
 
+def _strip_honorific_suffix(text: str) -> str:
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    relaxed_variants = {
+        "さぁん": "さん",
+        "さあん": "さん",
+        "さーん": "さん",
+        "ちゃぁん": "ちゃん",
+        "ちゃあん": "ちゃん",
+        "ちゃーん": "ちゃん",
+        "くぅん": "くん",
+        "くうん": "くん",
+        "くーん": "くん",
+    }
+    relaxed = text
+    for variant, normalized in relaxed_variants.items():
+        if relaxed.endswith(variant):
+            relaxed = f"{relaxed[:-len(variant)]}{normalized}"
+            break
+    for suffix in ("さん", "くん", "ちゃん", "さま", "様", "先生", "先輩", "殿"):
+        if relaxed.endswith(suffix) and len(relaxed) > len(suffix):
+            return relaxed[: -len(suffix)]
+    return text
+
+
+def _honorific_aliases_for_canonical(canonical: str, reading: str, candidate_stats: dict) -> set[str]:
+    canonical = str(canonical or "").strip()
+    reading = str(reading or "").strip()
+    if not canonical:
+        return set()
+    aliases: set[str] = set()
+    for surface, stats in (candidate_stats or {}).items():
+        alias = str(surface or "").strip()
+        if not alias or alias == canonical:
+            continue
+        if not _has_honorific_suffix(alias):
+            continue
+        if _strip_honorific_suffix(alias) == canonical:
+            aliases.add(alias)
+            continue
+        alias_reading = ""
+        if isinstance(stats, dict):
+            alias_reading = str(stats.get("reading", "") or "").strip()
+        if reading and alias_reading and _strip_honorific_suffix(alias_reading) == reading:
+            aliases.add(alias)
+    return aliases
+
+
 def _is_japanese_word_char(ch: str) -> bool:
     if not ch:
         return False
@@ -802,10 +892,27 @@ def _looks_like_exportable_canonical(canonical: str, reading: str, translation: 
     return True
 
 
+def _direct_codename_translation(surface: str, target_lang: str) -> str:
+    if target_lang not in ["Simplified Chinese", "Traditional Chinese"]:
+        return ""
+    return str(_GREEK_CODENAME_MAP.get(str(surface or "").strip(), "")).strip()
+
+
 def _should_auto_translate_canonical(node) -> bool:
     canonical = str(getattr(node, "canonical", "") or "").strip()
     if not canonical or getattr(node, "translation", None):
         return False
+    if _direct_codename_translation(canonical, "Simplified Chinese"):
+        return True
+    pos_tags = getattr(node, "_prescan_pos_tags", set()) or set()
+    if _is_priority_codename(canonical, set(pos_tags)):
+        return True
+    if _is_small_batch_katakana_term(
+        canonical,
+        set(pos_tags),
+        getattr(node, "context_sentences", []) or [],
+    ):
+        return True
     if not _is_all_kana_candidate(canonical):
         return True
     return _has_non_kana_alias(getattr(node, "aliases", set()) or set(), canonical)
@@ -842,13 +949,197 @@ def _score_character_node(node, candidate_stats: dict) -> tuple[float, int, int,
     return score, total_count, page_count, avg_ocr, avg_ner
 
 
-def _should_keep_character(node, score: float, total_count: int, page_count: int, avg_ocr: float, avg_ner: float) -> bool:
+def _collect_node_pos_tags(node, candidate_stats: dict) -> set[str]:
+    tags = set()
+    for alias in getattr(node, "aliases", set()) or set():
+        stats = candidate_stats.get(alias) or {}
+        tags.update(str(tag).strip() for tag in stats.get("pos_tags", set()) if str(tag).strip())
+    return tags
+
+
+def _has_honorific_context(surface: str, contexts: list[str]) -> bool:
+    surface = str(surface or "").strip()
+    if not surface:
+        return False
+    honorifics = ("様", "さん", "くん", "ちゃん", "先生", "先輩", "殿", "君")
+    for sentence in contexts or []:
+        text = str(sentence or "")
+        if not text:
+            continue
+        for honorific in honorifics:
+            if f"{surface}{honorific}" in text:
+                return True
+    return False
+
+
+def _is_priority_codename(surface: str, pos_tags: set[str]) -> bool:
+    surface = str(surface or "").strip()
+    if not surface:
+        return False
+    return "白名单" in pos_tags
+
+
+def _has_entity_context(surface: str, contexts: list[str]) -> bool:
+    surface = str(surface or "").strip()
+    if not surface:
+        return False
+    left_markers = (
+        "聖地",
+        "王国",
+        "帝国",
+        "教団",
+        "組織",
+        "騎士",
+        "侯",
+        "家",
+        "団",
+        "隊",
+        "派",
+        "領",
+        "村",
+        "町",
+        "都",
+    )
+    right_markers = (
+        "教団",
+        "騎士",
+        "騎士団",
+        "王国",
+        "帝国",
+        "組織",
+        "団",
+        "隊",
+        "派",
+        "たち",
+        "達",
+        "様",
+        "さん",
+        "ちゃん",
+        "くん",
+    )
+    for sentence in contexts or []:
+        text = str(sentence or "")
+        if not text:
+            continue
+        start = 0
+        while True:
+            idx = text.find(surface, start)
+            if idx < 0:
+                break
+            left = text[:idx]
+            right = text[idx + len(surface) :]
+            if any(left.endswith(marker) for marker in left_markers):
+                return True
+            if any(right.startswith(marker) for marker in right_markers):
+                return True
+            start = idx + len(surface)
+    return False
+
+
+def _always_attached_entity_suffix(surface: str, contexts: list[str]) -> bool:
+    surface = str(surface or "").strip()
+    if not surface:
+        return False
+
+    right_markers = (
+        "教団",
+        "騎士団",
+        "騎士",
+        "王国",
+        "帝国",
+        "組織",
+        "団",
+        "隊",
+        "派",
+        "員",
+    )
+    hits = 0
+    attached = 0
+    for sentence in contexts or []:
+        text = str(sentence or "")
+        if not text:
+            continue
+        start = 0
+        while True:
+            idx = text.find(surface, start)
+            if idx < 0:
+                break
+            hits += 1
+            right = text[idx + len(surface) :]
+            if any(right.startswith(marker) for marker in right_markers):
+                attached += 1
+            start = idx + len(surface)
+    return hits > 0 and attached == hits
+
+
+def _is_small_batch_katakana_term(surface: str, pos_tags: set[str], contexts: list[str]) -> bool:
+    surface = str(surface or "").strip()
+    if not _is_katakana_only(surface):
+        return False
+    if _always_attached_entity_suffix(surface, contexts):
+        return False
+    if len(surface) >= 6 and _has_entity_context(surface, contexts):
+        return True
+    if len(surface) >= 5 and _has_entity_context(surface, contexts):
+        return True
+    if len(surface) >= 5 and any(tag in pos_tags for tag in {"白名单"}):
+        return True
+    return False
+
+
+def _should_keep_character(
+    node,
+    score: float,
+    total_count: int,
+    page_count: int,
+    avg_ocr: float,
+    avg_ner: float,
+    candidate_stats: dict,
+    total_pages: int = 0,
+) -> bool:
     canonical = str(getattr(node, "canonical", "") or "").strip()
     if not canonical:
         return False
+    reading = str(getattr(node, "canonical_reading", "") or "").strip()
+    contexts = getattr(node, "context_sentences", []) or []
+    pos_tags = _collect_node_pos_tags(node, candidate_stats)
+    small_batch = bool(total_pages) and total_pages <= 16
+    honorific_context = _has_honorific_context(canonical, contexts)
+    boundary_ratio = _context_boundary_ratio(canonical, contexts)
+    direct_codename = bool(_direct_codename_translation(canonical, "Simplified Chinese"))
+    priority_codename = _is_priority_codename(canonical, pos_tags)
+    chapter_katakana_term = _is_small_batch_katakana_term(canonical, pos_tags, contexts)
+
+    if _is_katakana_only(canonical) and _always_attached_entity_suffix(canonical, contexts):
+        return False
+    if _is_katakana_only(canonical) and direct_codename and boundary_ratio <= 0.0:
+        if not honorific_context and not _has_entity_context(canonical, contexts):
+            if total_count < 2 and page_count < 2:
+                return False
+    if canonical.endswith("的") and "白名单" not in pos_tags:
+        return False
+    if _is_cjk_term(canonical) and not _is_all_kana_candidate(reading):
+        if not priority_codename:
+            return False
+    if _is_katakana_only(canonical) and honorific_context and avg_ocr >= 0.45:
+        return True
+    if _is_katakana_only(canonical) and not priority_codename and not honorific_context:
+        if total_count < 2 and page_count < 2:
+            return False
+    if priority_codename and avg_ocr >= 0.45:
+        if honorific_context:
+            return True
+        if total_count >= 2 or page_count >= 2:
+            return True
+        if small_batch:
+            return True
+    if chapter_katakana_term and avg_ocr >= 0.40:
+        if total_count >= 2 or page_count >= 2:
+            return True
+        if small_batch:
+            return True
 
     if _is_loose_kana_candidate(canonical):
-        boundary_ratio = _context_boundary_ratio(canonical, getattr(node, "context_sentences", []) or [])
         has_honorific = _has_honorific_suffix(canonical)
 
         if len(canonical) <= 2 and not has_honorific:
@@ -872,12 +1163,12 @@ def _should_keep_character(node, score: float, total_count: int, page_count: int
         return True
     if avg_ner >= 0.82 and avg_ocr >= 0.40:
         return True
-    if _is_name_like(canonical) and score >= 0.45 and avg_ocr >= 0.65:
+    if _is_name_like(canonical) and not canonical.endswith("的") and score >= 0.45 and avg_ocr >= 0.65:
         return True
     return False
 
 
-def _filter_graph_by_confidence(graph, candidate_stats: dict, preserved_canonicals: set):
+def _filter_graph_by_confidence(graph, candidate_stats: dict, preserved_canonicals: set, total_pages: int = 0):
     from app.nlp.character_graph import CharacterGraph
 
     filtered_graph = CharacterGraph()
@@ -890,11 +1181,21 @@ def _filter_graph_by_confidence(graph, candidate_stats: dict, preserved_canonica
             keep = True
         else:
             score, total_count, page_count, avg_ocr, avg_ner = _score_character_node(node, candidate_stats)
-            keep = _should_keep_character(node, score, total_count, page_count, avg_ocr, avg_ner)
+            keep = _should_keep_character(
+                node,
+                score,
+                total_count,
+                page_count,
+                avg_ocr,
+                avg_ner,
+                candidate_stats,
+                total_pages=total_pages,
+            )
 
         if not keep:
             continue
 
+        pos_tags = _collect_node_pos_tags(node, candidate_stats)
         filtered_graph.add_character(
             canonical=canonical,
             reading=node.canonical_reading,
@@ -902,6 +1203,8 @@ def _filter_graph_by_confidence(graph, candidate_stats: dict, preserved_canonica
             gender=node.gender,
             info=node.info,
         )
+        if canonical in filtered_graph._nodes:
+            setattr(filtered_graph._nodes[canonical], "_prescan_pos_tags", pos_tags)
         kept_canonicals.add(canonical)
         for alias in node.aliases:
             if alias in candidate_stats:
@@ -967,6 +1270,22 @@ def _translate_graph_nodes_with_active_client(
         return 0
 
     translated_count = 0
+    for term in terms_to_translate:
+        direct = _direct_codename_translation(term, settings.target_lang)
+        if not direct:
+            continue
+        if term in graph._nodes:
+            graph._nodes[term].translation = direct
+            translated_count += 1
+
+    terms_to_translate = [
+        node.canonical
+        for node in graph._nodes.values()
+        if _should_auto_translate_canonical(node)
+    ]
+    if not terms_to_translate:
+        return translated_count
+
     used_batch = False
     if hasattr(translator, "translate_glossary"):
         try:
@@ -1125,7 +1444,11 @@ def _resolve_alias_translation(
         heuristic_pattern = pattern
         if pattern in {"plain", "", "canonical"} and base_reading and segment_reading and base_reading != segment_reading:
             heuristic_pattern = "chan"
-        heuristic = _heuristic_alias_target(segment_target, heuristic_pattern)
+        heuristic = _heuristic_alias_target(
+            segment_target,
+            heuristic_pattern,
+            settings.target_lang if settings else "Simplified Chinese",
+        )
         if heuristic:
             return _sanitize_glossary_target(heuristic, alias_source, settings.target_lang if settings else "Simplified Chinese")
 
@@ -1257,10 +1580,13 @@ def _translate_alias_with_active_client(
         return ""
 
 
-def _heuristic_alias_target(base_target: str, pattern: str) -> str:
+def _heuristic_alias_target(base_target: str, pattern: str, target_lang: str = "") -> str:
     base_target = str(base_target or "").strip()
     if not base_target:
         return ""
+    if pattern == "chan" and target_lang in {"Simplified Chinese", "Traditional Chinese"}:
+        suffix = "醬" if target_lang == "Traditional Chinese" else "酱"
+        return f"{base_target}{suffix}"
     if pattern in {"chan", "tan", "cchi", "rin", "pyon"}:
         if len(base_target) <= 2:
             return f"小{base_target}"
@@ -1441,12 +1767,27 @@ def _clean_name_translation(translation: str, source: str) -> str:
     """
     if not translation:
         return ""
-        
-    cleaned = translation.strip()
-    
-    # Take first line only
-    if "\n" in cleaned:
-        cleaned = cleaned.split("\n")[0].strip()
+
+    raw_text = translation.strip()
+    cleaned = raw_text
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    label_markers = ("译名", "譯名", "翻译", "翻譯", "中文", "人名", "name", "translation")
+
+    for line in lines:
+        match = re.match(r"^\s*([^:：]{1,12})\s*[:：]\s*(.+?)\s*$", line, flags=re.IGNORECASE)
+        if not match:
+            continue
+        label = str(match.group(1) or "").strip().lower()
+        value = str(match.group(2) or "").strip()
+        if not value:
+            continue
+        if any(marker.lower() in label for marker in label_markers):
+            cleaned = value
+            break
+
+    # Fallback to the first non-empty line if no label-based extraction matched.
+    if cleaned == raw_text and lines:
+        cleaned = lines[0]
     
     # Remove leading context markers (LLM sometimes echoes "- context" lines)
     while cleaned.startswith("-") or cleaned.startswith("*") or cleaned.startswith("•"):

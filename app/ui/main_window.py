@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Main window UI."""
+import importlib.util
 import os
 from PySide6 import QtCore, QtGui, QtWidgets
 from app.config.defaults import get_defaults
@@ -110,7 +111,7 @@ class MainWindow(QtWidgets.QMainWindow):
             missing.append("comic_text_detector")
         if not downloader.check_manga_ocr(models_dir):
             missing.append("manga_ocr")
-        if not downloader.check_big_lama(models_dir):
+        if self._ai_inpaint_runtime_available() and not downloader.check_big_lama(models_dir):
             missing.append("big_lama")
         if not downloader.check_ner(models_dir):
             missing.append("ner")
@@ -128,6 +129,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._run_model_download(missing) # Pass list
             else:
                 self.status_bar.showMessage("Warning: Models missing.", 5000)
+
+    def _ai_inpaint_runtime_available(self) -> bool:
+        try:
+            return (
+                importlib.util.find_spec("app.third_party.simple_lama_inpainting") is not None
+                or importlib.util.find_spec("simple_lama_inpainting") is not None
+            )
+        except Exception:
+            return False
 
     def _run_model_download(self, model_keys):
         """Run a managed download dialog."""

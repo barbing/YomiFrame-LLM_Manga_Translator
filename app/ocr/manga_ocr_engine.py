@@ -4,8 +4,22 @@ from __future__ import annotations
 import os
 import sys
 import ctypes
+import shutil
+import tempfile
+import logging
 from pathlib import Path
-from app.models.resolution import resolve_manga_ocr_local_dir, resolve_manga_ocr_system_ref
+from app.models.resolution import models_root, resolve_manga_ocr_local_dir, resolve_manga_ocr_system_ref
+
+
+logger = logging.getLogger(__name__)
+
+_MANGA_OCR_AUX_FILES = (
+    "config.json",
+    "preprocessor_config.json",
+    "special_tokens_map.json",
+    "tokenizer_config.json",
+    "vocab.txt",
+)
 
 
 def _add_dll_search_paths() -> None:
@@ -49,6 +63,102 @@ def ensure_torch_runtime_ready():
     return torch
 
 
+def _torch_version_tuple() -> tuple[int, int]:
+    torch = ensure_torch_runtime_ready()
+    raw = str(getattr(torch, "__version__", "0")).split("+", 1)[0]
+    parts = raw.split(".")
+    major = int(parts[0]) if parts and parts[0].isdigit() else 0
+    minor_text = parts[1] if len(parts) > 1 else "0"
+    digits = "".join(ch for ch in minor_text if ch.isdigit())
+    minor = int(digits) if digits else 0
+    return major, minor
+
+
+def _torch_needs_manga_ocr_safetensors() -> bool:
+    return _torch_version_tuple() < (2, 6)
+
+
+def _has_manga_ocr_safetensors(model_dir: str) -> bool:
+    if not model_dir or not os.path.isdir(model_dir):
+        return False
+    if not os.path.isfile(os.path.join(model_dir, "model.safetensors")):
+        return False
+    return all(os.path.isfile(os.path.join(model_dir, name)) for name in _MANGA_OCR_AUX_FILES)
+
+
+def _prepare_manga_ocr_safetensors_dir(model_dir: str) -> str:
+    """
+    Create a safetensors-compatible local MangaOCR directory for torch<2.6.
+
+    transformers 4.57+ blocks loading `pytorch_model.bin` through `from_pretrained`
+    when torch<2.6 because of CVE-2025-32434. We keep the environment unchanged
+    and prepare a trusted local safetensors copy once instead.
+    """
+    if not model_dir or not os.path.isdir(model_dir):
+        return model_dir
+    if _has_manga_ocr_safetensors(model_dir):
+        return model_dir
+    if not _torch_needs_manga_ocr_safetensors():
+        return model_dir
+
+    source_bin = os.path.join(model_dir, "pytorch_model.bin")
+    if not os.path.isfile(source_bin):
+        return model_dir
+
+    compat_root = os.path.join(models_root(), "manga-ocr-safe")
+    compat_dir = os.path.join(compat_root, Path(model_dir).name or "default")
+    if _has_manga_ocr_safetensors(compat_dir):
+        return compat_dir
+
+    os.makedirs(compat_root, exist_ok=True)
+    temp_dir = tempfile.mkdtemp(prefix=f"{Path(model_dir).name}-", dir=compat_root)
+    try:
+        torch = ensure_torch_runtime_ready()
+        from manga_ocr.ocr import MangaOcrModel
+        from transformers import VisionEncoderDecoderConfig
+
+        logger.info(
+            "Preparing MangaOCR safetensors compatibility copy because torch %s is below 2.6.",
+            getattr(torch, "__version__", "unknown"),
+        )
+        state_dict = torch.load(source_bin, map_location="cpu", weights_only=True)
+        config = VisionEncoderDecoderConfig.from_pretrained(model_dir)
+        model = MangaOcrModel(config)
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing:
+            raise RuntimeError(f"MangaOCR safetensors conversion missing keys: {missing[:5]}")
+        if unexpected:
+            logger.warning("MangaOCR safetensors conversion ignored unexpected keys: %s", unexpected[:5])
+        model.save_pretrained(temp_dir, safe_serialization=True)
+
+        for name in os.listdir(model_dir):
+            src = os.path.join(model_dir, name)
+            dst = os.path.join(temp_dir, name)
+            if not os.path.isfile(src):
+                continue
+            if name in {"pytorch_model.bin", "model.safetensors"}:
+                continue
+            if not os.path.exists(dst):
+                shutil.copy2(src, dst)
+
+        marker_path = os.path.join(temp_dir, ".prepared_from")
+        with open(marker_path, "w", encoding="utf-8") as fh:
+            fh.write(model_dir)
+
+        if os.path.isdir(compat_dir):
+            shutil.rmtree(compat_dir, ignore_errors=True)
+        shutil.move(temp_dir, compat_dir)
+        temp_dir = ""
+        logger.info("Prepared MangaOCR safetensors compatibility copy at %s", compat_dir)
+        return compat_dir
+    except Exception:
+        logger.exception("Failed to prepare MangaOCR safetensors compatibility copy.")
+        raise
+    finally:
+        if temp_dir and os.path.isdir(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def resolve_manga_ocr_model_ref() -> str | None:
     """Resolve the best MangaOCR model reference: system cache, local path, or None."""
     return resolve_manga_ocr_system_ref() or resolve_manga_ocr_local_dir()
@@ -62,6 +172,8 @@ def create_manga_ocr_instance(use_gpu: bool):
         raise RuntimeError(f"Failed to import manga-ocr: {exc}") from exc
 
     model_ref = resolve_manga_ocr_model_ref()
+    if model_ref and os.path.isdir(model_ref):
+        model_ref = _prepare_manga_ocr_safetensors_dir(model_ref)
     if model_ref:
         return MangaOcr(pretrained_model_name_or_path=model_ref, force_cpu=not use_gpu)
     # Final fallback (library default behavior, may download)

@@ -2,6 +2,7 @@
 """Style guide JSON helpers."""
 from __future__ import annotations
 import json
+import os
 from typing import Any, Dict
 import logging
 
@@ -31,6 +32,9 @@ def load_style_guide(path: str) -> Dict[str, Any]:
 
 def save_style_guide(path: str, data: Dict[str, Any]) -> None:
     try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:

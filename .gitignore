@@ -37,6 +37,11 @@ dist/
 # Local test code
 tests/
 
+# Local scripts
+Scripts/
+
 # Documentation
 *.md
 !README.md
+!TECHNICAL.md
+!BUILD_EXE.md
