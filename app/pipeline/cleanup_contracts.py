@@ -230,6 +230,14 @@ class CleanupMask:
     sourceglyph_missing_component_ids: list[str] = field(default_factory=list)
     ownership_projection_failure_reason: str = ""
     effective_component_coverage_ratio: float | None = None
+    owned_segmentation_pixels: int | None = None
+    executable_foreground_pixels: int | None = None
+    committed_cleanup_mask_pixels: int | None = None
+    owned_segmentation_to_executable_ratio: float | None = None
+    owned_segmentation_to_commit_ratio: float | None = None
+    ready_but_sparse_violation: bool = False
+    sourceglyph_executable_influence_detected: bool = False
+    dense_contract_override_detected: bool = False
     foreground_mask: Any = field(default=None, repr=False, compare=False)
     erase_mask: Any = field(default=None, repr=False, compare=False)
 

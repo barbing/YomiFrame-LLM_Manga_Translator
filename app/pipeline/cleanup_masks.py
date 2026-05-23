@@ -49,6 +49,8 @@ MAX_CAPTION_FLAT_SMALL_EXCEPTION_ERASE_ALLOWED_RATIO = 0.08
 MIN_SEGMENTATION_READY_PIXELS = 32
 MIN_SEGMENTATION_READY_COVERAGE_RATIO = 0.05
 MIN_SEGMENTATION_READY_SMALL_COVERAGE_RATIO = 0.035
+MIN_OWNED_SEGMENTATION_TO_EXECUTABLE_RATIO = 0.75
+MIN_OWNED_SEGMENTATION_TO_EXECUTABLE_SMALL_RATIO = 0.55
 FRAGMENT_ONLY_MAX_PIXELS = 320
 FRAGMENT_ONLY_MAX_COVERAGE_RATIO = 0.025
 PROTECTED_DOMINANT_OVERLAP_RATIO = 0.35
@@ -367,7 +369,7 @@ def build_cleanup_masks(
                 rejected_records.append({**base, "reason": allowed_rejection, "allowed_area": allowed})
                 continue
 
-            source_seed_foreground, source_seed_erase, foreground_source_keys, erase_source_keys, consumed_source_ids, missing_foreground_source_ids, used_transitional_erase = _union_masks_from_evidence(
+            source_seed_foreground, _source_seed_erase, foreground_source_keys, erase_source_keys, consumed_source_ids, missing_foreground_source_ids, used_transitional_erase = _union_masks_from_evidence(
                 matched,
                 allowed=allowed,
             )
@@ -422,7 +424,6 @@ def build_cleanup_masks(
                     source_np=source_np,
                     source_error=source_error,
                     seed_foreground=source_seed_foreground,
-                    seed_erase=source_seed_erase if source_seed_erase is not None else source_seed_foreground,
                     allowed=allowed,
                     matched=matched,
                 )
@@ -529,11 +530,10 @@ def build_cleanup_masks(
                 )
                 continue
 
-            seed_source = "source_glyph_transitional_erase_mask_evidence" if used_transitional_erase else "source_glyph_foreground_evidence"
             mask_source = (
                 "cleanup_mask_from_text_foreground_segmentation"
                 if str(effective.audit.get("mask_completion_method") or "").startswith("text_foreground_segmentation")
-                else f"cleanup_effective_mask_from_{seed_source}"
+                else "cleanup_mask_diagnostic_non_segmentation_fallback"
             )
             seed_method = _mask_method_union(matched, erase_source_keys or foreground_source_keys)
             completion_method = str(effective.audit.get("mask_completion_method") or "")
@@ -623,6 +623,16 @@ def build_cleanup_masks(
                 sourceglyph_missing_component_ids=effective.audit.get("sourceglyph_missing_component_ids", []),
                 ownership_projection_failure_reason=effective.audit.get("ownership_projection_failure_reason", ""),
                 effective_component_coverage_ratio=effective.audit.get("effective_component_coverage_ratio"),
+                owned_segmentation_pixels=effective.audit.get("owned_segmentation_pixels"),
+                executable_foreground_pixels=effective.audit.get("executable_foreground_pixels"),
+                committed_cleanup_mask_pixels=effective.audit.get("committed_cleanup_mask_pixels"),
+                owned_segmentation_to_executable_ratio=effective.audit.get("owned_segmentation_to_executable_ratio"),
+                owned_segmentation_to_commit_ratio=effective.audit.get("owned_segmentation_to_commit_ratio"),
+                ready_but_sparse_violation=bool(effective.audit.get("ready_but_sparse_violation", False)),
+                sourceglyph_executable_influence_detected=bool(
+                    effective.audit.get("sourceglyph_executable_influence_detected", False)
+                ),
+                dense_contract_override_detected=bool(effective.audit.get("dense_contract_override_detected", False)),
                 foreground_mask=foreground.copy(),
                 erase_mask=erase.copy(),
             )
@@ -1009,6 +1019,11 @@ def _build_component_projected_text_mask(
     if foreground is not None:
         foreground = _clip_mask_to_bbox(foreground, allowed)
     foreground_pixels = int(np.count_nonzero(foreground > 0)) if foreground is not None else 0
+    owned_segmentation_pixels = int(projection["owned_component_pixel_count"])
+    owned_to_executable_ratio = round(
+        float(foreground_pixels) / float(max(1, owned_segmentation_pixels)),
+        4,
+    ) if owned_segmentation_pixels > 0 else 0.0
     before_binding = int(np.count_nonzero(_clip_mask_to_bbox((segmentation_mask > 0).astype(np.uint8), allowed)))
     bbox = _mask_bbox(foreground) if foreground is not None else None
     sourceglyph_overlap, sourceglyph_ratio, segmentation_outside_sourceglyph = _sourceglyph_overlap_metrics(
@@ -1052,17 +1067,32 @@ def _build_component_projected_text_mask(
             protected_overlap_pixels=int(projection["protected_component_pixel_count"]),
             owner_pixels=max(1, int(projection["owned_component_pixel_count"]) + int(projection["protected_component_pixel_count"])),
         )
+        owned_ratio_reason = _owned_segmentation_executable_coverage_reason(
+            ratio=owned_to_executable_ratio,
+            owned_pixels=owned_segmentation_pixels,
+            foreground_pixels=foreground_pixels,
+            job=job,
+        )
         unsafe_reason = _segmentation_foreground_unsafe_reason(foreground, allowed, job)
-        if coverage_reason or unsafe_reason or ambiguous_ids or unowned_ids:
+        if coverage_reason or owned_ratio_reason or unsafe_reason or ambiguous_ids or unowned_ids:
             status = "cleanup_mask_partial_owned_components"
-            failure_reason = coverage_reason or unsafe_reason or "cleanup_mask_partial_owned_components"
-            rejected = bool(coverage_reason or unsafe_reason)
+            failure_reason = coverage_reason or owned_ratio_reason or unsafe_reason or "cleanup_mask_partial_owned_components"
+            rejected = bool(coverage_reason or owned_ratio_reason or unsafe_reason)
 
     seed_pixels = int(np.count_nonzero(seed_foreground > 0)) if seed_foreground is not None else 0
     erase = None
     if foreground is not None and foreground_pixels > 0:
-        seed_erase = seed_foreground if seed_foreground is not None else foreground
-        erase = _effective_erase_from_foreground(foreground, seed_erase, allowed, job)
+        erase = _effective_erase_from_foreground(foreground, allowed, job)
+    sourceglyph_executable_influence_detected = False
+    ready_but_sparse_violation = bool(
+        status == "cleanup_mask_ready_from_owned_segmentation_components"
+        and _owned_segmentation_executable_coverage_reason(
+            ratio=owned_to_executable_ratio,
+            owned_pixels=owned_segmentation_pixels,
+            foreground_pixels=foreground_pixels,
+            job=job,
+        )
+    )
     audit = {
         **base_audit,
         "seed_foreground_pixels": seed_pixels,
@@ -1086,7 +1116,7 @@ def _build_component_projected_text_mask(
         "segmentation_mask_failure_reason": failure_reason if status != "cleanup_mask_ready_from_owned_segmentation_components" else "",
         "segmentation_binding_method": "segmentation_component_ownership_projection",
         "segmentation_pixels_before_binding": before_binding,
-        "segmentation_pixels_after_owner_clip": int(projection["owned_component_pixel_count"]),
+        "segmentation_pixels_after_owner_clip": owned_segmentation_pixels,
         "segmentation_pixels_after_protection_subtract": foreground_pixels,
         "protected_overlap_pixels": int(projection["protected_component_pixel_count"]),
         "sourceglyph_overlap_pixels": sourceglyph_overlap,
@@ -1099,7 +1129,7 @@ def _build_component_projected_text_mask(
         "protected_component_ids": protected_ids,
         "ambiguous_component_ids": ambiguous_ids,
         "unowned_component_ids": unowned_ids,
-        "owned_component_pixel_count": int(projection["owned_component_pixel_count"]),
+        "owned_component_pixel_count": owned_segmentation_pixels,
         "protected_component_pixel_count": int(projection["protected_component_pixel_count"]),
         "ambiguous_component_pixel_count": int(projection["ambiguous_component_pixel_count"]),
         "sourceglyph_overlap_component_ids": sourceglyph_overlap_ids,
@@ -1107,6 +1137,14 @@ def _build_component_projected_text_mask(
         "ownership_projection_failure_reason": failure_reason,
         "effective_component_coverage_ratio": coverage_ratio,
         "missing_source_glyph_mask_ids": list(missing_source_glyph_mask_ids or []),
+        "owned_segmentation_pixels": owned_segmentation_pixels,
+        "executable_foreground_pixels": foreground_pixels,
+        "committed_cleanup_mask_pixels": None,
+        "owned_segmentation_to_executable_ratio": owned_to_executable_ratio,
+        "owned_segmentation_to_commit_ratio": None,
+        "ready_but_sparse_violation": ready_but_sparse_violation,
+        "sourceglyph_executable_influence_detected": sourceglyph_executable_influence_detected,
+        "dense_contract_override_detected": False,
     }
     return _EffectiveMaskBuild(
         foreground=foreground,
@@ -1296,8 +1334,7 @@ def _build_segmentation_text_mask(
             },
             rejected=True,
         )
-    erase_seed = np.zeros_like(foreground, dtype=np.uint8)
-    erase = _effective_erase_from_foreground(foreground, erase_seed, allowed, job)
+    erase = _effective_erase_from_foreground(foreground, allowed, job)
     if protected_mask is not None:
         erase = np.where(protected_mask > 0, 0, erase).astype(np.uint8)
     audit = _effective_audit(
@@ -1332,6 +1369,14 @@ def _build_segmentation_text_mask(
             "segmentation_outside_sourceglyph_pixels": segmentation_outside_sourceglyph,
             "effective_coverage_ratio": audit.get("text_block_coverage_estimate"),
             "effective_coverage_status": "effective_coverage_ready",
+            "owned_segmentation_pixels": after_owner,
+            "executable_foreground_pixels": after_protection,
+            "committed_cleanup_mask_pixels": None,
+            "owned_segmentation_to_executable_ratio": round(float(after_protection) / float(max(1, after_owner)), 4),
+            "owned_segmentation_to_commit_ratio": None,
+            "ready_but_sparse_violation": False,
+            "sourceglyph_executable_influence_detected": False,
+            "dense_contract_override_detected": False,
         },
         rejected=False,
     )
@@ -1927,6 +1972,33 @@ def _segmentation_effective_coverage_reason(
     return ""
 
 
+def _owned_segmentation_executable_coverage_reason(
+    *,
+    ratio: float,
+    owned_pixels: int,
+    foreground_pixels: int,
+    job: CleanupJob,
+) -> str:
+    if owned_pixels <= 0:
+        return ""
+    cleanup_value = _enum_value(getattr(job, "cleanup_class", ""))
+    small_or_glyph_local = cleanup_value in {
+        CleanupClass.SMALL_REACTION.value,
+        CleanupClass.SIDE_CAPTION_GLYPH_LOCAL.value,
+        CleanupClass.TITLE_OR_SIGN.value,
+    }
+    min_ratio = (
+        MIN_OWNED_SEGMENTATION_TO_EXECUTABLE_SMALL_RATIO
+        if small_or_glyph_local
+        else MIN_OWNED_SEGMENTATION_TO_EXECUTABLE_RATIO
+    )
+    if foreground_pixels < MIN_SEGMENTATION_READY_PIXELS:
+        return "effective_mask_fragment_only"
+    if ratio < min_ratio:
+        return "effective_mask_incomplete_under_coverage"
+    return ""
+
+
 def _expand_bbox(bbox: list[int], margin: int) -> list[int]:
     return [
         int(bbox[0]) - margin,
@@ -2066,12 +2138,10 @@ def _build_effective_text_mask(
     source_np: np.ndarray | None,
     source_error: str,
     seed_foreground: np.ndarray,
-    seed_erase: np.ndarray,
     allowed: list[int],
     matched: Sequence[_SourceEvidence],
 ) -> _EffectiveMaskBuild:
     seed = _clip_mask_to_bbox((seed_foreground > 0).astype(np.uint8), allowed)
-    seed_erase = _clip_mask_to_bbox((seed_erase > 0).astype(np.uint8), allowed)
     seed_pixels = int(np.count_nonzero(seed))
     seed_stats = _component_stats(seed)
     seed_bbox = _mask_bbox(seed)
@@ -2110,8 +2180,7 @@ def _build_effective_text_mask(
 
     suspect_reason = _seed_effective_mask_suspect_reason(seed, allowed, job)
     if source_np is None:
-        erase = seed_erase if int(np.count_nonzero(seed_erase)) > 0 else seed.copy()
-        erase = _effective_erase_from_foreground(seed, erase, allowed, job)
+        erase = _effective_erase_from_foreground(seed, allowed, job)
         audit = _effective_audit(
             seed=seed,
             completed=seed,
@@ -2129,16 +2198,12 @@ def _build_effective_text_mask(
             erase=erase,
             status=(
                 "effective_mask_failed_insufficient_evidence"
-                if rejected
-                else "effective_mask_ready_with_warning"
             ),
             failure_reason=(
                 "effective_mask_failed_insufficient_evidence"
-                if rejected
-                else "source_image_unavailable_seed_used"
             ),
             audit={**base_audit, **audit},
-            rejected=rejected,
+            rejected=True,
         )
 
     analysis_scope = _analysis_scope_bbox(seed_bbox, allowed, job, suspect=bool(suspect_reason))
@@ -2150,7 +2215,7 @@ def _build_effective_text_mask(
         job=job,
     )
     if reconstructed is None or int(np.count_nonzero(reconstructed)) <= 0:
-        erase = _effective_erase_from_foreground(seed, seed_erase, allowed, job)
+        erase = _effective_erase_from_foreground(seed, allowed, job)
         audit = _effective_audit(
             seed=seed,
             completed=seed,
@@ -2169,16 +2234,12 @@ def _build_effective_text_mask(
             erase=erase,
             status=(
                 "effective_mask_failed_no_text_strokes_found"
-                if rejected
-                else "effective_mask_ready_with_warning"
             ),
             failure_reason=(
                 "effective_mask_failed_no_text_strokes_found"
-                if rejected
-                else "effective_mask_reconstruction_no_text_strokes_seed_used"
             ),
             audit={**base_audit, **audit, **reconstruction_audit},
-            rejected=rejected,
+            rejected=True,
         )
 
     completed = np.maximum(seed, reconstructed.astype(np.uint8))
@@ -2187,7 +2248,7 @@ def _build_effective_text_mask(
     completed = _clip_mask_to_bbox(completed, allowed)
     unsafe_reason = _completed_mask_unsafe_reason(completed, allowed, job)
     if unsafe_reason:
-        erase = _effective_erase_from_foreground(seed, seed_erase, allowed, job)
+        erase = _effective_erase_from_foreground(seed, allowed, job)
         audit = _effective_audit(
             seed=seed,
             completed=completed,
@@ -2206,15 +2267,13 @@ def _build_effective_text_mask(
             erase=erase,
             status=(
                 "effective_mask_failed_unsafe_background_capture"
-                if rejected
-                else "effective_mask_ready_with_warning"
             ),
-            failure_reason=unsafe_reason if rejected else f"effective_mask_warning_{unsafe_reason}",
+            failure_reason=unsafe_reason,
             audit={**base_audit, **audit},
-            rejected=rejected,
+            rejected=True,
         )
 
-    erase = _effective_erase_from_foreground(completed, seed_erase, allowed, job)
+    erase = _effective_erase_from_foreground(completed, allowed, job)
     recovered_pixels = int(np.count_nonzero(completed)) - seed_pixels
     method = (
         "local_text_stroke_reconstruction"
@@ -2232,20 +2291,13 @@ def _build_effective_text_mask(
         rejected_reasons=list(reconstruction_audit.get("rejected_component_reasons") or []),
         recovered_count=int(reconstruction_audit.get("recovered_component_count") or 0),
     )
-    status = (
-        "effective_mask_reconstructed_from_local_text_area"
-        if method == "local_text_stroke_reconstruction"
-        else "effective_mask_ready"
-    )
-    if suspect_reason and method != "local_text_stroke_reconstruction":
-        status = "effective_mask_ready_with_warning"
     return _EffectiveMaskBuild(
         foreground=completed,
         erase=erase,
-        status=status,
-        failure_reason="" if status != "effective_mask_ready_with_warning" else suspect_reason,
+        status="cleanup_mask_unresolved_after_segmentation",
+        failure_reason=suspect_reason or "local_contrast_fallback_diagnostic_only",
         audit={**base_audit, **audit},
-        rejected=False,
+        rejected=True,
     )
 
 
@@ -2571,12 +2623,10 @@ def _completed_mask_unsafe_reason(mask: np.ndarray, allowed: list[int], job: Cle
 
 def _effective_erase_from_foreground(
     foreground: np.ndarray,
-    seed_erase: np.ndarray,
     allowed: list[int],
     job: CleanupJob,
 ) -> np.ndarray:
     foreground = _clip_mask_to_bbox((foreground > 0).astype(np.uint8), allowed)
-    seed_erase = _clip_mask_to_bbox((seed_erase > 0).astype(np.uint8), allowed)
     cleanup_value = _enum_value(getattr(job, "cleanup_class", ""))
     speech_like = cleanup_value in {
         CleanupClass.SPEECH_FLAT_BUBBLE.value,
@@ -2589,7 +2639,6 @@ def _effective_erase_from_foreground(
         erase = cv2.dilate(foreground, kernel, iterations=iterations).astype(np.uint8)
     else:
         erase = _binary_dilate(foreground, radius=1)
-    erase = np.maximum(erase, seed_erase)
     return _clip_mask_to_bbox(erase.astype(np.uint8), allowed)
 
 

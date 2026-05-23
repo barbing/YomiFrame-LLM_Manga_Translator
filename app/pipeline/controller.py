@@ -710,11 +710,7 @@ class PipelineWorker(QtCore.QThread):
                         elapsed_ms=round((time.time() - render_eligibility_start) * 1000.0, 3),
                     )
                     cleanup_plan_start = time.time()
-                    cleanup_plan_mask_contracts = (
-                        cleanup_dense_mask_contract_result
-                        if len(getattr(cleanup_dense_mask_contract_result, "masks", []) or []) > 0
-                        else cleanup_mask_contract_result
-                    )
+                    cleanup_plan_mask_contracts = cleanup_mask_contract_result
                     _page014_timeout_checkpoint(
                         "cleanup_plan_build",
                         "start",
@@ -964,6 +960,7 @@ class PipelineWorker(QtCore.QThread):
                             debug_context["cleanup_job_contracts"] = cleanup_job_contract_result.to_audit_dict()
                             debug_context["cleanup_mask_contracts"] = cleanup_mask_contract_result.to_audit_dict()
                             debug_context["cleanup_dense_mask_contracts"] = cleanup_dense_mask_contract_result.to_audit_dict()
+                            debug_context["cleanup_dense_contract_override_detected"] = False
                             debug_context["render_eligibility_contracts"] = render_eligibility_contract_result.to_audit_dict()
                             debug_context["cleanup_plan_contracts"] = cleanup_plan_contract_result.to_audit_dict()
                             debug_context["cleanup_backend_inventory"] = cleanup_plan_contract_result.backend_inventory

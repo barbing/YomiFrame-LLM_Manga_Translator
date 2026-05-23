@@ -498,8 +498,24 @@ def build_cleanup_plans(
                         "target_region_ids": list(job.target_region_ids or []),
                         "allowed_area": list(cleanup_mask.allowed_area or []),
                         "renderer_consumed_by_phase": "phase5_phase6_cleanup_contract_status_only",
-                        "eligibility_reason": "cleanup_unit_sourceglyph_foreground_mask_contract",
+                        "eligibility_reason": "cleanup_unit_segmentation_foreground_mask_contract",
                         "mask_contract_exception_reason": cleanup_mask.mask_contract_exception_reason,
+                        "owned_segmentation_pixels": getattr(cleanup_mask, "owned_segmentation_pixels", None),
+                        "executable_foreground_pixels": getattr(cleanup_mask, "executable_foreground_pixels", None),
+                        "owned_segmentation_to_executable_ratio": getattr(
+                            cleanup_mask,
+                            "owned_segmentation_to_executable_ratio",
+                            None,
+                        ),
+                        "ready_but_sparse_violation": bool(
+                            getattr(cleanup_mask, "ready_but_sparse_violation", False)
+                        ),
+                        "sourceglyph_executable_influence_detected": bool(
+                            getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)
+                        ),
+                        "dense_contract_override_detected": bool(
+                            getattr(cleanup_mask, "dense_contract_override_detected", False)
+                        ),
                         "pre_execution_risk_reason": mask_rejection or flat_rejection,
                         "partition_strategy_required": bool(mask_rejection),
                         "flatness_metrics": flat_metrics,
@@ -1659,6 +1675,16 @@ def commit_cleanup_runtime_results_to_working_image(
         proof = proof_by_result_id.get(result_id)
         status = status_by_result_id.get(result_id, {})
         region_id = str(cleanup_result.region_id or status.get("region_id") or "")
+        result_backend_parameters = (
+            cleanup_result.backend_parameters
+            if isinstance(getattr(cleanup_result, "backend_parameters", None), Mapping)
+            else {}
+        )
+        owned_segmentation_pixels = _int_or_none(result_backend_parameters.get("owned_segmentation_pixels"))
+        executable_foreground_pixels = _int_or_none(result_backend_parameters.get("executable_foreground_pixels"))
+        owned_to_executable_ratio = _float_or_none(
+            result_backend_parameters.get("owned_segmentation_to_executable_ratio")
+        )
         base = {
             "page_id": page_id,
             "region_id": region_id,
@@ -1672,6 +1698,16 @@ def commit_cleanup_runtime_results_to_working_image(
             "runtime_cleaned_image_ref": cleanup_result.cleaned_image_ref or "",
             "runtime_diff_ref": cleanup_result.diff_ref or "",
             "runtime_mask_ref": cleanup_result.mask_ref or "",
+            "owned_segmentation_pixels": owned_segmentation_pixels,
+            "executable_foreground_pixels": executable_foreground_pixels,
+            "owned_segmentation_to_executable_ratio": owned_to_executable_ratio,
+            "committed_cleanup_mask_pixels": 0,
+            "owned_segmentation_to_commit_ratio": 0.0 if owned_segmentation_pixels is not None else None,
+            "ready_but_sparse_violation": bool(result_backend_parameters.get("ready_but_sparse_violation", False)),
+            "sourceglyph_executable_influence_detected": bool(
+                result_backend_parameters.get("sourceglyph_executable_influence_detected", False)
+            ),
+            "dense_contract_override_detected": bool(result_backend_parameters.get("dense_contract_override_detected", False)),
         }
         failure_reason = _upstream_commit_block_reason(cleanup_result, proof, status, excluded)
         if failure_reason:
@@ -1746,13 +1782,21 @@ def commit_cleanup_runtime_results_to_working_image(
             continue
         proof_metrics = proof.metrics if proof is not None and isinstance(proof.metrics, Mapping) else {}
         degraded_warning_commit = _proof_allows_degraded_commit(proof, cleanup_result, status)
+        committed_cleanup_mask_pixels = int(np.count_nonzero(commit_mask)) if commit_mask is not None else 0
+        owned_segmentation_to_commit_ratio = (
+            round(float(committed_cleanup_mask_pixels) / float(max(1, owned_segmentation_pixels)), 4)
+            if owned_segmentation_pixels is not None
+            else None
+        )
         commit_records.append(
             {
                 **base,
                 "cleanup_applied_upstream": True,
                 "cleanup_committed_to_working_image": True,
                 "committed_pixel_count": committed_pixels,
-                "commit_mask_pixels": int(np.count_nonzero(commit_mask)) if commit_mask is not None else 0,
+                "commit_mask_pixels": committed_cleanup_mask_pixels,
+                "committed_cleanup_mask_pixels": committed_cleanup_mask_pixels,
+                "owned_segmentation_to_commit_ratio": owned_segmentation_to_commit_ratio,
                 "failure_reason": "passed",
                 "cleanup_commit_quality": (
                     "residual_warning_commit"
@@ -2048,6 +2092,18 @@ def execute_cleanup_runtime_plan(
             "crop_bbox": execution.crop_bbox,
             "crop_area": execution.crop_area,
             "mask_ratio": execution.mask_ratio,
+            "owned_segmentation_pixels": getattr(cleanup_mask, "owned_segmentation_pixels", None),
+            "executable_foreground_pixels": getattr(cleanup_mask, "executable_foreground_pixels", None),
+            "owned_segmentation_to_executable_ratio": getattr(
+                cleanup_mask,
+                "owned_segmentation_to_executable_ratio",
+                None,
+            ),
+            "ready_but_sparse_violation": bool(getattr(cleanup_mask, "ready_but_sparse_violation", False)),
+            "sourceglyph_executable_influence_detected": bool(
+                getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)
+            ),
+            "dense_contract_override_detected": bool(getattr(cleanup_mask, "dense_contract_override_detected", False)),
         },
         runtime_ms=runtime_ms,
         fallback_status=execution_status,
@@ -2471,6 +2527,16 @@ def _effective_mask_kwargs(cleanup_mask: CleanupMask) -> dict[str, Any]:
         "sourceglyph_missing_component_ids": list(getattr(cleanup_mask, "sourceglyph_missing_component_ids", []) or []),
         "ownership_projection_failure_reason": str(getattr(cleanup_mask, "ownership_projection_failure_reason", "") or ""),
         "effective_component_coverage_ratio": getattr(cleanup_mask, "effective_component_coverage_ratio", None),
+        "owned_segmentation_pixels": getattr(cleanup_mask, "owned_segmentation_pixels", None),
+        "executable_foreground_pixels": getattr(cleanup_mask, "executable_foreground_pixels", None),
+        "committed_cleanup_mask_pixels": getattr(cleanup_mask, "committed_cleanup_mask_pixels", None),
+        "owned_segmentation_to_executable_ratio": getattr(cleanup_mask, "owned_segmentation_to_executable_ratio", None),
+        "owned_segmentation_to_commit_ratio": getattr(cleanup_mask, "owned_segmentation_to_commit_ratio", None),
+        "ready_but_sparse_violation": bool(getattr(cleanup_mask, "ready_but_sparse_violation", False)),
+        "sourceglyph_executable_influence_detected": bool(
+            getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)
+        ),
+        "dense_contract_override_detected": bool(getattr(cleanup_mask, "dense_contract_override_detected", False)),
     }
 
 
@@ -2509,7 +2575,7 @@ def _runtime_glyph_precision_mask(
     runtime_mask_source = (
         "text_foreground_segmentation_runtime_precision"
         if str(getattr(cleanup_mask, "mask_source", "") or "") == "cleanup_mask_from_text_foreground_segmentation"
-        else "source_glyph_foreground_runtime_precision"
+        else "non_segmentation_diagnostic_runtime_precision"
     )
     effective_status = str(getattr(cleanup_mask, "effective_mask_status", "") or "")
     if effective_status.startswith("effective_mask_failed_"):
@@ -2529,7 +2595,7 @@ def _runtime_glyph_precision_mask(
     if allowed is None or foreground is None:
         return _runtime_rejected_mask(
             cleanup_mask,
-            reason="sourceglyph_generation_or_foreground_contract_defect",
+            reason="segmentation_foreground_contract_defect",
             method_suffix="missing_foreground_or_allowed_area",
         )
     foreground = _clip_mask_to_valid_bbox(foreground, allowed)
@@ -2541,7 +2607,7 @@ def _runtime_glyph_precision_mask(
     if defect:
         return _runtime_rejected_mask(
             cleanup_mask,
-            reason="sourceglyph_generation_or_foreground_contract_defect",
+            reason="segmentation_foreground_contract_defect",
             method_suffix=defect,
             foreground=foreground,
         )
@@ -2557,7 +2623,7 @@ def _runtime_glyph_precision_mask(
     if foreground_pixels <= 0 or erase_pixels <= 0 or foreground_bbox is None or erase_bbox is None:
         return _runtime_rejected_mask(
             cleanup_mask,
-            reason="sourceglyph_generation_or_foreground_contract_defect",
+            reason="segmentation_foreground_contract_defect",
             method_suffix="empty_glyph_component_after_clip",
             foreground=foreground,
             erase=erase,
@@ -2576,7 +2642,7 @@ def _runtime_glyph_precision_mask(
         allowed_area=allowed,
         growth_ratio=_growth_ratio(erase_pixels, foreground_pixels),
         mask_source=runtime_mask_source,
-        mask_method="phase5_phase6_runtime_sourceglyph_foreground_glyph_precision",
+        mask_method="phase5_phase6_runtime_segmentation_foreground_glyph_precision",
         rejection_reason="",
         mask_contract_exception_reason=cleanup_mask.mask_contract_exception_reason,
         artifact_risk=cleanup_mask.artifact_risk,
@@ -2607,7 +2673,7 @@ def _runtime_glyph_precision_mask(
             allowed_area=allowed,
             growth_ratio=1.0,
             mask_source=runtime_mask_source,
-            mask_method="phase5_phase6_runtime_sourceglyph_foreground_minimal_erasure",
+            mask_method="phase5_phase6_runtime_segmentation_foreground_minimal_erasure",
             rejection_reason="",
             mask_contract_exception_reason=cleanup_mask.mask_contract_exception_reason,
             artifact_risk=cleanup_mask.artifact_risk,
@@ -2667,7 +2733,7 @@ def _runtime_rejected_mask(
     runtime_mask_source = (
         "text_foreground_segmentation_runtime_precision"
         if str(getattr(cleanup_mask, "mask_source", "") or "") == "cleanup_mask_from_text_foreground_segmentation"
-        else "source_glyph_foreground_runtime_precision"
+        else "non_segmentation_diagnostic_runtime_precision"
     )
     return CleanupMask(
         cleanup_mask_id=f"{cleanup_mask.cleanup_mask_id}_phase5_runtime",
@@ -2683,7 +2749,7 @@ def _runtime_rejected_mask(
         allowed_area=_valid_bbox(cleanup_mask.allowed_area),
         growth_ratio=cleanup_mask.growth_ratio,
         mask_source=runtime_mask_source,
-        mask_method=f"phase5_phase6_runtime_sourceglyph_foreground_rejected:{method_suffix}",
+        mask_method=f"phase5_phase6_runtime_segmentation_foreground_rejected:{method_suffix}",
         rejection_reason=reason,
         mask_contract_exception_reason=cleanup_mask.mask_contract_exception_reason,
         artifact_risk=cleanup_mask.artifact_risk,
@@ -2704,10 +2770,10 @@ def _glyph_foreground_geometry_defect_reason(
 ) -> str:
     pixels = int(np.count_nonzero(foreground > 0))
     if pixels <= 0:
-        return "empty_sourceglyph_foreground"
+        return "empty_segmentation_foreground"
     bbox = _mask_bbox(foreground)
     if bbox is None:
-        return "empty_sourceglyph_foreground_bbox"
+        return "empty_segmentation_foreground_bbox"
     bbox_area = _bbox_area(bbox)
     allowed_area = _bbox_area(allowed)
     density = float(pixels) / max(1, bbox_area)
@@ -2719,13 +2785,13 @@ def _glyph_foreground_geometry_defect_reason(
         CleanupClass.SMALL_REACTION.value,
     }
     if pixels < 4:
-        return "sourceglyph_foreground_too_small"
+        return "segmentation_foreground_too_small"
     if density > 0.72 and bbox_area > 1600:
-        return "sourceglyph_foreground_rectangular_fill"
+        return "segmentation_foreground_rectangular_fill"
     if bbox_area > (80_000 if speech_like else 45_000) and density > (0.22 if speech_like else 0.14):
-        return "sourceglyph_foreground_broad_background_chunk"
+        return "segmentation_foreground_broad_background_chunk"
     if allowed_area > 0 and allowed_ratio > (0.55 if speech_like else 0.35) and pixels > 2400:
-        return "sourceglyph_foreground_mostly_allowed_background"
+        return "segmentation_foreground_mostly_allowed_background"
     return ""
 
 
@@ -3931,6 +3997,8 @@ def _allowed_area_status(metrics: Mapping[str, Any]) -> str:
 
 def _cleanup_outcome_state_for_failure(failure_reason: str, *, runtime_status: str = "blocked") -> str:
     reason = str(failure_reason or "").lower()
+    if "segmentation_foreground_contract_defect" in reason:
+        return "segmentation_foreground_contract_defect"
     if "sourceglyph_generation_or_foreground_contract_defect" in reason:
         return "sourceglyph_generation_or_foreground_contract_defect"
     if runtime_status == "passed" or reason == "passed":
@@ -3970,6 +4038,8 @@ def _cleanup_outcome_state_for_failure(failure_reason: str, *, runtime_status: s
 
 def _contract_error_for_reason(reason: str) -> str:
     text = str(reason or "").lower()
+    if "segmentation_foreground_contract_defect" in text:
+        return "segmentation_foreground_contract_defect"
     if "sourceglyph_generation_or_foreground_contract_defect" in text:
         return "sourceglyph_generation_or_foreground_contract_defect"
     if "component_limit" in text:
@@ -4172,6 +4242,25 @@ def _mask_exclusion_reason(cleanup_mask: CleanupMask, image_size: tuple[int, int
         return "allowed_area_missing_or_invalid"
     if not _valid_bbox(cleanup_mask.erase_mask_bbox):
         return "erase_mask_bbox_missing_or_invalid"
+    if bool(getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)):
+        return "sourceglyph_executable_influence_detected"
+    if bool(getattr(cleanup_mask, "dense_contract_override_detected", False)):
+        return "dense_contract_override_detected"
+    if bool(getattr(cleanup_mask, "ready_but_sparse_violation", False)):
+        return "ready_but_sparse_violation"
+    rejection_reason = str(getattr(cleanup_mask, "rejection_reason", "") or "")
+    if rejection_reason in {
+        "effective_mask_incomplete_under_coverage",
+        "effective_mask_fragment_only",
+        "segmentation_mask_wrong_owner_broad_background_capture",
+        "effective_mask_failed_unsafe_background_capture",
+    }:
+        return rejection_reason
+    if (
+        str(getattr(cleanup_mask, "mask_source", "") or "") != "cleanup_mask_from_text_foreground_segmentation"
+        and component_projected is False
+    ):
+        return "non_segmentation_cleanup_mask_not_production_authority"
     if cleanup_mask.artifact_risk and not _is_partition_component_mask(cleanup_mask):
         return ARTIFACT_RISK_PARTITION_REQUIRED_REASON
     growth = float(cleanup_mask.growth_ratio if cleanup_mask.growth_ratio is not None else 999.0)
