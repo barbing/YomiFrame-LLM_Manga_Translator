@@ -29,6 +29,14 @@ ROUTE_TRANSLATE_CAPTION = "translate_caption_background"
 ROUTE_PRESERVE_SFX = "preserve_sfx_decorative"
 ROUTE_REVIEW_FALLBACK = "review_or_fallback"
 
+AUTH_CLEANUP_TRANSLATE_SPEECH = "cleanup_translate_speech"
+AUTH_CLEANUP_TRANSLATE_BACKGROUND = "cleanup_translate_background"
+AUTH_CLEANUP_TRANSLATE_CAPTION = "cleanup_translate_caption"
+AUTH_PROTECT_SFX_DECORATIVE = "protect_sfx_decorative"
+AUTH_PROTECT_ART_OR_NON_TEXT = "protect_art_or_non_text"
+AUTH_REVIEW_UNKNOWN_NOT_CLEANUP = "review_unknown_not_cleanup"
+AUTH_OUTSIDE_CLEANUP_SCOPE = "outside_cleanup_scope"
+
 DETECTION_SCOPED = "scoped"
 DETECTION_COMPATIBILITY_FALLBACK = "compatibility_fallback"
 DETECTION_BLOCKED = "blocked_by_text_area_plan"
@@ -127,6 +135,12 @@ class TextAreaContainer:
     ocr_eligibility_reason: str = ""
     text_area_pre_ocr_authority: bool = True
     text_area_enriched_from_region: bool = False
+    cleanup_authorization: str = ""
+    must_not_mutate: bool = False
+    protection_reason: str = ""
+    pre_ocr_authority: bool = True
+    source_stage: str = "text_area_plan"
+    parent_source_evidence: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)
@@ -147,6 +161,11 @@ class TextAreaScope:
     ocr_eligibility_reason: str = ""
     text_area_pre_ocr_authority: bool = True
     text_area_enriched_from_region: bool = False
+    cleanup_authorization: str = ""
+    must_not_mutate: bool = False
+    protection_reason: str = ""
+    pre_ocr_authority: bool = True
+    source_stage: str = "text_area_plan"
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)
@@ -170,6 +189,11 @@ class ScopedDetectionCandidate:
     text_area_pre_ocr_authority: bool = True
     text_area_enriched_from_region: bool = False
     would_change_behavior: bool = False
+    cleanup_authorization: str = ""
+    must_not_mutate: bool = False
+    protection_reason: str = ""
+    pre_ocr_authority: bool = True
+    source_stage: str = "text_area_plan"
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)
@@ -193,6 +217,11 @@ class ScopedOcrCandidate:
     text_area_pre_ocr_authority: bool = True
     text_area_enriched_from_region: bool = False
     would_change_behavior: bool = False
+    cleanup_authorization: str = ""
+    must_not_mutate: bool = False
+    protection_reason: str = ""
+    pre_ocr_authority: bool = True
+    source_stage: str = "text_area_plan"
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)
@@ -433,6 +462,10 @@ def assign_bbox_to_text_area_plan(
         "text_area_container_id": container.get("container_id"),
         "text_area_container_type": container.get("container_type") or CONTAINER_UNKNOWN,
         "text_area_route_intent": container.get("route_intent") or ROUTE_REVIEW_FALLBACK,
+        "text_area_cleanup_authorization": container.get("cleanup_authorization") or _cleanup_authorization_for_container(container)[0],
+        "text_area_must_not_mutate": bool(container.get("must_not_mutate", False)),
+        "text_area_protection_reason": container.get("protection_reason") or _cleanup_authorization_for_container(container)[1],
+        "text_area_authorization_source_stage": container.get("source_stage") or "text_area_plan",
         "text_area_ocr_eligible": bool(container.get("ocr_eligible", True)),
         "text_area_detection_source": source,
         "text_area_fallback_reason": container.get("fallback_reason"),
@@ -474,6 +507,11 @@ def build_scoped_detection_candidates(
             conflict_flags=list(assignment.get("text_area_conflict_flags") or []),
             text_area_pre_ocr_authority=bool(assignment.get("text_area_pre_ocr_authority", True)),
             text_area_enriched_from_region=bool(assignment.get("text_area_enriched_from_region", False)),
+            cleanup_authorization=assignment.get("text_area_cleanup_authorization") or "",
+            must_not_mutate=bool(assignment.get("text_area_must_not_mutate", False)),
+            protection_reason=assignment.get("text_area_protection_reason") or "",
+            pre_ocr_authority=bool(assignment.get("text_area_pre_ocr_authority", True)),
+            source_stage=assignment.get("text_area_authorization_source_stage") or "text_area_plan",
         )
         candidates.append(candidate.to_dict())
     return candidates
@@ -505,6 +543,11 @@ def build_scoped_ocr_candidate(
         reason_codes=list(assignment.get("text_area_reason_codes") or []),
         text_area_pre_ocr_authority=bool(assignment.get("text_area_pre_ocr_authority", True)),
         text_area_enriched_from_region=bool(assignment.get("text_area_enriched_from_region", False)),
+        cleanup_authorization=assignment.get("text_area_cleanup_authorization") or "",
+        must_not_mutate=bool(assignment.get("text_area_must_not_mutate", False)),
+        protection_reason=assignment.get("text_area_protection_reason") or "",
+        pre_ocr_authority=bool(assignment.get("text_area_pre_ocr_authority", True)),
+        source_stage=assignment.get("text_area_authorization_source_stage") or "text_area_plan",
     ).to_dict()
 
 
@@ -525,6 +568,10 @@ def apply_text_area_assignment_to_region(region: Dict[str, Any], assignment: Map
         "text_area_pre_ocr_authority",
         "text_area_enriched_from_region",
         "text_area_ocr_eligibility_reason",
+        "text_area_cleanup_authorization",
+        "text_area_must_not_mutate",
+        "text_area_protection_reason",
+        "text_area_authorization_source_stage",
     ):
         region[key] = assignment.get(key)
     render = region.setdefault("render", {})
@@ -717,6 +764,51 @@ def _summary_for_container_dicts(
     }
 
 
+def _cleanup_authorization_for_container(container: Mapping[str, Any] | TextAreaContainer) -> tuple[str, str, bool]:
+    if isinstance(container, TextAreaContainer):
+        route = str(container.route_intent or ROUTE_REVIEW_FALLBACK)
+        ctype = str(container.container_type or CONTAINER_UNKNOWN)
+        reason_values = list(container.evidence_reason_codes or []) + list(container.conflict_flags or [])
+        fallback = str(container.fallback_reason or "")
+    else:
+        route = str(container.get("route_intent") or ROUTE_REVIEW_FALLBACK)
+        ctype = str(container.get("container_type") or CONTAINER_UNKNOWN)
+        reason_values = list(container.get("evidence_reason_codes") or []) + list(container.get("conflict_flags") or [])
+        fallback = str(container.get("fallback_reason") or "")
+    marker = " ".join([route, ctype, fallback] + [str(item) for item in reason_values]).lower()
+    if any(token in marker for token in ("non_text", "non-text", "art_only", "non_translation_art")):
+        return AUTH_PROTECT_ART_OR_NON_TEXT, "explicit_art_or_non_text_authorization", True
+    if route == ROUTE_PRESERVE_SFX or ctype == CONTAINER_SFX or any(
+        token in marker for token in ("sfx", "decorative", "preserve_sfx_decorative")
+    ):
+        return AUTH_PROTECT_SFX_DECORATIVE, "explicit_sfx_decorative_authorization", True
+    if route == ROUTE_TRANSLATE_SPEECH:
+        return AUTH_CLEANUP_TRANSLATE_SPEECH, "", False
+    if route == ROUTE_TRANSLATE_CAPTION:
+        if "deterministic_vertical_side_caption_search" in marker or "vertical_side_caption_search" in marker:
+            return AUTH_REVIEW_UNKNOWN_NOT_CLEANUP, "deterministic_side_caption_requires_review", True
+        if "caption" in marker and "background" not in marker:
+            return AUTH_CLEANUP_TRANSLATE_CAPTION, "", False
+        return AUTH_CLEANUP_TRANSLATE_BACKGROUND, "", False
+    if route == ROUTE_REVIEW_FALLBACK or ctype == CONTAINER_UNKNOWN:
+        return AUTH_REVIEW_UNKNOWN_NOT_CLEANUP, "review_unknown_not_cleanup", True
+    return AUTH_OUTSIDE_CLEANUP_SCOPE, "outside_cleanup_scope", True
+
+
+def _apply_cleanup_authorization(container: TextAreaContainer) -> None:
+    auth, reason, must_not_mutate = _cleanup_authorization_for_container(container)
+    container.cleanup_authorization = auth
+    container.must_not_mutate = must_not_mutate
+    container.protection_reason = reason
+    container.pre_ocr_authority = bool(container.text_area_pre_ocr_authority)
+    container.source_stage = "text_area_plan_pre_ocr" if container.text_area_pre_ocr_authority else "text_area_plan_region_enriched"
+    container.parent_source_evidence = {
+        "source_model_ids": list(container.source_model_ids or []),
+        "evidence_reason_codes": list(container.evidence_reason_codes or []),
+        "conflict_flags": list(container.conflict_flags or []),
+    }
+
+
 def _finish_plan(plan: TextAreaPlan, started: float) -> TextAreaPlan:
     plan.runtime.generated = bool(plan.generated)
     plan.runtime.runtime_sec = round(time.perf_counter() - started, 6)
@@ -727,6 +819,7 @@ def _finish_plan(plan: TextAreaPlan, started: float) -> TextAreaPlan:
     scope_eligible = 0
     review_only_blocked = 0
     for container in plan.containers:
+        _apply_cleanup_authorization(container)
         by_type[container.container_type] = by_type.get(container.container_type, 0) + 1
         by_intent[container.route_intent] = by_intent.get(container.route_intent, 0) + 1
         if container.ocr_eligible:
@@ -1351,11 +1444,14 @@ def _append_deterministic_vertical_side_caption_containers(
     if not source_items:
         return
     added = 0
+    added_boxes: list[list[int]] = []
     for item in source_items:
         seed_bbox = _bbox_xyxy_to_xywh(item.get("mask_bbox") or item.get("bbox_xyxy") or item.get("bbox"), image_size)
         search_bbox = _side_caption_search_bbox(seed_bbox, image_size)
         localized = _localize_side_caption_bbox(luma_image, search_bbox, image_size)
         bbox = localized or search_bbox
+        if any(_intersection_ratio_xywh(bbox, existing) >= 0.35 for existing in added_boxes):
+            continue
         if _caption_search_overlaps_blocking_container(bbox, plan.containers):
             continue
         container_id = f"det_side_caption_right_{added:02d}"
@@ -1392,8 +1488,9 @@ def _append_deterministic_vertical_side_caption_containers(
         )
         if seen is not None:
             seen.add(container_id)
+        added_boxes.append(list(bbox))
         added += 1
-        if added >= 2:
+        if added >= 1:
             break
 
 
@@ -1625,6 +1722,10 @@ def _fallback_assignment(reason: str) -> Dict[str, Any]:
         "text_area_container_id": None,
         "text_area_container_type": CONTAINER_UNKNOWN,
         "text_area_route_intent": ROUTE_REVIEW_FALLBACK,
+        "text_area_cleanup_authorization": AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+        "text_area_must_not_mutate": True,
+        "text_area_protection_reason": "compatibility_fallback_not_cleanup_authorized",
+        "text_area_authorization_source_stage": "compatibility_fallback",
         "text_area_ocr_eligible": True,
         "text_area_detection_source": DETECTION_COMPATIBILITY_FALLBACK,
         "text_area_fallback_reason": reason,

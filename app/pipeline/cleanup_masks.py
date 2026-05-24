@@ -449,6 +449,14 @@ def build_cleanup_masks(
                     "mask_completion_method": (
                         f"local_contrast_fallback_after_{effective.audit.get('segmentation_mask_status') or 'segmentation_unavailable'}"
                     ),
+                    "clean_mask_authority": "diagnostic_non_segmentation_fallback",
+                    "dense_or_local_fallback_used": True,
+                    "bbox_executable_foreground_detected": False,
+                    "page_level_executable_foreground_detected": False,
+                    "clean_mask_state": "cleanup_mask_unresolved_after_segmentation",
+                    "clean_mask_failure_reason": effective.failure_reason
+                    or fallback.failure_reason
+                    or "segmentation_unavailable_local_contrast_fallback",
                 }
                 effective = _EffectiveMaskBuild(
                     foreground=fallback.foreground,
@@ -512,7 +520,8 @@ def build_cleanup_masks(
                 image_size=image_size,
                 allow_growth_exception=bool(exception_reason),
             )
-            if broad_rejection:
+            component_projected = str(effective.audit.get("component_projection_method") or "") == "segmentation_component_ownership_projection"
+            if broad_rejection and not (component_projected and effective.rejected):
                 rejected_records.append(
                     {
                         **base,
@@ -633,6 +642,35 @@ def build_cleanup_masks(
                     effective.audit.get("sourceglyph_executable_influence_detected", False)
                 ),
                 dense_contract_override_detected=bool(effective.audit.get("dense_contract_override_detected", False)),
+                clean_mask_authority=effective.audit.get("clean_mask_authority", ""),
+                dense_or_local_fallback_used=bool(effective.audit.get("dense_or_local_fallback_used", False)),
+                bbox_executable_foreground_detected=bool(effective.audit.get("bbox_executable_foreground_detected", False)),
+                page_level_executable_foreground_detected=bool(effective.audit.get("page_level_executable_foreground_detected", False)),
+                clean_mask_foreground_pixels=effective.audit.get("clean_mask_foreground_pixels"),
+                clean_mask_erase_pixels=effective.audit.get("clean_mask_erase_pixels"),
+                foreground_to_owned_segmentation_ratio=effective.audit.get("foreground_to_owned_segmentation_ratio"),
+                erase_to_foreground_ratio=effective.audit.get("erase_to_foreground_ratio"),
+                protected_component_pixels_removed=effective.audit.get("protected_component_pixels_removed"),
+                ambiguous_component_pixels=effective.audit.get("ambiguous_component_pixels"),
+                unowned_component_pixels=effective.audit.get("unowned_component_pixels"),
+                clean_mask_state=effective.audit.get("clean_mask_state", ""),
+                clean_mask_failure_reason=effective.audit.get("clean_mask_failure_reason", ""),
+                cleanup_authorization=effective.audit.get("cleanup_authorization", ""),
+                authorization_source_stage=effective.audit.get("authorization_source_stage", ""),
+                foreground_outside_allowed_pixels=effective.audit.get("foreground_outside_allowed_pixels"),
+                upstream_container_mismatch_pixels=effective.audit.get("upstream_container_mismatch_pixels"),
+                upstream_container_mismatch_ratio=effective.audit.get("upstream_container_mismatch_ratio"),
+                green_to_foreground_component_coverage_ratio=effective.audit.get("green_to_foreground_component_coverage_ratio"),
+                green_to_erase_component_coverage_ratio=effective.audit.get("green_to_erase_component_coverage_ratio"),
+                ctd_refined_segmentation_mask_ref=effective.audit.get("ctd_refined_segmentation_mask_ref", ""),
+                cleanup_owned_segmentation_foreground_mask_ref=effective.audit.get("cleanup_owned_segmentation_foreground_mask_ref", ""),
+                protected_component_mask_ref=effective.audit.get("protected_component_mask_ref", ""),
+                clean_mask_foreground_ref=effective.audit.get("clean_mask_foreground_ref", ""),
+                clean_mask_erase_ref=effective.audit.get("clean_mask_erase_ref", ""),
+                component_ownership_overlay_ref=effective.audit.get("component_ownership_overlay_ref", ""),
+                rejected_component_overlay_ref=effective.audit.get("rejected_component_overlay_ref", ""),
+                sourceglyph_overlap_overlay_ref=effective.audit.get("sourceglyph_overlap_overlay_ref", ""),
+                clean_mask_annotation_ref=effective.audit.get("clean_mask_annotation_ref", ""),
                 foreground_mask=foreground.copy(),
                 erase_mask=erase.copy(),
             )
@@ -1016,14 +1054,22 @@ def _build_component_projected_text_mask(
     ambiguous_ids = projection["ambiguous_component_ids"]
     unowned_ids = projection["unowned_component_ids"]
     foreground = _component_mask_from_ids(component_projection, owned_ids)
-    if foreground is not None:
-        foreground = _clip_mask_to_bbox(foreground, allowed)
     foreground_pixels = int(np.count_nonzero(foreground > 0)) if foreground is not None else 0
     owned_segmentation_pixels = int(projection["owned_component_pixel_count"])
     owned_to_executable_ratio = round(
         float(foreground_pixels) / float(max(1, owned_segmentation_pixels)),
         4,
     ) if owned_segmentation_pixels > 0 else 0.0
+    allowed_mask = _bbox_mask(foreground.shape, allowed) if foreground is not None else None
+    foreground_outside_allowed_pixels = (
+        int(np.count_nonzero((foreground > 0) & (allowed_mask <= 0)))
+        if foreground is not None and allowed_mask is not None
+        else 0
+    )
+    upstream_container_mismatch_ratio = round(
+        float(foreground_outside_allowed_pixels) / float(max(1, foreground_pixels)),
+        4,
+    ) if foreground_pixels > 0 else 0.0
     before_binding = int(np.count_nonzero(_clip_mask_to_bbox((segmentation_mask > 0).astype(np.uint8), allowed)))
     bbox = _mask_bbox(foreground) if foreground is not None else None
     sourceglyph_overlap, sourceglyph_ratio, segmentation_outside_sourceglyph = _sourceglyph_overlap_metrics(
@@ -1074,15 +1120,24 @@ def _build_component_projected_text_mask(
             job=job,
         )
         unsafe_reason = _segmentation_foreground_unsafe_reason(foreground, allowed, job)
-        if coverage_reason or owned_ratio_reason or unsafe_reason or ambiguous_ids or unowned_ids:
+        mismatch_reason = "upstream_container_mismatch" if foreground_outside_allowed_pixels > 0 else ""
+        if coverage_reason or owned_ratio_reason or unsafe_reason or mismatch_reason or ambiguous_ids or unowned_ids:
             status = "cleanup_mask_partial_owned_components"
-            failure_reason = coverage_reason or owned_ratio_reason or unsafe_reason or "cleanup_mask_partial_owned_components"
-            rejected = bool(coverage_reason or owned_ratio_reason or unsafe_reason)
+            failure_reason = mismatch_reason or coverage_reason or owned_ratio_reason or unsafe_reason or "cleanup_mask_partial_owned_components"
+            rejected = bool(mismatch_reason or coverage_reason or owned_ratio_reason or unsafe_reason)
 
     seed_pixels = int(np.count_nonzero(seed_foreground > 0)) if seed_foreground is not None else 0
     erase = None
     if foreground is not None and foreground_pixels > 0:
         erase = _effective_erase_from_foreground(foreground, allowed, job)
+    erase_pixels = int(np.count_nonzero(erase > 0)) if erase is not None else 0
+    erase_to_foreground_ratio = round(float(erase_pixels) / float(max(1, foreground_pixels)), 4) if foreground_pixels > 0 else 0.0
+    green_to_erase_ratio = 0.0
+    if erase is not None and foreground is not None and owned_segmentation_pixels > 0:
+        green_to_erase_ratio = round(
+            float(np.count_nonzero((erase > 0) & (foreground > 0))) / float(max(1, owned_segmentation_pixels)),
+            4,
+        )
     sourceglyph_executable_influence_detected = False
     ready_but_sparse_violation = bool(
         status == "cleanup_mask_ready_from_owned_segmentation_components"
@@ -1145,6 +1200,30 @@ def _build_component_projected_text_mask(
         "ready_but_sparse_violation": ready_but_sparse_violation,
         "sourceglyph_executable_influence_detected": sourceglyph_executable_influence_detected,
         "dense_contract_override_detected": False,
+        "cleanup_authorization": projection.get("cleanup_authorization", ""),
+        "authorization_source_stage": projection.get("authorization_source_stage", ""),
+        "foreground_outside_allowed_pixels": foreground_outside_allowed_pixels,
+        "upstream_container_mismatch_pixels": foreground_outside_allowed_pixels,
+        "upstream_container_mismatch_ratio": upstream_container_mismatch_ratio,
+        "green_to_foreground_component_coverage_ratio": owned_to_executable_ratio,
+        "green_to_erase_component_coverage_ratio": green_to_erase_ratio,
+        "clean_mask_authority": "text_foreground_segmentation",
+        "dense_or_local_fallback_used": False,
+        "bbox_executable_foreground_detected": False,
+        "page_level_executable_foreground_detected": False,
+        "clean_mask_foreground_pixels": foreground_pixels,
+        "clean_mask_erase_pixels": erase_pixels,
+        "foreground_to_owned_segmentation_ratio": owned_to_executable_ratio,
+        "erase_to_foreground_ratio": erase_to_foreground_ratio,
+        "protected_component_pixels_removed": int(projection["protected_component_pixel_count"]),
+        "ambiguous_component_pixels": int(projection["ambiguous_component_pixel_count"]),
+        "unowned_component_pixels": sum(
+            int(_component_by_id(component_projection, component_id).get("pixel_count") or 0)
+            for component_id in unowned_ids
+        ),
+        "clean_mask_state": status,
+        "clean_mask_failure_reason": failure_reason,
+        "ctd_refined_segmentation_mask_ref": str(base_audit.get("segmentation_mask_ref") or ""),
     }
     return _EffectiveMaskBuild(
         foreground=foreground,
@@ -1249,9 +1328,9 @@ def _build_segmentation_text_mask(
         if protected_mask is not None and protected_overlap > 0
         else "segmentation_cleanup_ownership_mask_clip"
     )
-    # Ownership binding must not synthesize executable foreground pixels; grouping
-    # remains a downstream accounting concern, while erase dilation stays bounded.
-    foreground = _clip_mask_to_bbox(foreground, analysis_scope)
+    # Ownership binding must not synthesize or crop executable foreground pixels;
+    # grouping remains a downstream accounting concern, while erase dilation is
+    # the only step bounded by safety scopes.
     pixels = int(np.count_nonzero(foreground))
     if pixels <= 0:
         audit = {
@@ -1343,7 +1422,7 @@ def _build_segmentation_text_mask(
         erase=erase,
         allowed=allowed,
         analysis_scope=analysis_scope,
-        method="text_foreground_segmentation_owned_foreground_clip",
+        method="text_foreground_segmentation_owned_foreground_projection",
         polarity="segmentation",
         rejected_reasons=[],
         recovered_count=0,
@@ -1433,7 +1512,7 @@ def _build_ownership_binding(
         protected_mask=protected_mask_out,
         owned_bbox=allowed,
         protected_bbox=protected_bbox,
-        method="cleanup_job_allowed_area_ownership_scope_with_region_protection_subtract",
+        method="cleanup_job_allowed_area_validation_scope_with_region_protection_subtract",
         status="ownership_binding_ready",
         protected_records=protected_records,
     )
@@ -1524,6 +1603,22 @@ def _build_component_ownership_projection(
                 "owner_region_ids": _component_owner_region_ids(owner_candidates, owner_job_id),
                 "scope_cleanup_job_ids": scope_job_ids,
                 "candidate_cleanup_job_ids": [item["cleanup_job_id"] for item in owner_candidates],
+                "cleanup_authorizations": sorted(
+                    {
+                        str(auth)
+                        for item in owner_candidates
+                        for auth in (item.get("cleanup_authorizations") or [])
+                        if str(auth)
+                    }
+                ),
+                "authorization_source_stages": sorted(
+                    {
+                        str(stage)
+                        for item in owner_candidates
+                        for stage in (item.get("authorization_source_stages") or [])
+                        if str(stage)
+                    }
+                ),
                 "protected_region_ids": [item["region_id"] for item in protected_candidates],
                 "protected_reason": protected_reason,
                 "bbox": [x, y, x + w, y + h],
@@ -1558,19 +1653,84 @@ def _job_ownership_scope_masks(
             continue
         mask = np.zeros(shape, dtype=np.uint8)
         region_ids: list[str] = []
+        cleanup_authorizations: list[str] = []
+        source_stages: list[str] = []
         for region_id in getattr(job, "target_region_ids", []) or []:
             region = region_records.get(str(region_id))
             bbox = _region_bbox(region) if isinstance(region, Mapping) else None
             if bbox is None:
                 continue
+            auth = _region_cleanup_authorization(region)
+            if auth in {
+                "protect_sfx_decorative",
+                "protect_art_or_non_text",
+                "review_unknown_not_cleanup",
+                "outside_cleanup_scope",
+            }:
+                continue
             mask = np.maximum(mask, _bbox_mask(shape, bbox))
             region_ids.append(str(region_id))
+            if auth and auth not in cleanup_authorizations:
+                cleanup_authorizations.append(auth)
+            stage = str(region.get("source_stage") or region.get("text_area_authorization_source_stage") or "")
+            if stage and stage not in source_stages:
+                source_stages.append(stage)
         if int(np.count_nonzero(mask)) <= 0:
-            allowed = _valid_bbox(getattr(job, "allowed_cleanup_area", None))
-            if allowed is not None:
-                mask = np.maximum(mask, _bbox_mask(shape, allowed))
-        scopes.append({"cleanup_job_id": job_id, "region_ids": region_ids, "mask": mask, "job": job})
+            continue
+        scopes.append(
+            {
+                "cleanup_job_id": job_id,
+                "region_ids": region_ids,
+                "mask": mask,
+                "job": job,
+                "cleanup_authorizations": cleanup_authorizations,
+                "authorization_source_stages": source_stages,
+            }
+        )
     return scopes
+
+
+def _region_cleanup_authorization(region: Mapping[str, Any] | None) -> str:
+    if not isinstance(region, Mapping):
+        return ""
+    auth = str(
+        region.get("cleanup_authorization")
+        or region.get("text_area_cleanup_authorization")
+        or ""
+    )
+    if auth:
+        return auth
+    marker = " ".join(
+        str(region.get(key) or "")
+        for key in (
+            "region_id",
+            "container_id",
+            "text_area_container_id",
+            "route_intent",
+            "text_area_route_intent",
+            "container_type",
+            "text_area_container_type",
+            "semantic_class",
+            "cleanup_mode",
+            "fallback_reason",
+            "text_area_fallback_reason",
+            "classification_reason",
+            "protection_source",
+        )
+    ).lower()
+    if "det_side_caption" in marker or "deterministic_vertical_side_caption_search" in marker:
+        return "review_unknown_not_cleanup"
+    if any(token in marker for token in ("sfx", "decorative", "preserve_sfx")):
+        return "protect_sfx_decorative"
+    if any(token in marker for token in ("art", "non_text", "non-text")):
+        return "protect_art_or_non_text"
+    if "translate_speech" in marker:
+        return "cleanup_translate_speech"
+    if "translate_caption" in marker or "caption_background" in marker:
+        return "cleanup_translate_background"
+    if "review" in marker or "fallback" in marker:
+        return "review_unknown_not_cleanup"
+    return ""
 
 
 def _protected_region_scope_masks(
@@ -1631,8 +1791,7 @@ def _component_owner_candidates(
         overlap = int(np.count_nonzero(component_mask & (mask > 0)))
         if overlap <= 0:
             continue
-        strong = overlap >= COMPONENT_OWNER_STRONG_PIXELS
-        eligible = overlap >= min_pixels or strong
+        eligible = overlap >= min_pixels
         candidates.append(
             {
                 "cleanup_job_id": str(scope.get("cleanup_job_id") or ""),
@@ -1640,6 +1799,8 @@ def _component_owner_candidates(
                 "overlap_pixels": overlap,
                 "overlap_ratio": overlap / float(max(1, pixel_count)),
                 "eligible": eligible,
+                "cleanup_authorizations": list(scope.get("cleanup_authorizations") or []),
+                "authorization_source_stages": list(scope.get("authorization_source_stages") or []),
             }
         )
     candidates.sort(key=lambda item: int(item.get("overlap_pixels") or 0), reverse=True)
@@ -1720,8 +1881,8 @@ def _component_ownership_state(
     if best_owner:
         return "cleanup_owned", str(best_owner.get("cleanup_job_id") or ""), []
     if owner_candidates:
-        return "unowned_visible_text", "", ["below_cleanup_owner_overlap_threshold"]
-    return "outside_cleanup_scope", "", []
+        return "unowned_visible_text", "", ["upstream_container_mismatch_or_below_cleanup_owner_overlap_threshold"]
+    return "review_unknown_not_cleanup", "", ["no_upstream_cleanup_authorization"]
 
 
 def _protected_ownership_state(candidate: Mapping[str, Any]) -> str:
@@ -1776,7 +1937,27 @@ def _component_projection_for_job(
         if str(item.get("ownership_state") or "").startswith("protected")
     ]
     ambiguous = [item for item in scoped_components if item.get("ownership_state") == "ambiguous_multi_owner"]
-    unowned = [item for item in scoped_components if item.get("ownership_state") == "unowned_visible_text"]
+    unowned = [
+        item
+        for item in scoped_components
+        if item.get("ownership_state") in {"unowned_visible_text", "review_unknown_not_cleanup", "outside_cleanup_scope"}
+    ]
+    cleanup_authorizations = sorted(
+        {
+            str(auth)
+            for item in owned
+            for auth in (item.get("cleanup_authorizations") or [])
+            if str(auth)
+        }
+    )
+    source_stages = sorted(
+        {
+            str(stage)
+            for item in owned
+            for stage in (item.get("authorization_source_stages") or [])
+            if str(stage)
+        }
+    )
     return {
         "owned_component_ids": [str(item["component_id"]) for item in owned],
         "protected_component_ids": [str(item["component_id"]) for item in protected],
@@ -1786,6 +1967,8 @@ def _component_projection_for_job(
         "protected_component_pixel_count": sum(int(item.get("pixel_count") or 0) for item in protected),
         "ambiguous_component_pixel_count": sum(int(item.get("pixel_count") or 0) for item in ambiguous),
         "unresolved_reasons": _component_projection_unresolved_reasons(protected, ambiguous, unowned),
+        "cleanup_authorization": ",".join(cleanup_authorizations),
+        "authorization_source_stage": ",".join(source_stages),
     }
 
 
@@ -1889,7 +2072,14 @@ def _region_protection_reason(region: Mapping[str, Any]) -> str:
     flags = region.get("flags") if isinstance(region.get("flags"), Mapping) else {}
     marker_parts: list[str] = []
     for value in (
+        region.get("cleanup_authorization"),
+        region.get("text_area_cleanup_authorization"),
+        region.get("protection_reason"),
+        region.get("text_area_protection_reason"),
         region.get("type"),
+        region.get("container_type"),
+        region.get("role"),
+        region.get("visual_role"),
         region.get("semantic_class"),
         region.get("route_intent"),
         region.get("cleanup_mode"),
@@ -1903,13 +2093,23 @@ def _region_protection_reason(region: Mapping[str, Any]) -> str:
         if value:
             marker_parts.append(str(key))
     text = " ".join(marker_parts).lower()
+    if _truthy(region.get("must_not_mutate")) or _truthy(region.get("text_area_must_not_mutate")):
+        auth = _region_cleanup_authorization(region)
+        if auth == "protect_art_or_non_text":
+            return "explicit_art_or_non_text_authorization"
+        if auth == "protect_sfx_decorative":
+            return "explicit_sfx_decorative_authorization"
+        if auth in {"review_unknown_not_cleanup", "outside_cleanup_scope"}:
+            return auth
     if "cleanup_mode" in region and str(region.get("cleanup_mode") or "").lower() == "preserve":
         return "explicit_cleanup_mode_preserve"
     if isinstance(render, Mapping) and str(render.get("cleanup_mode") or "").lower() == "preserve":
         return "explicit_render_cleanup_mode_preserve"
     protected_markers = (
         ("preserve_sfx_decorative", "preserve_sfx_decorative"),
+        ("sfx_decorative_art", "preserve_sfx_decorative"),
         ("decorative_text", "decorative_text"),
+        ("decorative", "decorative_text"),
         ("non_translation_art", "non_translation_art"),
         ("art_only", "art_only"),
         ("non_text", "non_text"),
@@ -2626,7 +2826,7 @@ def _effective_erase_from_foreground(
     allowed: list[int],
     job: CleanupJob,
 ) -> np.ndarray:
-    foreground = _clip_mask_to_bbox((foreground > 0).astype(np.uint8), allowed)
+    foreground = (foreground > 0).astype(np.uint8)
     cleanup_value = _enum_value(getattr(job, "cleanup_class", ""))
     speech_like = cleanup_value in {
         CleanupClass.SPEECH_FLAT_BUBBLE.value,
@@ -2639,7 +2839,8 @@ def _effective_erase_from_foreground(
         erase = cv2.dilate(foreground, kernel, iterations=iterations).astype(np.uint8)
     else:
         erase = _binary_dilate(foreground, radius=1)
-    return _clip_mask_to_bbox(erase.astype(np.uint8), allowed)
+    bounded_dilation = _clip_mask_to_bbox(erase.astype(np.uint8), allowed)
+    return np.maximum(foreground, bounded_dilation).astype(np.uint8)
 
 
 def _bridge_text_stroke_gaps(mask: np.ndarray, allowed: list[int], job: CleanupJob) -> np.ndarray:

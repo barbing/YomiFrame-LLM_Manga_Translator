@@ -238,6 +238,35 @@ class CleanupMask:
     ready_but_sparse_violation: bool = False
     sourceglyph_executable_influence_detected: bool = False
     dense_contract_override_detected: bool = False
+    clean_mask_authority: str = ""
+    dense_or_local_fallback_used: bool = False
+    bbox_executable_foreground_detected: bool = False
+    page_level_executable_foreground_detected: bool = False
+    clean_mask_foreground_pixels: int | None = None
+    clean_mask_erase_pixels: int | None = None
+    foreground_to_owned_segmentation_ratio: float | None = None
+    erase_to_foreground_ratio: float | None = None
+    protected_component_pixels_removed: int | None = None
+    ambiguous_component_pixels: int | None = None
+    unowned_component_pixels: int | None = None
+    clean_mask_state: str = ""
+    clean_mask_failure_reason: str = ""
+    cleanup_authorization: str = ""
+    authorization_source_stage: str = ""
+    foreground_outside_allowed_pixels: int | None = None
+    upstream_container_mismatch_pixels: int | None = None
+    upstream_container_mismatch_ratio: float | None = None
+    green_to_foreground_component_coverage_ratio: float | None = None
+    green_to_erase_component_coverage_ratio: float | None = None
+    ctd_refined_segmentation_mask_ref: str = ""
+    cleanup_owned_segmentation_foreground_mask_ref: str = ""
+    protected_component_mask_ref: str = ""
+    clean_mask_foreground_ref: str = ""
+    clean_mask_erase_ref: str = ""
+    component_ownership_overlay_ref: str = ""
+    rejected_component_overlay_ref: str = ""
+    sourceglyph_overlap_overlay_ref: str = ""
+    clean_mask_annotation_ref: str = ""
     foreground_mask: Any = field(default=None, repr=False, compare=False)
     erase_mask: Any = field(default=None, repr=False, compare=False)
 

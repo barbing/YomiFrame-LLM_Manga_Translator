@@ -87,6 +87,128 @@ def _cleanup_perf_contract_checkpoint(stage: str, event: str, **fields: Any) -> 
         return
 
 
+def _cleanup_mask_region_records_with_protection(
+    regions: Iterable[dict[str, Any]] | None,
+    debug_context: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Expose canonical cleanup authorization/protection evidence to CleanupMask.
+
+    Pre-OCR TextAreaPlan records are the semantic authority. Region-enriched
+    records are included for diagnostics and linkage only; this helper must not
+    strengthen weak pre-OCR authorization into cleanup ownership.
+    """
+
+    if not isinstance(debug_context, dict):
+        return [dict(region) for region in (regions or []) if isinstance(region, dict)]
+
+    auth_by_container: dict[str, dict[str, Any]] = {}
+    for plan_key in ("text_area_plan_pre_ocr", "text_area_plan"):
+        plan = debug_context.get(plan_key)
+        if isinstance(plan, dict):
+            for container in plan.get("containers") or []:
+                if not isinstance(container, dict):
+                    continue
+                container_id = str(container.get("container_id") or container.get("id") or "")
+                if container_id and container_id not in auth_by_container:
+                    auth_by_container[container_id] = container
+
+    records: list[dict[str, Any]] = []
+    for region in (regions or []):
+        if not isinstance(region, dict):
+            continue
+        record = dict(region)
+        container_id = str(record.get("text_area_container_id") or record.get("container_id") or "")
+        container = auth_by_container.get(container_id)
+        if container:
+            for src, dst in (
+                ("cleanup_authorization", "cleanup_authorization"),
+                ("must_not_mutate", "must_not_mutate"),
+                ("protection_reason", "protection_reason"),
+                ("pre_ocr_authority", "pre_ocr_authority"),
+                ("source_stage", "source_stage"),
+                ("parent_source_evidence", "parent_source_evidence"),
+            ):
+                if src in container and dst not in record:
+                    record[dst] = container.get(src)
+        records.append(record)
+
+    seen_ids = {str(record.get("region_id") or record.get("id") or "") for record in records}
+
+    def add_record(record_id: str, source: dict[str, Any], reason_hint: str = "") -> None:
+        if not record_id or record_id in seen_ids:
+            return
+        bbox = source.get("bbox") or source.get("xyxy") or source.get("bounds")
+        if not bbox:
+            return
+        route_intent = str(source.get("route_intent") or source.get("intent") or "")
+        container_type = str(source.get("container_type") or source.get("type") or source.get("role") or "")
+        cleanup_mode = str(source.get("cleanup_mode") or "")
+        cleanup_authorization = str(
+            source.get("cleanup_authorization")
+            or source.get("text_area_cleanup_authorization")
+            or ""
+        )
+        must_not_mutate = bool(source.get("must_not_mutate") or source.get("text_area_must_not_mutate"))
+        protection_reason = str(
+            source.get("protection_reason")
+            or source.get("text_area_protection_reason")
+            or source.get("classification_reason")
+            or reason_hint
+            or ""
+        )
+        marker = " ".join((route_intent, container_type, cleanup_mode, cleanup_authorization, protection_reason, reason_hint)).lower()
+        if any(token in marker for token in ("preserve_sfx_decorative", "sfx", "decorative", "art", "non_text", "preserve")):
+            cleanup_mode = cleanup_mode or "preserve"
+            must_not_mutate = True
+        records.append(
+            {
+                "region_id": record_id,
+                "container_id": source.get("container_id") or source.get("text_area_container_id") or record_id,
+                "bbox": bbox,
+                "container_type": container_type,
+                "semantic_class": source.get("semantic_class") or container_type,
+                "route_intent": route_intent,
+                "cleanup_authorization": cleanup_authorization,
+                "must_not_mutate": must_not_mutate,
+                "protection_reason": protection_reason,
+                "pre_ocr_authority": bool(
+                    source.get("pre_ocr_authority", source.get("text_area_pre_ocr_authority", reason_hint == "text_area_plan_pre_ocr"))
+                ),
+                "source_stage": source.get("source_stage")
+                or source.get("text_area_authorization_source_stage")
+                or reason_hint
+                or "controller_cleanup_mask_authorization_handoff",
+                "cleanup_mode": cleanup_mode,
+                "classification_reason": source.get("classification_reason") or reason_hint,
+                "protection_source": reason_hint or "cleanup_mask_region_records_with_protection",
+                "parent_source_evidence": source.get("parent_source_evidence") or {
+                    "source_model_ids": list(source.get("source_model_ids") or []),
+                    "evidence_reason_codes": list(source.get("evidence_reason_codes") or source.get("text_area_reason_codes") or []),
+                    "conflict_flags": list(source.get("conflict_flags") or source.get("text_area_conflict_flags") or []),
+                },
+            }
+        )
+        seen_ids.add(record_id)
+
+    for plan_key in ("text_area_plan_pre_ocr", "text_area_plan"):
+        plan = debug_context.get(plan_key)
+        if isinstance(plan, dict):
+            for index, container in enumerate(plan.get("containers") or []):
+                if isinstance(container, dict):
+                    add_record(
+                        str(container.get("container_id") or container.get("id") or f"{plan_key}_container_{index:04d}"),
+                        container,
+                        plan_key,
+                    )
+
+    for key in ("blocked_text_area_candidates", "caption_localization_candidates"):
+        for index, candidate in enumerate(debug_context.get(key) or []):
+            if isinstance(candidate, dict):
+                add_record(str(candidate.get("candidate_id") or candidate.get("region_id") or f"{key}_{index:04d}"), candidate, key)
+
+    return records
+
+
 def _page014_timeout_checkpoint(stage: str, event: str, **fields: Any) -> None:
     _cleanup_perf_contract_checkpoint(stage, event, **fields)
     if not _page014_timeout_diag_enabled():
@@ -656,7 +778,7 @@ class PipelineWorker(QtCore.QThread):
                         image_size=source_image_size,
                         source_image_path=source_path,
                         text_foreground_segmentation=text_foreground_segmentation_mask,
-                        page_region_records=regions,
+                        page_region_records=_cleanup_mask_region_records_with_protection(regions, debug_context),
                     )
                     _page014_timeout_checkpoint(
                         "cleanup_mask_build",
