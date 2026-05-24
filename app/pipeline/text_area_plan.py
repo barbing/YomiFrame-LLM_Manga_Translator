@@ -16,6 +16,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
+try:
+    import cv2  # type: ignore
+except Exception:  # pragma: no cover - optional runtime dependency
+    cv2 = None
+
+try:
+    import numpy as np
+except Exception:  # pragma: no cover - optional runtime dependency
+    np = None
+
 
 TEXT_AREA_PLAN_VERSION = "bubble_detection_default_text_area_plan_v1"
 
@@ -36,6 +46,31 @@ AUTH_PROTECT_SFX_DECORATIVE = "protect_sfx_decorative"
 AUTH_PROTECT_ART_OR_NON_TEXT = "protect_art_or_non_text"
 AUTH_REVIEW_UNKNOWN_NOT_CLEANUP = "review_unknown_not_cleanup"
 AUTH_OUTSIDE_CLEANUP_SCOPE = "outside_cleanup_scope"
+AUTH_AMBIGUOUS_COMPONENT_OWNER = "ambiguous_component_owner"
+
+TEXT_AREA_COMPONENT_AUTHORIZATION_MAP_VERSION = "text_area_component_authorization_map_v1"
+
+COMPONENT_AUTHORIZATION_STATES = {
+    AUTH_CLEANUP_TRANSLATE_SPEECH,
+    AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+    AUTH_CLEANUP_TRANSLATE_CAPTION,
+    AUTH_PROTECT_SFX_DECORATIVE,
+    AUTH_PROTECT_ART_OR_NON_TEXT,
+    AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+    AUTH_OUTSIDE_CLEANUP_SCOPE,
+    AUTH_AMBIGUOUS_COMPONENT_OWNER,
+}
+
+COMPONENT_AUTHORIZATION_COLORS = {
+    AUTH_CLEANUP_TRANSLATE_SPEECH: "green",
+    AUTH_CLEANUP_TRANSLATE_BACKGROUND: "green",
+    AUTH_CLEANUP_TRANSLATE_CAPTION: "green",
+    AUTH_PROTECT_SFX_DECORATIVE: "red",
+    AUTH_PROTECT_ART_OR_NON_TEXT: "purple",
+    AUTH_REVIEW_UNKNOWN_NOT_CLEANUP: "gray",
+    AUTH_OUTSIDE_CLEANUP_SCOPE: "blue",
+    AUTH_AMBIGUOUS_COMPONENT_OWNER: "orange",
+}
 
 DETECTION_SCOPED = "scoped"
 DETECTION_COMPATIBILITY_FALLBACK = "compatibility_fallback"
@@ -273,6 +308,1502 @@ class TextAreaPlan:
             "summary": dict(self.summary),
             "stage": self.stage,
         }
+
+
+@dataclass
+class TextAreaComponentAuthorizationRecord:
+    page_id: str
+    component_id: str
+    component_bbox: List[int]
+    component_pixel_count: int
+    authorization_state: str
+    cleanup_authorization: str
+    route_intent: str
+    must_not_mutate: bool
+    owning_container_ids: List[str] = field(default_factory=list)
+    protection_container_ids: List[str] = field(default_factory=list)
+    source_stage: str = "text_area_plan_component_authorization"
+    confidence_tier: str = "low"
+    reason_codes: List[str] = field(default_factory=list)
+    conflict_flags: List[str] = field(default_factory=list)
+    review_required: bool = False
+    visual_debug_color: str = "gray"
+    group_id: str = ""
+    group_authorization_state: str = ""
+    label: int = 0
+    owner_cleanup_job_id: str = ""
+    scope_cleanup_job_ids: List[str] = field(default_factory=list)
+    candidate_cleanup_job_ids: List[str] = field(default_factory=list)
+    owning_region_ids: List[str] = field(default_factory=list)
+    protection_region_ids: List[str] = field(default_factory=list)
+    overlap_pixels: int = 0
+    overlap_ratio: float = 0.0
+    protected_overlap_pixels: int = 0
+    protected_overlap_ratio: float = 0.0
+    centroid: List[float] = field(default_factory=list)
+    candidate_container_ids: List[str] = field(default_factory=list)
+    candidate_region_ids: List[str] = field(default_factory=list)
+    sourceglyph_overlap_pixels: int = 0
+    sourceglyph_missing: bool = True
+    ambiguity_reasons: List[str] = field(default_factory=list)
+    semantic_authorization_state: str = ""
+    semantic_visual_color: str = ""
+    job_binding_state: str = ""
+    job_binding_failure_reason: str = ""
+    final_mask_authorization_state: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return dict(self.__dict__)
+
+
+@dataclass
+class TextAreaComponentAuthorizationMap:
+    page_id: str
+    image_size: Tuple[int, int] | List[int] | None
+    version: str = TEXT_AREA_COMPONENT_AUTHORIZATION_MAP_VERSION
+    components: List[TextAreaComponentAuthorizationRecord] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
+    summary: Dict[str, Any] = field(default_factory=dict)
+
+    def to_audit_dict(self) -> Dict[str, Any]:
+        return {
+            "version": self.version,
+            "page_id": self.page_id,
+            "image_size": list(self.image_size) if self.image_size else None,
+            "components": [record.to_dict() for record in self.components],
+            "errors": list(self.errors),
+            "summary": dict(self.summary),
+        }
+
+    def to_dict(self) -> Dict[str, Any]:
+        return self.to_audit_dict()
+
+
+def build_text_area_component_authorization_map(
+    *,
+    page_id: str,
+    text_foreground_segmentation: Any,
+    text_area_plan: Any = None,
+    page_region_records: Sequence[Mapping[str, Any]] | None = None,
+    cleanup_jobs: Sequence[Any] | None = None,
+) -> TextAreaComponentAuthorizationMap:
+    """Project TextAreaPlan semantic authorization onto CTD components.
+
+    This is the only production handoff that decides whether a refined CTD
+    component is cleanup-owned, protected, review-only, outside-scope, or
+    ambiguous. CleanupMask consumes this map without reinterpreting semantics.
+    """
+
+    mask, image_size, mask_error = _component_auth_segmentation_mask(text_foreground_segmentation)
+    errors: List[str] = []
+    if mask_error:
+        errors.append(mask_error)
+    if mask is None or np is None:
+        return TextAreaComponentAuthorizationMap(
+            page_id=str(page_id),
+            image_size=image_size,
+            components=[],
+            errors=errors or ["text_foreground_segmentation_missing"],
+            summary={
+                "component_count": 0,
+                "state_counts": {},
+                "semantic_authority": "text_area_plan",
+                "segmentation_source": "text_foreground_segmentation",
+                "component_classification_complete": False,
+            },
+        )
+
+    binary = (mask > 0).astype(np.uint8)
+    labels, stats, centroids = _component_auth_connected_components(binary)
+    plan_dict = _component_auth_plan_dict(text_area_plan)
+    scopes = _component_auth_scopes(
+        plan=plan_dict,
+        page_region_records=page_region_records or [],
+        cleanup_jobs=cleanup_jobs or [],
+        mask_shape=binary.shape,
+    )
+
+    components: List[TextAreaComponentAuthorizationRecord] = []
+    for label in range(1, int(len(stats))):
+        x, y, w, h, pixel_count = [int(item) for item in stats[label][:5]]
+        if pixel_count <= 0:
+            continue
+        component_mask = labels == label
+        candidates = _component_auth_candidates(component_mask, pixel_count, centroids[label], scopes)
+        record = _component_auth_record(
+            page_id=str(page_id),
+            component_index=len(components),
+            label=label,
+            bbox=[x, y, x + w, y + h],
+            pixel_count=pixel_count,
+            centroid=centroids[label],
+            candidates=candidates,
+        )
+        components.append(record)
+
+    _component_auth_apply_vertical_review_text_groups(components)
+    _component_auth_apply_orphan_text_near_cleanup_groups(components)
+    _component_auth_apply_protected_sfx_grouping(components)
+    _component_auth_apply_large_decorative_review_rule(components)
+    _component_auth_apply_large_decorative_review_groups(components)
+    _component_auth_apply_unowned_display_neighbor_conflicts(components)
+    _component_auth_apply_protected_sfx_grouping(components)
+    _component_auth_apply_review_only_caption_guard(components)
+    _component_auth_assign_groups(str(page_id), components)
+    state_counts: Dict[str, int] = {}
+    for record in components:
+        state_counts[record.authorization_state] = state_counts.get(record.authorization_state, 0) + 1
+    return TextAreaComponentAuthorizationMap(
+        page_id=str(page_id),
+        image_size=image_size or [int(binary.shape[1]), int(binary.shape[0])],
+        components=components,
+        errors=errors,
+        summary={
+            "component_count": len(components),
+            "state_counts": state_counts,
+            "semantic_authority": "text_area_plan",
+            "segmentation_source": "text_foreground_segmentation",
+            "component_classification_complete": True,
+            "component_record_count_matches_ctd": True,
+            "text_area_scope_count": len(scopes),
+            "cleanup_job_count": len(cleanup_jobs or []),
+        },
+    )
+
+
+def _component_auth_segmentation_mask(segmentation: Any) -> tuple[Any | None, List[int] | None, str]:
+    if np is None:
+        return None, None, "numpy_unavailable_for_component_authorization"
+    image_size = _component_auth_image_size(segmentation)
+    mask = _component_auth_get_value(segmentation, "refined_mask")
+    if mask is None:
+        mask = _component_auth_get_value(segmentation, "mask")
+    if mask is None:
+        mask_ref = str(
+            _component_auth_get_value(segmentation, "refined_mask_ref")
+            or _component_auth_get_value(segmentation, "mask_ref")
+            or ""
+        )
+        if mask_ref:
+            try:
+                from PIL import Image
+
+                path = Path(mask_ref)
+                if path.exists():
+                    mask = np.asarray(Image.open(path).convert("L"))
+            except Exception:
+                mask = None
+    if mask is None:
+        return None, image_size, "text_foreground_segmentation_missing_refined_mask"
+    try:
+        arr = np.asarray(mask)
+    except Exception:
+        return None, image_size, "text_foreground_segmentation_mask_unreadable"
+    if arr.ndim == 3:
+        arr = arr[..., 0]
+    if arr.size <= 0:
+        return None, image_size, "text_foreground_segmentation_mask_empty"
+    if image_size is None:
+        image_size = [int(arr.shape[1]), int(arr.shape[0])]
+    return (arr > 0).astype(np.uint8), image_size, ""
+
+
+def _component_auth_image_size(segmentation: Any) -> List[int] | None:
+    value = _component_auth_get_value(segmentation, "image_size")
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        try:
+            return [int(value[0]), int(value[1])]
+        except Exception:
+            return None
+    return None
+
+
+def _component_auth_get_value(source: Any, key: str) -> Any:
+    if source is None:
+        return None
+    if isinstance(source, Mapping):
+        return source.get(key)
+    return getattr(source, key, None)
+
+
+def _component_auth_connected_components(binary: Any) -> tuple[Any, Any, Any]:
+    if cv2 is not None:
+        _label_count, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        return labels.astype(np.int32), stats, centroids
+    height, width = binary.shape[:2]
+    labels = np.zeros((height, width), dtype=np.int32)
+    stats = [[0, 0, 0, 0, 0]]
+    centroids = [[0.0, 0.0]]
+    label = 0
+    for y in range(height):
+        for x in range(width):
+            if binary[y, x] <= 0 or labels[y, x] != 0:
+                continue
+            label += 1
+            stack = [(x, y)]
+            labels[y, x] = label
+            xs: List[int] = []
+            ys: List[int] = []
+            while stack:
+                sx, sy = stack.pop()
+                xs.append(sx)
+                ys.append(sy)
+                for ny in range(max(0, sy - 1), min(height, sy + 2)):
+                    for nx in range(max(0, sx - 1), min(width, sx + 2)):
+                        if binary[ny, nx] > 0 and labels[ny, nx] == 0:
+                            labels[ny, nx] = label
+                            stack.append((nx, ny))
+            stats.append([min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1, len(xs)])
+            centroids.append([sum(xs) / float(max(1, len(xs))), sum(ys) / float(max(1, len(ys)))])
+    return labels, np.asarray(stats, dtype=np.int32), np.asarray(centroids, dtype=float)
+
+
+def _component_auth_plan_dict(text_area_plan: Any) -> Dict[str, Any]:
+    if text_area_plan is None:
+        return {}
+    if isinstance(text_area_plan, Mapping):
+        return dict(text_area_plan)
+    if hasattr(text_area_plan, "to_dict"):
+        try:
+            value = text_area_plan.to_dict()
+            if isinstance(value, Mapping):
+                return dict(value)
+        except Exception:
+            return {}
+    return {}
+
+
+def _component_auth_scopes(
+    *,
+    plan: Mapping[str, Any],
+    page_region_records: Sequence[Mapping[str, Any]],
+    cleanup_jobs: Sequence[Any],
+    mask_shape: tuple[int, int],
+) -> List[Dict[str, Any]]:
+    region_jobs: Dict[str, List[str]] = {}
+    container_jobs: Dict[str, List[str]] = {}
+    for job in cleanup_jobs or []:
+        job_id = str(getattr(job, "cleanup_job_id", "") or "")
+        if not job_id:
+            continue
+        for region_id in getattr(job, "target_region_ids", []) or []:
+            region_jobs.setdefault(str(region_id), []).append(job_id)
+        container_id = str(getattr(job, "text_area_container_id", "") or "")
+        if container_id:
+            container_jobs.setdefault(container_id, []).append(job_id)
+
+    scopes: List[Dict[str, Any]] = []
+    for index, container in enumerate(plan.get("containers") or []):
+        if isinstance(container, Mapping):
+            scope = _component_auth_scope(
+                source=container,
+                source_kind="text_area_container",
+                fallback_id=f"container_{index:04d}",
+                bbox_mode="xywh",
+                mask_shape=mask_shape,
+                region_jobs=region_jobs,
+                container_jobs=container_jobs,
+            )
+            if scope:
+                scopes.append(scope)
+    for index, scope_record in enumerate(plan.get("scopes") or []):
+        if isinstance(scope_record, Mapping):
+            scope = _component_auth_scope(
+                source=scope_record,
+                source_kind="text_area_scope",
+                fallback_id=f"scope_{index:04d}",
+                bbox_mode="xywh",
+                mask_shape=mask_shape,
+                region_jobs=region_jobs,
+                container_jobs=container_jobs,
+            )
+            if scope:
+                scopes.append(scope)
+    for index, region in enumerate(page_region_records or []):
+        if isinstance(region, Mapping):
+            scope = _component_auth_scope(
+                source=region,
+                source_kind="region_record",
+                fallback_id=f"region_{index:04d}",
+                bbox_mode="region",
+                mask_shape=mask_shape,
+                region_jobs=region_jobs,
+                container_jobs=container_jobs,
+            )
+            if scope:
+                scopes.append(scope)
+    return scopes
+
+
+def _component_auth_scope(
+    *,
+    source: Mapping[str, Any],
+    source_kind: str,
+    fallback_id: str,
+    bbox_mode: str,
+    mask_shape: tuple[int, int],
+    region_jobs: Mapping[str, Sequence[str]],
+    container_jobs: Mapping[str, Sequence[str]],
+) -> Dict[str, Any] | None:
+    bbox_value = source.get("bbox") or source.get("xyxy") or source.get("bounds")
+    bbox = (
+        _component_auth_xywh_to_xyxy(bbox_value, mask_shape)
+        if bbox_mode == "xywh"
+        else _component_auth_valid_or_xywh_bbox(bbox_value, mask_shape)
+    )
+    if not bbox:
+        return None
+    auth = str(source.get("cleanup_authorization") or source.get("text_area_cleanup_authorization") or "")
+    protection_reason = str(source.get("protection_reason") or source.get("text_area_protection_reason") or "")
+    must_not_mutate = bool(source.get("must_not_mutate") or source.get("text_area_must_not_mutate"))
+    if not auth:
+        try:
+            auth, protection_reason_from_container, must_not_mutate_from_container = _cleanup_authorization_for_container(source)
+            protection_reason = protection_reason or protection_reason_from_container
+            must_not_mutate = must_not_mutate or must_not_mutate_from_container
+        except Exception:
+            auth = _component_auth_infer_authorization(source)
+    if auth not in COMPONENT_AUTHORIZATION_STATES:
+        auth = _component_auth_infer_authorization(source)
+    family = _component_auth_family(auth)
+    container_id = str(source.get("container_id") or source.get("text_area_container_id") or source.get("scope_id") or fallback_id)
+    region_id = str(source.get("region_id") or source.get("id") or "")
+    job_ids = []
+    for job_id in region_jobs.get(region_id, []) if region_id else []:
+        if job_id not in job_ids:
+            job_ids.append(str(job_id))
+    for job_id in container_jobs.get(container_id, []) if container_id else []:
+        if job_id not in job_ids:
+            job_ids.append(str(job_id))
+    reason_codes = _component_auth_list(
+        source.get("reason_codes")
+        or source.get("evidence_reason_codes")
+        or source.get("text_area_reason_codes")
+        or []
+    )
+    if protection_reason and protection_reason not in reason_codes:
+        reason_codes.append(protection_reason)
+    conflict_flags = _component_auth_list(source.get("conflict_flags") or source.get("text_area_conflict_flags") or [])
+    return {
+        "source_kind": source_kind,
+        "bbox": bbox,
+        "authorization_state": auth,
+        "family": family,
+        "container_id": container_id,
+        "region_id": region_id,
+        "route_intent": str(source.get("route_intent") or source.get("text_area_route_intent") or source.get("intent") or ""),
+        "must_not_mutate": must_not_mutate or family in {"protected", "review", "outside", "ambiguous"},
+        "source_stage": str(source.get("source_stage") or source.get("text_area_authorization_source_stage") or source_kind),
+        "confidence_tier": str(source.get("confidence_tier") or source.get("text_area_confidence_tier") or "low"),
+        "reason_codes": reason_codes,
+        "conflict_flags": conflict_flags,
+        "cleanup_job_ids": job_ids,
+    }
+
+
+def _component_auth_infer_authorization(source: Mapping[str, Any]) -> str:
+    marker = " ".join(
+        str(source.get(key) or "")
+        for key in (
+            "cleanup_authorization",
+            "text_area_cleanup_authorization",
+            "route_intent",
+            "text_area_route_intent",
+            "container_type",
+            "semantic_class",
+            "cleanup_mode",
+            "classification_reason",
+            "protection_reason",
+            "text_area_protection_reason",
+            "fallback_reason",
+        )
+    ).lower()
+    if any(token in marker for token in ("non_text", "non-text", "art_only", "non_translation_art")):
+        return AUTH_PROTECT_ART_OR_NON_TEXT
+    if any(token in marker for token in ("sfx", "decorative", "preserve_sfx_decorative")):
+        return AUTH_PROTECT_SFX_DECORATIVE
+    if "translate_speech" in marker or "speech_bubble" in marker:
+        return AUTH_CLEANUP_TRANSLATE_SPEECH
+    if "caption" in marker and "background" not in marker:
+        return AUTH_CLEANUP_TRANSLATE_CAPTION
+    if "translate_caption" in marker or "background" in marker:
+        return AUTH_CLEANUP_TRANSLATE_BACKGROUND
+    if "outside" in marker:
+        return AUTH_OUTSIDE_CLEANUP_SCOPE
+    return AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
+
+
+def _component_auth_family(auth: str) -> str:
+    if auth in {AUTH_CLEANUP_TRANSLATE_SPEECH, AUTH_CLEANUP_TRANSLATE_BACKGROUND, AUTH_CLEANUP_TRANSLATE_CAPTION}:
+        return "cleanup"
+    if auth in {AUTH_PROTECT_SFX_DECORATIVE, AUTH_PROTECT_ART_OR_NON_TEXT}:
+        return "protected"
+    if auth == AUTH_OUTSIDE_CLEANUP_SCOPE:
+        return "outside"
+    if auth == AUTH_AMBIGUOUS_COMPONENT_OWNER:
+        return "ambiguous"
+    return "review"
+
+
+def _component_auth_candidates(
+    component_mask: Any,
+    pixel_count: int,
+    centroid: Sequence[float],
+    scopes: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    cx = float(centroid[0])
+    cy = float(centroid[1])
+    for scope in scopes or []:
+        bbox = scope.get("bbox")
+        if not isinstance(bbox, Sequence) or len(bbox) < 4:
+            continue
+        x0, y0, x1, y1 = [int(item) for item in bbox[:4]]
+        if x1 <= x0 or y1 <= y0:
+            continue
+        overlap = int(np.count_nonzero(component_mask[y0:y1, x0:x1]))
+        centroid_inside = x0 <= cx < x1 and y0 <= cy < y1
+        if overlap <= 0 and not centroid_inside:
+            continue
+        ratio = overlap / float(max(1, pixel_count))
+        eligible = ratio >= 0.05 or overlap >= 3 or centroid_inside
+        candidates.append(
+            {
+                **dict(scope),
+                "overlap_pixels": overlap,
+                "overlap_ratio": ratio,
+                "centroid_inside": centroid_inside,
+                "eligible": eligible,
+            }
+        )
+    candidates.sort(key=lambda item: (int(item.get("overlap_pixels") or 0), bool(item.get("centroid_inside"))), reverse=True)
+    return candidates
+
+
+def _component_auth_record(
+    *,
+    page_id: str,
+    component_index: int,
+    label: int,
+    bbox: List[int],
+    pixel_count: int,
+    centroid: Sequence[float],
+    candidates: Sequence[Mapping[str, Any]],
+) -> TextAreaComponentAuthorizationRecord:
+    eligible = [item for item in candidates if item.get("eligible")]
+    cleanup_candidates = [item for item in eligible if item.get("family") == "cleanup"]
+    protected_candidates = [item for item in eligible if item.get("family") == "protected"]
+    review_candidates = [item for item in eligible if item.get("family") == "review"]
+    outside_candidates = [item for item in eligible if item.get("family") == "outside"]
+    best_cleanup = cleanup_candidates[0] if cleanup_candidates else None
+    best_protected = protected_candidates[0] if protected_candidates else None
+    ambiguity_reasons: List[str] = []
+
+    selected: Mapping[str, Any] | None = None
+    semantic_authorization_state = AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
+    if best_cleanup and best_protected:
+        cleanup_ratio = float(best_cleanup.get("overlap_ratio") or 0.0)
+        protected_ratio = float(best_protected.get("overlap_ratio") or 0.0)
+        if protected_ratio >= 0.75 and cleanup_ratio < 0.25:
+            selected = best_protected
+            semantic_authorization_state = str(best_protected.get("authorization_state") or AUTH_PROTECT_SFX_DECORATIVE)
+        elif cleanup_ratio >= 0.75 and protected_ratio < 0.25:
+            selected = best_cleanup
+            semantic_authorization_state = str(best_cleanup.get("authorization_state") or AUTH_CLEANUP_TRANSLATE_SPEECH)
+        else:
+            selected = best_cleanup
+            semantic_authorization_state = AUTH_AMBIGUOUS_COMPONENT_OWNER
+            ambiguity_reasons = ["conflicting_authorization_evidence"]
+    elif best_cleanup:
+        selected = best_cleanup
+        semantic_authorization_state = str(best_cleanup.get("authorization_state") or AUTH_CLEANUP_TRANSLATE_SPEECH)
+    elif best_protected:
+        selected = best_protected
+        semantic_authorization_state = str(best_protected.get("authorization_state") or AUTH_PROTECT_SFX_DECORATIVE)
+    elif review_candidates:
+        selected = review_candidates[0]
+        semantic_authorization_state = AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
+    elif outside_candidates:
+        selected = outside_candidates[0]
+        semantic_authorization_state = AUTH_OUTSIDE_CLEANUP_SCOPE
+    else:
+        selected = None
+        semantic_authorization_state = AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
+
+    family = _component_auth_family(semantic_authorization_state)
+    reason_codes = _component_auth_merged_values(eligible, "reason_codes")
+    conflict_flags = _component_auth_merged_values(eligible, "conflict_flags")
+    if not eligible and "no_upstream_text_area_authorization" not in reason_codes:
+        reason_codes.append("no_upstream_text_area_authorization")
+    if semantic_authorization_state == AUTH_AMBIGUOUS_COMPONENT_OWNER and "conflicting_authorization_evidence" not in reason_codes:
+        if not ambiguity_reasons:
+            reason_codes.append("conflicting_authorization_evidence")
+    for reason in ambiguity_reasons:
+        if reason and reason not in reason_codes:
+            reason_codes.append(reason)
+    component_id = f"tauthcomp_{_component_auth_safe_id(page_id)}_{component_index:04d}"
+    owning_candidates = cleanup_candidates if family == "cleanup" else []
+    protection_candidates = protected_candidates if family == "protected" else []
+    if semantic_authorization_state == AUTH_AMBIGUOUS_COMPONENT_OWNER:
+        owning_candidates = cleanup_candidates
+        protection_candidates = protected_candidates
+    binding_state, binding_failure_reason, owner_cleanup_job_id, scope_cleanup_job_ids = _component_auth_job_binding(
+        semantic_authorization_state,
+        cleanup_candidates,
+    )
+    if binding_failure_reason and binding_failure_reason not in reason_codes:
+        reason_codes.append(binding_failure_reason)
+    if binding_state in {"missing_cleanup_job", "non_unique_cleanup_job"} and binding_state not in reason_codes:
+        reason_codes.append(binding_state)
+    final_mask_authorization_state = semantic_authorization_state
+    return TextAreaComponentAuthorizationRecord(
+        page_id=page_id,
+        component_id=component_id,
+        component_bbox=[int(item) for item in bbox],
+        component_pixel_count=int(pixel_count),
+        authorization_state=final_mask_authorization_state,
+        cleanup_authorization=final_mask_authorization_state if family in {"cleanup", "protected", "ambiguous"} else "",
+        route_intent=str(selected.get("route_intent") or "") if selected else "",
+        must_not_mutate=family != "cleanup",
+        owning_container_ids=_component_auth_unique_ids(owning_candidates, "container_id"),
+        protection_container_ids=_component_auth_unique_ids(protection_candidates, "container_id"),
+        source_stage=str(selected.get("source_stage") or "text_area_plan_component_authorization") if selected else "text_area_plan_component_authorization",
+        confidence_tier=str(selected.get("confidence_tier") or "low") if selected else "low",
+        reason_codes=reason_codes,
+        conflict_flags=conflict_flags,
+        review_required=family in {"review", "outside", "ambiguous"},
+        visual_debug_color=COMPONENT_AUTHORIZATION_COLORS.get(final_mask_authorization_state, "gray"),
+        label=int(label),
+        owner_cleanup_job_id=owner_cleanup_job_id,
+        scope_cleanup_job_ids=scope_cleanup_job_ids,
+        candidate_cleanup_job_ids=_component_auth_unique_jobs(eligible),
+        owning_region_ids=_component_auth_unique_ids(owning_candidates, "region_id"),
+        protection_region_ids=_component_auth_unique_ids(protection_candidates, "region_id"),
+        overlap_pixels=int(selected.get("overlap_pixels") or 0) if selected else 0,
+        overlap_ratio=round(float(selected.get("overlap_ratio") or 0.0), 4) if selected else 0.0,
+        protected_overlap_pixels=int(best_protected.get("overlap_pixels") or 0) if best_protected else 0,
+        protected_overlap_ratio=round(float(best_protected.get("overlap_ratio") or 0.0), 4) if best_protected else 0.0,
+        centroid=[round(float(centroid[0]), 3), round(float(centroid[1]), 3)],
+        candidate_container_ids=_component_auth_unique_ids(eligible, "container_id"),
+        candidate_region_ids=_component_auth_unique_ids(eligible, "region_id"),
+        ambiguity_reasons=ambiguity_reasons,
+        semantic_authorization_state=semantic_authorization_state,
+        semantic_visual_color=COMPONENT_AUTHORIZATION_COLORS.get(semantic_authorization_state, "gray"),
+        job_binding_state=binding_state,
+        job_binding_failure_reason=binding_failure_reason,
+        final_mask_authorization_state=final_mask_authorization_state,
+    )
+
+
+def _component_auth_assign_groups(page_id: str, records: Sequence[TextAreaComponentAuthorizationRecord]) -> None:
+    groups: Dict[tuple[str, str], List[TextAreaComponentAuthorizationRecord]] = {}
+    for record in records:
+        if record.owning_container_ids:
+            key = ("cleanup", record.owning_container_ids[0])
+        elif record.protection_container_ids:
+            key = ("protected", record.protection_container_ids[0])
+        elif record.candidate_container_ids:
+            key = ("candidate", record.candidate_container_ids[0])
+        else:
+            key = ("component", record.component_id)
+        groups.setdefault(key, []).append(record)
+    for index, (_key, group) in enumerate(groups.items()):
+        states = {record.authorization_state for record in group}
+        cleanup_states = sorted(state for state in states if _component_auth_family(state) == "cleanup")
+        protected_states = sorted(state for state in states if _component_auth_family(state) == "protected")
+        if AUTH_AMBIGUOUS_COMPONENT_OWNER in states or (cleanup_states and protected_states):
+            group_state = AUTH_AMBIGUOUS_COMPONENT_OWNER
+        elif cleanup_states:
+            group_state = cleanup_states[0]
+        elif protected_states:
+            group_state = protected_states[0]
+        elif AUTH_OUTSIDE_CLEANUP_SCOPE in states:
+            group_state = AUTH_OUTSIDE_CLEANUP_SCOPE
+        else:
+            group_state = AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
+        group_id = f"tauthgrp_{_component_auth_safe_id(page_id)}_{index:04d}"
+        for record in group:
+            record.group_id = group_id
+            record.group_authorization_state = group_state
+            if record.authorization_state in {AUTH_REVIEW_UNKNOWN_NOT_CLEANUP, AUTH_OUTSIDE_CLEANUP_SCOPE} and group_state not in {
+                AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+                AUTH_OUTSIDE_CLEANUP_SCOPE,
+                AUTH_AMBIGUOUS_COMPONENT_OWNER,
+            }:
+                record.authorization_state = group_state
+                record.cleanup_authorization = group_state
+                record.must_not_mutate = _component_auth_family(group_state) != "cleanup"
+                record.review_required = False
+                record.visual_debug_color = COMPONENT_AUTHORIZATION_COLORS.get(group_state, record.visual_debug_color)
+                if "group_authorization_promoted_review_component" not in record.reason_codes:
+                    record.reason_codes.append("group_authorization_promoted_review_component")
+
+
+def _component_auth_apply_protected_sfx_grouping(records: Sequence[TextAreaComponentAuthorizationRecord]) -> None:
+    seeds = [
+        record
+        for record in records
+        if record.authorization_state == AUTH_PROTECT_SFX_DECORATIVE and record.component_pixel_count >= 20
+    ]
+    if not seeds:
+        return
+    for record in records:
+        if record.authorization_state == AUTH_PROTECT_SFX_DECORATIVE:
+            continue
+        matching_seeds = [seed for seed in seeds if _component_auth_same_sfx_band(record, seed)]
+        if not matching_seeds:
+            continue
+        matching_seed = next(
+            (seed for seed in matching_seeds if _component_auth_is_local_sfx_continuation(record, seed)),
+            matching_seeds[0],
+        )
+        is_local_sfx_continuation = _component_auth_is_local_sfx_continuation(record, matching_seed)
+        if _component_auth_is_speech_record(record) and not is_local_sfx_continuation:
+            continue
+        if record.authorization_state in {
+            AUTH_CLEANUP_TRANSLATE_SPEECH,
+            AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+            AUTH_CLEANUP_TRANSLATE_CAPTION,
+        }:
+            if not (
+                _component_auth_has_decorative_evidence(record)
+                or is_local_sfx_continuation
+            ):
+                continue
+            _component_auth_set_state(
+                record,
+                AUTH_AMBIGUOUS_COMPONENT_OWNER,
+                reason="sfx_group_conflicts_with_cleanup_authorization",
+                ambiguity=True,
+            )
+        else:
+            _component_auth_set_state(
+                record,
+                AUTH_PROTECT_SFX_DECORATIVE,
+                reason="sfx_group_propagated_from_protected_neighbor",
+            )
+        for container_id in matching_seed.protection_container_ids:
+            if container_id and container_id not in record.protection_container_ids:
+                record.protection_container_ids.append(container_id)
+
+
+def _component_auth_apply_vertical_review_text_groups(records: Sequence[TextAreaComponentAuthorizationRecord]) -> None:
+    candidates = [
+        record
+        for record in records
+        if _component_auth_is_vertical_review_text_candidate(record)
+    ]
+    visited: set[str] = set()
+    for record in candidates:
+        if record.component_id in visited:
+            continue
+        group: List[TextAreaComponentAuthorizationRecord] = []
+        stack = [record]
+        visited.add(record.component_id)
+        while stack:
+            current = stack.pop()
+            group.append(current)
+            for other in candidates:
+                if other.component_id in visited:
+                    continue
+                if _component_auth_bboxes_adjacent(current.component_bbox, other.component_bbox):
+                    visited.add(other.component_id)
+                    stack.append(other)
+        if not _component_auth_is_vertical_review_text_group(group):
+            continue
+        for item in group:
+            _component_auth_set_state(
+                item,
+                AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+                reason="vertical_review_text_group_promoted_to_cleanup_background",
+            )
+            item.route_intent = "translate_caption_background"
+            item.protection_container_ids = []
+            item.reason_codes = [
+                reason
+                for reason in item.reason_codes
+                if not any(token in str(reason).lower() for token in ("sfx", "decorative", "preserve"))
+            ]
+            item.conflict_flags = [
+                flag
+                for flag in item.conflict_flags
+                if not any(token in str(flag).lower() for token in ("sfx", "decorative", "preserve"))
+            ]
+            if "vertical_review_text_group_promoted_to_cleanup_background" not in item.reason_codes:
+                item.reason_codes.append("vertical_review_text_group_promoted_to_cleanup_background")
+            item.job_binding_state = "missing_cleanup_job"
+            item.job_binding_failure_reason = "cleanup_job_binding_contract_error"
+            item.owner_cleanup_job_id = ""
+            item.scope_cleanup_job_ids = []
+            if item.job_binding_failure_reason not in item.reason_codes:
+                item.reason_codes.append(item.job_binding_failure_reason)
+            if item.job_binding_state not in item.reason_codes:
+                item.reason_codes.append(item.job_binding_state)
+
+
+def _component_auth_is_vertical_review_text_candidate(record: TextAreaComponentAuthorizationRecord) -> bool:
+    if record.authorization_state in {
+        AUTH_CLEANUP_TRANSLATE_SPEECH,
+        AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+        AUTH_CLEANUP_TRANSLATE_CAPTION,
+        AUTH_AMBIGUOUS_COMPONENT_OWNER,
+        AUTH_OUTSIDE_CLEANUP_SCOPE,
+    }:
+        return False
+    if _component_auth_is_speech_record(record):
+        return False
+    if len(record.component_bbox) < 4:
+        return False
+    width = max(1, int(record.component_bbox[2]) - int(record.component_bbox[0]))
+    height = max(1, int(record.component_bbox[3]) - int(record.component_bbox[1]))
+    if width > 70 or height > 90 or record.component_pixel_count > 1200:
+        return False
+    return True
+
+
+def _component_auth_is_vertical_review_text_group(group: Sequence[TextAreaComponentAuthorizationRecord]) -> bool:
+    if len(group) < 6:
+        return False
+    x0 = min(int(item.component_bbox[0]) for item in group)
+    y0 = min(int(item.component_bbox[1]) for item in group)
+    x1 = max(int(item.component_bbox[2]) for item in group)
+    y1 = max(int(item.component_bbox[3]) for item in group)
+    width = max(1, x1 - x0)
+    height = max(1, y1 - y0)
+    if height < 140 or width < 35 or width > 220:
+        return False
+    if height < width * 1.25:
+        return False
+    seed_count = sum(1 for item in group if _component_auth_has_review_text_seed(item))
+    if seed_count <= 0:
+        return False
+    large_items = [
+        item
+        for item in group
+        if (
+            max(1, int(item.component_bbox[2]) - int(item.component_bbox[0])) > 70
+            or max(1, int(item.component_bbox[3]) - int(item.component_bbox[1])) > 90
+            or item.component_pixel_count > 1200
+        )
+    ]
+    return not large_items
+
+
+def _component_auth_has_review_text_seed(record: TextAreaComponentAuthorizationRecord) -> bool:
+    marker = " ".join(
+        [
+            str(record.route_intent or ""),
+            str(record.confidence_tier or ""),
+            " ".join(record.reason_codes or []),
+            " ".join(record.candidate_container_ids or []),
+        ]
+    ).lower()
+    return bool(
+        record.candidate_container_ids
+        and any(token in marker for token in ("review_or_fallback", "unknown_fallback", "bubble_without_kitsumed", "dark_or_art_context"))
+    )
+
+
+def _component_auth_apply_orphan_text_near_cleanup_groups(records: Sequence[TextAreaComponentAuthorizationRecord]) -> None:
+    candidates = [
+        record
+        for record in records
+        if _component_auth_is_orphan_text_candidate(record)
+    ]
+    visited: set[str] = set()
+    for record in candidates:
+        if record.component_id in visited:
+            continue
+        group: List[TextAreaComponentAuthorizationRecord] = []
+        stack = [record]
+        visited.add(record.component_id)
+        while stack:
+            current = stack.pop()
+            group.append(current)
+            for other in candidates:
+                if other.component_id in visited:
+                    continue
+                if _component_auth_bboxes_adjacent(current.component_bbox, other.component_bbox):
+                    visited.add(other.component_id)
+                    stack.append(other)
+        anchor = _component_auth_cleanup_anchor_for_orphan_group(group, records)
+        if anchor is None:
+            continue
+        state = AUTH_CLEANUP_TRANSLATE_SPEECH if str(anchor.route_intent or "") == "translate_speech" else AUTH_CLEANUP_TRANSLATE_BACKGROUND
+        route = "translate_speech" if state == AUTH_CLEANUP_TRANSLATE_SPEECH else "translate_caption_background"
+        for item in group:
+            _component_auth_set_state(
+                item,
+                state,
+                reason="small_orphan_text_group_promoted_near_cleanup_text",
+            )
+            item.route_intent = route
+            item.job_binding_state = "missing_cleanup_job"
+            item.job_binding_failure_reason = "cleanup_job_binding_contract_error"
+            item.owner_cleanup_job_id = ""
+            item.scope_cleanup_job_ids = []
+            if item.job_binding_failure_reason not in item.reason_codes:
+                item.reason_codes.append(item.job_binding_failure_reason)
+            if item.job_binding_state not in item.reason_codes:
+                item.reason_codes.append(item.job_binding_state)
+
+
+def _component_auth_is_orphan_text_candidate(record: TextAreaComponentAuthorizationRecord) -> bool:
+    if record.authorization_state != AUTH_REVIEW_UNKNOWN_NOT_CLEANUP:
+        return False
+    if record.candidate_container_ids or record.candidate_cleanup_job_ids or record.owning_container_ids or record.protection_container_ids:
+        return False
+    if _component_auth_has_decorative_evidence(record) or _component_auth_is_speech_record(record):
+        return False
+    if len(record.component_bbox) < 4:
+        return False
+    width = max(1, int(record.component_bbox[2]) - int(record.component_bbox[0]))
+    height = max(1, int(record.component_bbox[3]) - int(record.component_bbox[1]))
+    return bool(15 <= record.component_pixel_count <= 600 and width <= 50 and height <= 55)
+
+
+def _component_auth_cleanup_anchor_for_orphan_group(
+    group: Sequence[TextAreaComponentAuthorizationRecord],
+    records: Sequence[TextAreaComponentAuthorizationRecord],
+) -> TextAreaComponentAuthorizationRecord | None:
+    if len(group) < 2:
+        return None
+    x0 = min(int(item.component_bbox[0]) for item in group)
+    y0 = min(int(item.component_bbox[1]) for item in group)
+    x1 = max(int(item.component_bbox[2]) for item in group)
+    y1 = max(int(item.component_bbox[3]) for item in group)
+    width = max(1, x1 - x0)
+    height = max(1, y1 - y0)
+    pixels = sum(int(item.component_pixel_count) for item in group)
+    if pixels < 120 or width > 100 or height > 100:
+        return None
+    group_box = [x0, y0, x1, y1]
+    for protected in records:
+        if protected.authorization_state not in {AUTH_PROTECT_SFX_DECORATIVE, AUTH_PROTECT_ART_OR_NON_TEXT, AUTH_AMBIGUOUS_COMPONENT_OWNER}:
+            continue
+        if protected.component_pixel_count >= 200 and _component_auth_bbox_gap(group_box, protected.component_bbox) <= 120:
+            return None
+    anchors = [
+        record
+        for record in records
+        if _component_auth_family(record.authorization_state) == "cleanup"
+        and not _component_auth_has_decorative_evidence(record)
+        and _component_auth_bbox_gap(group_box, record.component_bbox) <= 180
+    ]
+    if not anchors:
+        return None
+    anchors.sort(key=lambda item: _component_auth_bbox_gap(group_box, item.component_bbox))
+    return anchors[0]
+
+
+def _component_auth_bbox_gap(a: Sequence[int], b: Sequence[int]) -> int:
+    if len(a) < 4 or len(b) < 4:
+        return 10**9
+    ax0, ay0, ax1, ay1 = [int(item) for item in a[:4]]
+    bx0, by0, bx1, by1 = [int(item) for item in b[:4]]
+    x_gap = max(0, max(ax0, bx0) - min(ax1, bx1))
+    y_gap = max(0, max(ay0, by0) - min(ay1, by1))
+    return int(max(x_gap, y_gap))
+
+
+def _component_auth_same_sfx_band(
+    record: TextAreaComponentAuthorizationRecord,
+    seed: TextAreaComponentAuthorizationRecord,
+) -> bool:
+    box = record.component_bbox
+    seed_box = seed.component_bbox
+    if len(box) < 4 or len(seed_box) < 4:
+        return False
+    width = max(1, int(box[2]) - int(box[0]))
+    height = max(1, int(box[3]) - int(box[1]))
+    seed_width = max(1, int(seed_box[2]) - int(seed_box[0]))
+    seed_height = max(1, int(seed_box[3]) - int(seed_box[1]))
+    if record.component_pixel_count < 20 and width < 8 and height < 8:
+        return False
+    y_overlap = max(0, min(int(box[3]), int(seed_box[3])) - max(int(box[1]), int(seed_box[1])))
+    y_ratio = y_overlap / float(max(1, min(height, seed_height)))
+    x_overlap = max(0, min(int(box[2]), int(seed_box[2])) - max(int(box[0]), int(seed_box[0])))
+    x_ratio = x_overlap / float(max(1, min(width, seed_width)))
+    if int(box[2]) < int(seed_box[0]):
+        gap = int(seed_box[0]) - int(box[2])
+    elif int(seed_box[2]) < int(box[0]):
+        gap = int(box[0]) - int(seed_box[2])
+    else:
+        gap = 0
+    if int(box[3]) < int(seed_box[1]):
+        vertical_gap = int(seed_box[1]) - int(box[3])
+    elif int(seed_box[3]) < int(box[1]):
+        vertical_gap = int(box[1]) - int(seed_box[3])
+    else:
+        vertical_gap = 0
+    if y_ratio < 0.28 and not (x_ratio >= 0.35 and vertical_gap <= max(120, int(max(height, seed_height) * 1.2))):
+        return False
+    if gap > max(120, int(max(width, seed_width) * 2.0)):
+        return False
+    center_y = (int(box[1]) + int(box[3])) / 2.0
+    seed_center_y = (int(seed_box[1]) + int(seed_box[3])) / 2.0
+    if abs(center_y - seed_center_y) > max(160.0, float(max(height, seed_height)) * 1.4):
+        return False
+    return bool(record.component_pixel_count >= 20 or seed_width >= 40)
+
+
+def _component_auth_is_speech_record(record: TextAreaComponentAuthorizationRecord) -> bool:
+    marker = " ".join(
+        [
+            str(record.route_intent or ""),
+            " ".join(record.reason_codes or []),
+            " ".join(record.owning_container_ids or []),
+            " ".join(record.candidate_container_ids or []),
+        ]
+    ).lower()
+    return any(token in marker for token in ("translate_speech", "speech_bubble", "speech_mask_container"))
+
+
+def _component_auth_has_decorative_evidence(record: TextAreaComponentAuthorizationRecord) -> bool:
+    marker = " ".join(
+        [
+            str(record.route_intent or ""),
+            " ".join(record.reason_codes or []),
+            " ".join(record.conflict_flags or []),
+            " ".join(record.protection_container_ids or []),
+            " ".join(record.candidate_container_ids or []),
+        ]
+    ).lower()
+    return any(token in marker for token in ("sfx", "decorative", "preserve", "art_text", "art_sfx", "non_text", "non-text"))
+
+
+def _component_auth_is_local_sfx_continuation(
+    record: TextAreaComponentAuthorizationRecord,
+    seed: TextAreaComponentAuthorizationRecord,
+) -> bool:
+    box = record.component_bbox
+    seed_box = seed.component_bbox
+    if len(box) < 4 or len(seed_box) < 4:
+        return False
+    width = max(1, int(box[2]) - int(box[0]))
+    height = max(1, int(box[3]) - int(box[1]))
+    seed_width = max(1, int(seed_box[2]) - int(seed_box[0]))
+    seed_height = max(1, int(seed_box[3]) - int(seed_box[1]))
+    if int(box[2]) < int(seed_box[0]):
+        gap = int(seed_box[0]) - int(box[2])
+    elif int(seed_box[2]) < int(box[0]):
+        gap = int(box[0]) - int(seed_box[2])
+    else:
+        gap = 0
+    y_overlap = max(0, min(int(box[3]), int(seed_box[3])) - max(int(box[1]), int(seed_box[1])))
+    y_ratio = y_overlap / float(max(1, min(height, seed_height)))
+    x_overlap = max(0, min(int(box[2]), int(seed_box[2])) - max(int(box[0]), int(seed_box[0])))
+    x_ratio = x_overlap / float(max(1, min(width, seed_width)))
+    if int(box[3]) < int(seed_box[1]):
+        vertical_gap = int(seed_box[1]) - int(box[3])
+    elif int(seed_box[3]) < int(box[1]):
+        vertical_gap = int(box[1]) - int(seed_box[3])
+    else:
+        vertical_gap = 0
+    if y_ratio < 0.35 and not (x_ratio >= 0.35 and vertical_gap <= 120):
+        return False
+    horizontal_stroke = gap <= 80 and width >= 45 and width >= height * 2.0
+    compact_neighbor = gap <= 80 and width >= 18 and seed_width >= 60
+    large_sfx_cluster_neighbor = (
+        gap <= 220
+        and width >= 80
+        and height >= 80
+        and seed_width >= 80
+        and seed_height >= 80
+    )
+    vertical_sfx_stack = (
+        vertical_gap <= 120
+        and x_ratio >= 0.35
+        and width >= 45
+        and height >= 45
+        and seed_width >= 45
+        and seed_height >= 45
+    )
+    return bool(horizontal_stroke or compact_neighbor or large_sfx_cluster_neighbor or vertical_sfx_stack)
+
+
+def _component_auth_apply_review_only_caption_guard(records: Sequence[TextAreaComponentAuthorizationRecord]) -> None:
+    guarded: List[TextAreaComponentAuthorizationRecord] = []
+    for record in records:
+        if not _component_auth_is_large_review_only_caption_seed(record):
+            continue
+        if record.authorization_state != AUTH_AMBIGUOUS_COMPONENT_OWNER:
+            _component_auth_set_state(
+                record,
+                AUTH_AMBIGUOUS_COMPONENT_OWNER,
+                reason="large_review_only_caption_component_conflicts_with_cleanup_authority",
+                ambiguity=True,
+            )
+        guarded.append(record)
+    for group in _component_auth_review_only_caption_groups(records):
+        if not _component_auth_is_large_review_only_caption_group(group):
+            continue
+        for record in group:
+            if record.authorization_state != AUTH_AMBIGUOUS_COMPONENT_OWNER:
+                _component_auth_set_state(
+                    record,
+                    AUTH_AMBIGUOUS_COMPONENT_OWNER,
+                    reason="large_review_only_caption_group_conflicts_with_cleanup_authority",
+                    ambiguity=True,
+                )
+            if record not in guarded:
+                guarded.append(record)
+    if not guarded:
+        return
+
+    for record in records:
+        if record in guarded:
+            continue
+        if record.authorization_state not in {
+            AUTH_CLEANUP_TRANSLATE_SPEECH,
+            AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+            AUTH_CLEANUP_TRANSLATE_CAPTION,
+        }:
+            continue
+        if _component_auth_is_speech_record(record):
+            continue
+        if str(record.route_intent or "") != "translate_caption_background":
+            continue
+        if not any(_component_auth_shares_local_caption_guard(record, seed) for seed in guarded):
+            continue
+        _component_auth_set_state(
+            record,
+            AUTH_AMBIGUOUS_COMPONENT_OWNER,
+            reason="large_review_only_caption_group_conflicts_with_cleanup_authority",
+            ambiguity=True,
+        )
+
+
+def _component_auth_is_large_review_only_caption_component(record: TextAreaComponentAuthorizationRecord) -> bool:
+    if record.authorization_state not in {
+        AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+        AUTH_CLEANUP_TRANSLATE_CAPTION,
+    }:
+        return False
+    return _component_auth_is_large_review_only_caption_seed(record)
+
+
+def _component_auth_is_large_review_only_caption_seed(record: TextAreaComponentAuthorizationRecord) -> bool:
+    if record.authorization_state not in {
+        AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+        AUTH_CLEANUP_TRANSLATE_CAPTION,
+        AUTH_AMBIGUOUS_COMPONENT_OWNER,
+    }:
+        return False
+    if _component_auth_is_speech_record(record):
+        return False
+    if str(record.route_intent or "") != "translate_caption_background":
+        return False
+    marker = " ".join(
+        [
+            str(record.confidence_tier or ""),
+            " ".join(record.reason_codes or []),
+            " ".join(record.conflict_flags or []),
+        ]
+    ).lower()
+    if not any(
+        token in marker
+        for token in (
+            "text_free_review_only",
+            "ogkalu_text_free_without_kitsumed_mask",
+            "deterministic_side_caption_requires_review",
+            "deterministic_top_band_far_right_caption_search",
+            "sfx_group_conflicts_with_cleanup_authorization",
+        )
+    ):
+        return False
+    if len(record.component_bbox) < 4:
+        return False
+    width = max(1, int(record.component_bbox[2]) - int(record.component_bbox[0]))
+    height = max(1, int(record.component_bbox[3]) - int(record.component_bbox[1]))
+    if record.component_pixel_count < 1000:
+        return False
+    return bool(width >= 120 or (width >= 90 and height >= 90))
+
+
+def _component_auth_review_only_caption_groups(
+    records: Sequence[TextAreaComponentAuthorizationRecord],
+) -> List[List[TextAreaComponentAuthorizationRecord]]:
+    groups: Dict[str, List[TextAreaComponentAuthorizationRecord]] = {}
+    for record in records:
+        if not _component_auth_is_review_only_caption_group_candidate(record):
+            continue
+        ids = list(record.owning_container_ids or []) + list(record.candidate_container_ids or [])
+        key = ids[0] if ids else record.component_id
+        groups.setdefault(key, []).append(record)
+    return [group for group in groups.values() if len(group) >= 2]
+
+
+def _component_auth_is_review_only_caption_group_candidate(record: TextAreaComponentAuthorizationRecord) -> bool:
+    if record.authorization_state not in {
+        AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+        AUTH_CLEANUP_TRANSLATE_CAPTION,
+        AUTH_AMBIGUOUS_COMPONENT_OWNER,
+    }:
+        return False
+    if _component_auth_is_speech_record(record):
+        return False
+    if str(record.route_intent or "") != "translate_caption_background":
+        return False
+    marker = " ".join(
+        [
+            str(record.confidence_tier or ""),
+            " ".join(record.reason_codes or []),
+            " ".join(record.owning_container_ids or []),
+            " ".join(record.candidate_container_ids or []),
+        ]
+    ).lower()
+    has_text_free_marker = any(token in marker for token in ("text_free_review_only", "ogkalu_text_free_without_kitsumed_mask"))
+    if (
+        "deterministic_top_band_far_right_caption_search" in marker
+        and not has_text_free_marker
+        and len(record.component_bbox) >= 4
+        and int(record.component_bbox[1]) > 280
+    ):
+        return False
+    return any(
+        token in marker
+        for token in (
+            "text_free_review_only",
+            "ogkalu_text_free_without_kitsumed_mask",
+            "deterministic_top_band_far_right_caption_search",
+            "deterministic_top_band_day_caption_search",
+            "sfx_group_conflicts_with_cleanup_authorization",
+        )
+    )
+
+
+def _component_auth_is_large_review_only_caption_group(group: Sequence[TextAreaComponentAuthorizationRecord]) -> bool:
+    if len(group) < 2:
+        return False
+    x0 = min(int(item.component_bbox[0]) for item in group)
+    y0 = min(int(item.component_bbox[1]) for item in group)
+    x1 = max(int(item.component_bbox[2]) for item in group)
+    y1 = max(int(item.component_bbox[3]) for item in group)
+    width = max(1, x1 - x0)
+    height = max(1, y1 - y0)
+    pixels = sum(int(item.component_pixel_count) for item in group)
+    if pixels < 2500 or height < 80 or width < 45:
+        return False
+    if any(item.authorization_state == AUTH_AMBIGUOUS_COMPONENT_OWNER for item in group):
+        return True
+    display_like_components = 0
+    for item in group:
+        item_width = max(1, int(item.component_bbox[2]) - int(item.component_bbox[0]))
+        item_height = max(1, int(item.component_bbox[3]) - int(item.component_bbox[1]))
+        if item.component_pixel_count >= 1200 or (item_width >= 45 and item_height >= 80):
+            display_like_components += 1
+    if display_like_components < 2:
+        return False
+    return bool((len(group) >= 3 and (width >= 75 or height >= 160)) or (len(group) >= 2 and pixels >= 5000 and height >= 160))
+
+
+def _component_auth_shares_local_caption_guard(
+    record: TextAreaComponentAuthorizationRecord,
+    seed: TextAreaComponentAuthorizationRecord,
+) -> bool:
+    shared_containers = set(record.owning_container_ids or []) & set(seed.owning_container_ids or [])
+    shared_candidates = set(record.candidate_container_ids or []) & set(seed.candidate_container_ids or [])
+    if not shared_containers and not shared_candidates:
+        return False
+    if len(record.component_bbox) < 4 or len(seed.component_bbox) < 4:
+        return False
+    box = [int(item) for item in record.component_bbox[:4]]
+    seed_box = [int(item) for item in seed.component_bbox[:4]]
+    margin = 35
+    return not (
+        box[2] < seed_box[0] - margin
+        or box[0] > seed_box[2] + margin
+        or box[3] < seed_box[1] - margin
+        or box[1] > seed_box[3] + margin
+    )
+
+
+def _component_auth_set_state(
+    record: TextAreaComponentAuthorizationRecord,
+    state: str,
+    *,
+    reason: str = "",
+    ambiguity: bool = False,
+) -> None:
+    family = _component_auth_family(state)
+    record.authorization_state = state
+    record.semantic_authorization_state = state
+    record.final_mask_authorization_state = state
+    record.cleanup_authorization = state if family in {"cleanup", "protected", "ambiguous"} else ""
+    record.must_not_mutate = family != "cleanup"
+    record.review_required = family in {"review", "outside", "ambiguous"}
+    color = COMPONENT_AUTHORIZATION_COLORS.get(state, "gray")
+    record.visual_debug_color = color
+    record.semantic_visual_color = color
+    if family != "cleanup":
+        record.job_binding_state = "not_applicable_semantic_conflict" if state == AUTH_AMBIGUOUS_COMPONENT_OWNER else "not_applicable_non_cleanup"
+        record.job_binding_failure_reason = ""
+        record.reason_codes = [
+            item
+            for item in record.reason_codes
+            if item not in {"cleanup_job_binding_contract_error", "missing_cleanup_job", "non_unique_cleanup_job"}
+        ]
+    if reason and reason not in record.reason_codes:
+        record.reason_codes.append(reason)
+    if ambiguity and reason and reason not in record.ambiguity_reasons:
+        record.ambiguity_reasons.append(reason)
+
+
+def _component_auth_apply_large_decorative_review_rule(records: Sequence[TextAreaComponentAuthorizationRecord]) -> None:
+    for record in records:
+        if record.authorization_state in {AUTH_PROTECT_SFX_DECORATIVE, AUTH_PROTECT_ART_OR_NON_TEXT, AUTH_AMBIGUOUS_COMPONENT_OWNER}:
+            continue
+        if len(record.component_bbox) < 4:
+            continue
+        width = max(1, int(record.component_bbox[2]) - int(record.component_bbox[0]))
+        height = max(1, int(record.component_bbox[3]) - int(record.component_bbox[1]))
+        if record.component_pixel_count < 6000 or width < 80 or height < 80:
+            continue
+        if record.authorization_state in {
+            AUTH_CLEANUP_TRANSLATE_SPEECH,
+            AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+            AUTH_CLEANUP_TRANSLATE_CAPTION,
+        }:
+            if _component_auth_has_decorative_evidence(record):
+                _component_auth_set_state(
+                    record,
+                    AUTH_AMBIGUOUS_COMPONENT_OWNER,
+                    reason="large_decorative_component_conflicts_with_cleanup_authority",
+                    ambiguity=True,
+                )
+            continue
+        if record.authorization_state == AUTH_REVIEW_UNKNOWN_NOT_CLEANUP and _component_auth_has_decorative_evidence(record):
+            _component_auth_set_state(
+                record,
+                AUTH_PROTECT_SFX_DECORATIVE,
+                reason="large_decorative_component_without_translation_authority",
+            )
+
+
+def _component_auth_apply_large_decorative_review_groups(records: Sequence[TextAreaComponentAuthorizationRecord]) -> None:
+    candidates = [
+        record
+        for record in records
+        if record.authorization_state == AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
+        and not record.owning_container_ids
+        and not record.candidate_cleanup_job_ids
+        and record.component_pixel_count >= 400
+        and not _component_auth_is_speech_record(record)
+    ]
+    visited: set[str] = set()
+    for record in candidates:
+        if record.component_id in visited:
+            continue
+        group: List[TextAreaComponentAuthorizationRecord] = []
+        stack = [record]
+        visited.add(record.component_id)
+        while stack:
+            current = stack.pop()
+            group.append(current)
+            for other in candidates:
+                if other.component_id in visited:
+                    continue
+                if _component_auth_bboxes_adjacent(current.component_bbox, other.component_bbox):
+                    visited.add(other.component_id)
+                    stack.append(other)
+        if len(group) < 2:
+            continue
+        x0 = min(int(item.component_bbox[0]) for item in group)
+        y0 = min(int(item.component_bbox[1]) for item in group)
+        x1 = max(int(item.component_bbox[2]) for item in group)
+        y1 = max(int(item.component_bbox[3]) for item in group)
+        width = max(1, x1 - x0)
+        height = max(1, y1 - y0)
+        pixels = sum(int(item.component_pixel_count) for item in group)
+        if pixels < 2500 or height < 80:
+            continue
+        if width < 55 and height < 140:
+            continue
+        for item in group:
+            _component_auth_set_state(
+                item,
+                AUTH_PROTECT_SFX_DECORATIVE,
+                reason="large_decorative_component_group_without_translation_authority",
+            )
+
+
+def _component_auth_apply_unowned_display_neighbor_conflicts(records: Sequence[TextAreaComponentAuthorizationRecord]) -> None:
+    unowned = [
+        record
+        for record in records
+        if record.authorization_state == AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
+        and not record.candidate_container_ids
+        and not record.candidate_cleanup_job_ids
+        and not record.owning_container_ids
+        and _component_auth_is_large_display_fragment(record)
+    ]
+    if not unowned:
+        return
+    for record in records:
+        if record.authorization_state not in {
+            AUTH_CLEANUP_TRANSLATE_SPEECH,
+            AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+            AUTH_CLEANUP_TRANSLATE_CAPTION,
+        }:
+            continue
+        if not _component_auth_is_large_display_fragment(record):
+            continue
+        neighbor = next((item for item in unowned if _component_auth_display_fragments_adjacent(record, item)), None)
+        if neighbor is None:
+            continue
+        _component_auth_set_state(
+            neighbor,
+            AUTH_PROTECT_SFX_DECORATIVE,
+            reason="unowned_display_fragment_protected_near_cleanup_claim",
+        )
+        _component_auth_set_state(
+            record,
+            AUTH_AMBIGUOUS_COMPONENT_OWNER,
+            reason="unowned_display_neighbor_conflicts_with_cleanup_authority",
+            ambiguity=True,
+        )
+
+
+def _component_auth_is_large_display_fragment(record: TextAreaComponentAuthorizationRecord) -> bool:
+    if len(record.component_bbox) < 4:
+        return False
+    width = max(1, int(record.component_bbox[2]) - int(record.component_bbox[0]))
+    height = max(1, int(record.component_bbox[3]) - int(record.component_bbox[1]))
+    return bool(record.component_pixel_count >= 1000 and (height >= 55 or width >= 55))
+
+
+def _component_auth_display_fragments_adjacent(
+    record: TextAreaComponentAuthorizationRecord,
+    other: TextAreaComponentAuthorizationRecord,
+) -> bool:
+    if len(record.component_bbox) < 4 or len(other.component_bbox) < 4:
+        return False
+    box = [int(item) for item in record.component_bbox[:4]]
+    other_box = [int(item) for item in other.component_bbox[:4]]
+    if _component_auth_bbox_gap(box, other_box) > 45:
+        return False
+    x_overlap = max(0, min(box[2], other_box[2]) - max(box[0], other_box[0]))
+    y_overlap = max(0, min(box[3], other_box[3]) - max(box[1], other_box[1]))
+    min_width = max(1, min(box[2] - box[0], other_box[2] - other_box[0]))
+    min_height = max(1, min(box[3] - box[1], other_box[3] - other_box[1]))
+    return bool(x_overlap / float(min_width) >= 0.25 or y_overlap / float(min_height) >= 0.25)
+
+
+def _component_auth_bboxes_adjacent(a: Sequence[int], b: Sequence[int]) -> bool:
+    if len(a) < 4 or len(b) < 4:
+        return False
+    ax0, ay0, ax1, ay1 = [int(item) for item in a[:4]]
+    bx0, by0, bx1, by1 = [int(item) for item in b[:4]]
+    x_gap = max(0, max(ax0, bx0) - min(ax1, bx1))
+    y_gap = max(0, max(ay0, by0) - min(ay1, by1))
+    x_overlap = max(0, min(ax1, bx1) - max(ax0, bx0))
+    y_overlap = max(0, min(ay1, by1) - max(ay0, by0))
+    if x_overlap > 0 and y_gap <= 90:
+        return True
+    if y_overlap > 0 and x_gap <= 90:
+        return True
+    return x_gap <= 80 and y_gap <= 80
+
+
+def _component_auth_xywh_to_xyxy(value: Any, mask_shape: tuple[int, int]) -> List[int] | None:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or len(value) < 4:
+        return None
+    try:
+        x, y, w, h = [int(round(float(item))) for item in value[:4]]
+    except Exception:
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return _component_auth_clip_bbox([x, y, x + w, y + h], mask_shape)
+
+
+def _component_auth_valid_or_xywh_bbox(value: Any, mask_shape: tuple[int, int]) -> List[int] | None:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or len(value) < 4:
+        return None
+    try:
+        a, b, c, d = [int(round(float(item))) for item in value[:4]]
+    except Exception:
+        return None
+    if c > a and d > b:
+        return _component_auth_clip_bbox([a, b, c, d], mask_shape)
+    if c > 0 and d > 0:
+        return _component_auth_clip_bbox([a, b, a + c, b + d], mask_shape)
+    return None
+
+
+def _component_auth_clip_bbox(bbox: Sequence[int], mask_shape: tuple[int, int]) -> List[int] | None:
+    height, width = int(mask_shape[0]), int(mask_shape[1])
+    x0 = max(0, min(width, int(bbox[0])))
+    y0 = max(0, min(height, int(bbox[1])))
+    x1 = max(0, min(width, int(bbox[2])))
+    y1 = max(0, min(height, int(bbox[3])))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return [x0, y0, x1, y1]
+
+
+def _component_auth_list(value: Any) -> List[str]:
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item)]
+    if value:
+        return [str(value)]
+    return []
+
+
+def _component_auth_merged_values(candidates: Sequence[Mapping[str, Any]], key: str) -> List[str]:
+    output: List[str] = []
+    for candidate in candidates or []:
+        for value in _component_auth_list(candidate.get(key) or []):
+            if value not in output:
+                output.append(value)
+    return output
+
+
+def _component_auth_unique_ids(candidates: Sequence[Mapping[str, Any]], key: str) -> List[str]:
+    output: List[str] = []
+    for candidate in candidates or []:
+        value = str(candidate.get(key) or "")
+        if value and value not in output:
+            output.append(value)
+    return output
+
+
+def _component_auth_unique_jobs(candidates: Sequence[Mapping[str, Any]]) -> List[str]:
+    output: List[str] = []
+    for candidate in candidates or []:
+        for value in candidate.get("cleanup_job_ids") or []:
+            text = str(value or "")
+            if text and text not in output:
+                output.append(text)
+    return output
+
+
+def _component_auth_job_binding(
+    semantic_authorization_state: str,
+    cleanup_candidates: Sequence[Mapping[str, Any]],
+) -> tuple[str, str, str, List[str]]:
+    if _component_auth_family(semantic_authorization_state) != "cleanup":
+        if semantic_authorization_state == AUTH_AMBIGUOUS_COMPONENT_OWNER:
+            return "not_applicable_semantic_conflict", "", "", []
+        return "not_applicable_non_cleanup", "", "", []
+    jobs = _component_auth_unique_jobs(cleanup_candidates)
+    if not jobs:
+        return "missing_cleanup_job", "cleanup_job_binding_contract_error", "", []
+    if len(jobs) > 1:
+        return "non_unique_cleanup_job", "cleanup_job_binding_contract_error", jobs[0], jobs
+    return "bound_unique", "", jobs[0], jobs
+
+
+def _component_auth_first_job_id(candidates: Sequence[Mapping[str, Any]]) -> str:
+    jobs = _component_auth_unique_jobs(candidates)
+    return jobs[0] if jobs else ""
+
+
+def _component_auth_safe_id(value: Any) -> str:
+    text = "".join(ch if ch.isalnum() else "_" for ch in str(value or "page"))
+    text = "_".join(part for part in text.split("_") if part)
+    return text or "page"
 
 
 def build_text_area_plan(

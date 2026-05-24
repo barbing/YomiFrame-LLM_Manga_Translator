@@ -60,6 +60,20 @@ COMPONENT_OWNER_STRONG_PIXELS = 64
 COMPONENT_PROTECTED_MIN_RATIO = 0.15
 COMPONENT_PROTECTED_DOMINANT_RATIO = 0.35
 COMPONENT_MULTI_OWNER_DOMINANCE_RATIO = 0.60
+AUTH_CLEANUP_COMPONENT_STATES = {
+    "cleanup_translate_speech",
+    "cleanup_translate_background",
+    "cleanup_translate_caption",
+}
+AUTH_PROTECTED_COMPONENT_STATES = {
+    "protect_sfx_decorative",
+    "protect_art_or_non_text",
+}
+AUTH_REVIEW_COMPONENT_STATES = {
+    "review_unknown_not_cleanup",
+    "outside_cleanup_scope",
+}
+AUTH_AMBIGUOUS_COMPONENT_STATE = "ambiguous_component_owner"
 
 
 def _cleanup_perf_contract_diag_enabled() -> bool:
@@ -277,6 +291,7 @@ def build_cleanup_masks(
     source_image: Any | None = None,
     text_foreground_segmentation: TextForegroundSegmentationMask | Any | None = None,
     page_region_records: Sequence[Mapping[str, Any]] | None = None,
+    component_authorization_map: Any | None = None,
 ) -> CleanupMaskBuildResult:
     """Build CleanupMask contracts from segmentation foreground and source-glyph provenance."""
 
@@ -307,19 +322,46 @@ def build_cleanup_masks(
         if evidence.region_id:
             evidence_by_region.setdefault(evidence.region_id, []).append(evidence)
     region_records = _index_region_records(page_region_records)
-    component_projection = _build_component_ownership_projection(
+    if component_authorization_map is None:
+        segmentation_audit = {
+            **segmentation_audit,
+            "component_authorization_map_status": "missing",
+            "component_projection_method": "text_area_component_authorization_map_required",
+            "component_ownership_inventory": [],
+            "component_ownership_state_counts": {},
+            "segmentation_component_count": 0,
+        }
+        return CleanupMaskBuildResult(
+            page_id=page_id,
+            version=CLEANUP_MASK_CONTRACT_VERSION,
+            masks=[],
+            masks_by_job_id={},
+            rejected_records=[
+                {
+                    **_base_job_record(page_id, job),
+                    "reason": "component_authorization_map_missing",
+                }
+                for job in (job_candidates or [])
+            ],
+            protected_records=[],
+            skipped_records=[],
+            errors=["component_authorization_map_missing"],
+            text_foreground_segmentation=segmentation_audit,
+        )
+
+    component_projection = _component_projection_from_authorization_map(
         page_id=page_id,
         segmentation_mask=segmentation_mask,
-        job_candidates=job_candidates or [],
-        region_records=region_records,
-        evidence_records=evidence_records,
+        component_authorization_map=component_authorization_map,
     )
     segmentation_audit = {
         **segmentation_audit,
         "component_ownership_inventory": component_projection.components,
         "component_ownership_state_counts": _component_ownership_state_counts(component_projection.components),
         "segmentation_component_count": len(component_projection.components),
-        "component_projection_method": "segmentation_component_ownership_projection",
+        "component_projection_method": "text_area_component_authorization_map",
+        "component_authorization_map_status": "ready",
+        "component_authorization_map": _component_authorization_map_audit(component_authorization_map),
     }
 
     masks: list[CleanupMask] = []
@@ -356,8 +398,8 @@ def build_cleanup_masks(
 
             source = _primary_source_evidence(job, matched) if matched else None
             allowed = (
-                _valid_bbox(getattr(job, "allowed_cleanup_area", None))
-                or _allowed_area_from_regions(job, region_records)
+                _allowed_area_from_regions(job, region_records)
+                or _job_allowed_cleanup_area(job)
                 or _allowed_area_from_evidence(matched)
             )
             if allowed is None:
@@ -396,7 +438,10 @@ def build_cleanup_masks(
                 missing_source_glyph_mask_ids=missing_required_ids,
             )
             if effective.foreground is None:
-                if str(effective.audit.get("component_projection_method") or "") == "segmentation_component_ownership_projection":
+                if str(effective.audit.get("component_projection_method") or "") in {
+                    "segmentation_component_ownership_projection",
+                    "text_area_component_authorization_map",
+                }:
                     rejected_records.append(
                         {
                             **base,
@@ -696,6 +741,16 @@ def build_cleanup_masks(
         except Exception as exc:
             errors.append(f"{type(exc).__name__}: {exc}")
 
+    unbound_contract_mask = _build_unbound_semantic_cleanup_contract_mask(
+        page_id=page_id,
+        component_projection=component_projection,
+        existing_masks=masks,
+    )
+    if unbound_contract_mask is not None:
+        masks.append(unbound_contract_mask)
+        masks_by_job_id.setdefault(str(unbound_contract_mask.cleanup_job_id), []).append(unbound_contract_mask)
+        errors.append("cleanup_job_binding_contract_error")
+
     for record in rejected_records:
         _cleanup_perf_contract_checkpoint(
             "cleanup_mask_job",
@@ -913,6 +968,14 @@ def _allowed_area_from_regions(job: CleanupJob, region_records: Mapping[str, Map
     return None
 
 
+def _job_allowed_cleanup_area(job: CleanupJob) -> list[int] | None:
+    value = getattr(job, "allowed_cleanup_area", None)
+    bbox = _xywh_bbox(value)
+    if bbox is not None:
+        return bbox
+    return _valid_bbox(value)
+
+
 def _union_masks_from_evidence(
     matched: Sequence[_SourceEvidence],
     *,
@@ -995,7 +1058,7 @@ def _build_component_projected_text_mask(
         "segmentation_text_pixels": segmentation_audit.get("segmentation_text_pixels") or segmentation_audit.get("text_pixel_count", 0),
         "segmentation_component_count": len(component_projection.components),
         "segmentation_block_associations": [],
-        "component_projection_method": "segmentation_component_ownership_projection",
+        "component_projection_method": "text_area_component_authorization_map",
     }
     base_audit.update(_ownership_base_audit(ownership_binding))
     if segmentation_mask is None or component_projection.labels is None:
@@ -1161,7 +1224,7 @@ def _build_component_projected_text_mask(
         "bbox_fill_ratio_after": _mask_fill_ratio(foreground) if foreground is not None else 0.0,
         "analysis_scope_bbox": allowed,
         "executable_erase_bbox": _mask_bbox(erase) if erase is not None else None,
-        "mask_completion_method": "text_foreground_segmentation_component_ownership_projection",
+        "mask_completion_method": "text_area_component_authorization_map_projection",
         "polarity_mode": "segmentation",
         "source_seed_mask_ids": [source.mask_id for source in matched if source.mask_id],
         "recovered_component_count": len(owned_ids),
@@ -1169,7 +1232,7 @@ def _build_component_projected_text_mask(
         "rejected_component_reasons": projection["unresolved_reasons"],
         "segmentation_mask_status": "segmentation_mask_ready" if segmentation_mask is not None else "segmentation_mask_missing",
         "segmentation_mask_failure_reason": failure_reason if status != "cleanup_mask_ready_from_owned_segmentation_components" else "",
-        "segmentation_binding_method": "segmentation_component_ownership_projection",
+        "segmentation_binding_method": "text_area_component_authorization_map_projection",
         "segmentation_pixels_before_binding": before_binding,
         "segmentation_pixels_after_owner_clip": owned_segmentation_pixels,
         "segmentation_pixels_after_protection_subtract": foreground_pixels,
@@ -1207,7 +1270,7 @@ def _build_component_projected_text_mask(
         "upstream_container_mismatch_ratio": upstream_container_mismatch_ratio,
         "green_to_foreground_component_coverage_ratio": owned_to_executable_ratio,
         "green_to_erase_component_coverage_ratio": green_to_erase_ratio,
-        "clean_mask_authority": "text_foreground_segmentation",
+        "clean_mask_authority": "text_area_component_authorization_map",
         "dense_or_local_fallback_used": False,
         "bbox_executable_foreground_detected": False,
         "page_level_executable_foreground_detected": False,
@@ -1536,6 +1599,187 @@ def _ownership_base_audit(binding: _OwnershipBinding) -> dict[str, Any]:
         "effective_coverage_ratio": 0.0,
         "effective_coverage_status": "",
     }
+
+
+def _component_projection_from_authorization_map(
+    *,
+    page_id: str,
+    segmentation_mask: np.ndarray | None,
+    component_authorization_map: Any,
+) -> _ComponentOwnershipProjection:
+    if segmentation_mask is None:
+        return _ComponentOwnershipProjection(labels=None, components=[], component_label_by_id={})
+    binary = (segmentation_mask > 0).astype(np.uint8)
+    if int(np.count_nonzero(binary)) <= 0:
+        return _ComponentOwnershipProjection(labels=np.zeros_like(binary, dtype=np.int32), components=[], component_label_by_id={})
+    labels, max_label = _connected_component_labels(binary)
+    payload = _component_authorization_map_audit(component_authorization_map)
+    records = list(payload.get("components") or payload.get("component_authorizations") or [])
+    components: list[dict[str, Any]] = []
+    label_by_id: dict[str, int] = {}
+    used_labels: set[int] = set()
+    for index, record in enumerate(records):
+        if not isinstance(record, Mapping):
+            continue
+        label = _component_label_from_authorization_record(
+            record=record,
+            labels=labels,
+            max_label=max_label,
+            used_labels=used_labels,
+        )
+        if label <= 0:
+            continue
+        used_labels.add(label)
+        component_id = str(record.get("component_id") or f"tauthcomp_{_safe_id(page_id)}_{index:04d}")
+        bbox = _valid_bbox(record.get("component_bbox")) or _component_bbox_from_label(labels, label)
+        pixel_count = int(record.get("component_pixel_count") or int(np.count_nonzero(labels == label)))
+        authorization_state = str(
+            record.get("final_mask_authorization_state")
+            or record.get("authorization_state")
+            or "review_unknown_not_cleanup"
+        )
+        ownership_state = _authorization_state_to_ownership_state(authorization_state)
+        cleanup_authorizations = []
+        if authorization_state in AUTH_CLEANUP_COMPONENT_STATES:
+            cleanup_authorizations.append(authorization_state)
+        components.append(
+            {
+                "component_id": component_id,
+                "label": int(label),
+                "ownership_state": ownership_state,
+                "authorization_state": authorization_state,
+                "semantic_authorization_state": str(record.get("semantic_authorization_state") or authorization_state),
+                "semantic_visual_color": str(record.get("semantic_visual_color") or record.get("visual_debug_color") or ""),
+                "job_binding_state": str(record.get("job_binding_state") or ""),
+                "job_binding_failure_reason": str(record.get("job_binding_failure_reason") or ""),
+                "final_mask_authorization_state": authorization_state,
+                "owner_cleanup_job_id": str(record.get("owner_cleanup_job_id") or ""),
+                "owner_region_ids": [str(item) for item in record.get("owning_region_ids") or [] if str(item)],
+                "scope_cleanup_job_ids": [str(item) for item in record.get("scope_cleanup_job_ids") or [] if str(item)],
+                "candidate_cleanup_job_ids": [str(item) for item in record.get("candidate_cleanup_job_ids") or [] if str(item)],
+                "cleanup_authorizations": cleanup_authorizations,
+                "authorization_source_stages": [str(record.get("source_stage") or "")] if record.get("source_stage") else [],
+                "protected_region_ids": [str(item) for item in record.get("protection_region_ids") or [] if str(item)],
+                "protected_reason": ",".join(str(item) for item in record.get("reason_codes") or [] if str(item)),
+                "bbox": bbox,
+                "pixel_count": pixel_count,
+                "centroid": list(record.get("centroid") or []),
+                "owner_overlap_pixels": int(record.get("overlap_pixels") or 0),
+                "owner_overlap_ratio": float(record.get("overlap_ratio") or 0.0),
+                "protected_overlap_pixels": int(record.get("protected_overlap_pixels") or 0),
+                "protected_overlap_ratio": float(record.get("protected_overlap_ratio") or 0.0),
+                "sourceglyph_overlap_pixels": int(record.get("sourceglyph_overlap_pixels") or 0),
+                "sourceglyph_overlap_ratio": 0.0,
+                "sourceglyph_overlap_ids": [],
+                "sourceglyph_missing": bool(record.get("sourceglyph_missing", True)),
+                "ambiguity_reasons": [str(item) for item in record.get("ambiguity_reasons") or record.get("reason_codes") or [] if str(item)],
+                "owning_container_ids": [str(item) for item in record.get("owning_container_ids") or [] if str(item)],
+                "protection_container_ids": [str(item) for item in record.get("protection_container_ids") or [] if str(item)],
+                "candidate_container_ids": [str(item) for item in record.get("candidate_container_ids") or [] if str(item)],
+                "visual_debug_color": str(record.get("visual_debug_color") or ""),
+                "group_id": str(record.get("group_id") or ""),
+                "group_authorization_state": str(record.get("group_authorization_state") or ""),
+                "review_required": bool(record.get("review_required")),
+            }
+        )
+        label_by_id[component_id] = int(label)
+    return _ComponentOwnershipProjection(labels=labels.astype(np.int32), components=components, component_label_by_id=label_by_id)
+
+
+def _connected_component_labels(binary: np.ndarray) -> tuple[np.ndarray, int]:
+    if cv2 is not None:
+        label_count, labels, _stats, _centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        return labels.astype(np.int32), int(label_count) - 1
+    labels = np.zeros_like(binary, dtype=np.int32)
+    height, width = binary.shape[:2]
+    label = 0
+    for y in range(height):
+        for x in range(width):
+            if binary[y, x] <= 0 or labels[y, x] != 0:
+                continue
+            label += 1
+            stack = [(x, y)]
+            labels[y, x] = label
+            while stack:
+                sx, sy = stack.pop()
+                for ny in range(max(0, sy - 1), min(height, sy + 2)):
+                    for nx in range(max(0, sx - 1), min(width, sx + 2)):
+                        if binary[ny, nx] > 0 and labels[ny, nx] == 0:
+                            labels[ny, nx] = label
+                            stack.append((nx, ny))
+    return labels, label
+
+
+def _component_authorization_map_audit(component_authorization_map: Any) -> dict[str, Any]:
+    if component_authorization_map is None:
+        return {}
+    if hasattr(component_authorization_map, "to_audit_dict"):
+        try:
+            payload = component_authorization_map.to_audit_dict()
+            if isinstance(payload, Mapping):
+                return dict(payload)
+        except Exception:
+            return {}
+    if hasattr(component_authorization_map, "to_dict"):
+        try:
+            payload = component_authorization_map.to_dict()
+            if isinstance(payload, Mapping):
+                return dict(payload)
+        except Exception:
+            return {}
+    if isinstance(component_authorization_map, Mapping):
+        return dict(component_authorization_map)
+    return {}
+
+
+def _component_label_from_authorization_record(
+    *,
+    record: Mapping[str, Any],
+    labels: np.ndarray,
+    max_label: int,
+    used_labels: set[int],
+) -> int:
+    try:
+        label = int(record.get("label") or 0)
+    except Exception:
+        label = 0
+    if label > 0 and label <= max_label and label not in used_labels:
+        return label
+    bbox = _valid_bbox(record.get("component_bbox"))
+    if bbox is None:
+        return 0
+    x0, y0, x1, y1 = _clip_bbox_to_size(bbox, labels.shape[1], labels.shape[0])
+    if x1 <= x0 or y1 <= y0:
+        return 0
+    crop = labels[y0:y1, x0:x1]
+    values, counts = np.unique(crop[crop > 0], return_counts=True)
+    pairs = sorted(
+        ((int(label_value), int(count)) for label_value, count in zip(values, counts) if int(label_value) not in used_labels),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    return pairs[0][0] if pairs else 0
+
+
+def _component_bbox_from_label(labels: np.ndarray, label: int) -> list[int]:
+    ys, xs = np.where(labels == int(label))
+    if xs.size <= 0 or ys.size <= 0:
+        return [0, 0, 0, 0]
+    return [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
+
+
+def _authorization_state_to_ownership_state(authorization_state: str) -> str:
+    if authorization_state in AUTH_CLEANUP_COMPONENT_STATES:
+        return "cleanup_owned"
+    if authorization_state == "protect_art_or_non_text":
+        return "protected_art_or_non_text"
+    if authorization_state == "protect_sfx_decorative":
+        return "protected_sfx_decorative"
+    if authorization_state == AUTH_AMBIGUOUS_COMPONENT_STATE:
+        return AUTH_AMBIGUOUS_COMPONENT_STATE
+    if authorization_state == "outside_cleanup_scope":
+        return "outside_cleanup_scope"
+    return "review_unknown_not_cleanup"
 
 
 def _build_component_ownership_projection(
@@ -1925,21 +2169,24 @@ def _component_projection_for_job(
     component_projection: _ComponentOwnershipProjection,
 ) -> dict[str, Any]:
     job_id = str(getattr(job, "cleanup_job_id", "") or "")
-    scoped_components = [
+    owned = [
         item
         for item in component_projection.components
-        if item.get("owner_cleanup_job_id") == job_id or job_id in set(item.get("scope_cleanup_job_ids") or [])
+        if item.get("ownership_state") == "cleanup_owned" and _component_authorized_for_job(item, job_id)
     ]
-    owned = [item for item in component_projection.components if item.get("ownership_state") == "cleanup_owned" and item.get("owner_cleanup_job_id") == job_id]
     protected = [
         item
-        for item in scoped_components
+        for item in component_projection.components
         if str(item.get("ownership_state") or "").startswith("protected")
     ]
-    ambiguous = [item for item in scoped_components if item.get("ownership_state") == "ambiguous_multi_owner"]
+    ambiguous = [
+        item
+        for item in component_projection.components
+        if item.get("ownership_state") in {"ambiguous_multi_owner", AUTH_AMBIGUOUS_COMPONENT_STATE}
+    ]
     unowned = [
         item
-        for item in scoped_components
+        for item in component_projection.components
         if item.get("ownership_state") in {"unowned_visible_text", "review_unknown_not_cleanup", "outside_cleanup_scope"}
     ]
     cleanup_authorizations = sorted(
@@ -1958,18 +2205,193 @@ def _component_projection_for_job(
             if str(stage)
         }
     )
+    protected_pixel_count = sum(_component_pixels_in_allowed(item, allowed) for item in protected)
+    ambiguous_pixel_count = sum(_component_pixels_in_allowed(item, allowed) for item in ambiguous)
     return {
         "owned_component_ids": [str(item["component_id"]) for item in owned],
         "protected_component_ids": [str(item["component_id"]) for item in protected],
         "ambiguous_component_ids": [str(item["component_id"]) for item in ambiguous],
         "unowned_component_ids": [str(item["component_id"]) for item in unowned],
         "owned_component_pixel_count": sum(int(item.get("pixel_count") or 0) for item in owned),
-        "protected_component_pixel_count": sum(int(item.get("pixel_count") or 0) for item in protected),
-        "ambiguous_component_pixel_count": sum(int(item.get("pixel_count") or 0) for item in ambiguous),
+        "protected_component_pixel_count": protected_pixel_count,
+        "ambiguous_component_pixel_count": ambiguous_pixel_count,
         "unresolved_reasons": _component_projection_unresolved_reasons(protected, ambiguous, unowned),
         "cleanup_authorization": ",".join(cleanup_authorizations),
         "authorization_source_stage": ",".join(source_stages),
     }
+
+
+def _build_unbound_semantic_cleanup_contract_mask(
+    *,
+    page_id: str,
+    component_projection: _ComponentOwnershipProjection,
+    existing_masks: Sequence[CleanupMask],
+) -> CleanupMask | None:
+    if component_projection.labels is None:
+        return None
+    covered: set[str] = set()
+    for mask in existing_masks or []:
+        covered.update(str(item) for item in getattr(mask, "owned_component_ids", []) or [] if str(item))
+    unbound = [
+        item
+        for item in component_projection.components
+        if item.get("ownership_state") == "cleanup_owned"
+        and str(item.get("component_id") or "") not in covered
+        and str(item.get("job_binding_state") or "") in {"missing_cleanup_job"}
+    ]
+    if not unbound:
+        return None
+    component_ids = [str(item.get("component_id") or "") for item in unbound if str(item.get("component_id") or "")]
+    foreground = _component_mask_from_ids(component_projection, component_ids)
+    if foreground is None or int(np.count_nonzero(foreground > 0)) <= 0:
+        return None
+    erase = foreground.copy()
+    foreground_pixels = int(np.count_nonzero(foreground > 0))
+    erase_pixels = int(np.count_nonzero(erase > 0))
+    bbox = _mask_bbox(foreground)
+    cleanup_job_id = f"component_authorization_binding_contract_error_{_safe_id(page_id)}"
+    source_stages = sorted(
+        {
+            str(stage)
+            for item in unbound
+            for stage in (item.get("authorization_source_stages") or [])
+            if str(stage)
+        }
+    )
+    return CleanupMask(
+        cleanup_mask_id=f"cmask_{_safe_id(page_id)}_component_authorization_binding_contract_error",
+        cleanup_job_id=cleanup_job_id,
+        foreground_mask_source_id=None,
+        foreground_mask_source_ids=[],
+        consumed_source_glyph_mask_ids=[],
+        missing_source_glyph_mask_ids=[],
+        foreground_mask_bbox=bbox,
+        foreground_mask_pixels=foreground_pixels,
+        erase_mask_bbox=bbox,
+        erase_mask_pixels=erase_pixels,
+        allowed_area=bbox,
+        growth_ratio=1.0,
+        mask_source="cleanup_mask_from_text_foreground_segmentation",
+        mask_method="text_area_component_authorization_map_unbound_contract_error",
+        rejection_reason="cleanup_job_binding_contract_error",
+        mask_contract_exception_reason="cleanup_job_binding_contract_error",
+        artifact_risk="",
+        visual_scope="component_authorization_binding_contract_error",
+        protected=False,
+        protection_reason="",
+        effective_mask_status="cleanup_mask_ready_with_binding_contract_error",
+        effective_mask_failure_reason="cleanup_job_binding_contract_error",
+        seed_foreground_pixels=0,
+        completed_foreground_pixels=foreground_pixels,
+        component_count_before=len(component_projection.components),
+        component_count_after=len(component_ids),
+        largest_component_pixels_before=_largest_component_pixels(component_projection.components),
+        largest_component_pixels_after=_largest_component_pixels(unbound),
+        text_block_coverage_estimate=1.0,
+        bbox_fill_ratio_before=0.0,
+        bbox_fill_ratio_after=_mask_fill_ratio(foreground),
+        analysis_scope_bbox=bbox,
+        executable_erase_bbox=bbox,
+        mask_completion_method="text_area_component_authorization_map_unbound_contract_error",
+        polarity_mode="segmentation",
+        source_seed_mask_ids=[],
+        recovered_component_count=len(component_ids),
+        rejected_component_count=0,
+        rejected_component_reasons=[],
+        segmentation_mask_status="segmentation_mask_ready",
+        segmentation_mask_failure_reason="",
+        segmentation_provider="",
+        segmentation_mask_ref="",
+        segmentation_text_pixels=None,
+        segmentation_component_count=len(component_projection.components),
+        segmentation_binding_method="text_area_component_authorization_map_projection",
+        segmentation_block_associations=[],
+        ownership_binding_status="cleanup_job_binding_contract_error",
+        ownership_binding_method="text_area_component_authorization_map",
+        cleanup_owned_unit_bbox=bbox,
+        cleanup_owned_unit_mask_ref="",
+        protected_mask_ref="",
+        protected_overlap_pixels=0,
+        segmentation_pixels_before_binding=foreground_pixels,
+        segmentation_pixels_after_owner_clip=foreground_pixels,
+        segmentation_pixels_after_protection_subtract=foreground_pixels,
+        sourceglyph_overlap_pixels=0,
+        sourceglyph_overlap_ratio=0.0,
+        segmentation_outside_sourceglyph_pixels=0,
+        effective_coverage_ratio=1.0,
+        effective_coverage_status="effective_coverage_ready_with_binding_contract_error",
+        component_ownership_status="cleanup_mask_ready_with_binding_contract_error",
+        owned_component_ids=component_ids,
+        protected_component_ids=[],
+        ambiguous_component_ids=[],
+        unowned_component_ids=[],
+        component_projection_method="text_area_component_authorization_map",
+        owned_component_pixel_count=sum(int(item.get("pixel_count") or 0) for item in unbound),
+        protected_component_pixel_count=0,
+        ambiguous_component_pixel_count=0,
+        sourceglyph_overlap_component_ids=[],
+        sourceglyph_missing_component_ids=component_ids,
+        ownership_projection_failure_reason="cleanup_job_binding_contract_error",
+        effective_component_coverage_ratio=1.0,
+        owned_segmentation_pixels=sum(int(item.get("pixel_count") or 0) for item in unbound),
+        executable_foreground_pixels=foreground_pixels,
+        committed_cleanup_mask_pixels=None,
+        owned_segmentation_to_executable_ratio=1.0,
+        owned_segmentation_to_commit_ratio=None,
+        ready_but_sparse_violation=False,
+        sourceglyph_executable_influence_detected=False,
+        dense_contract_override_detected=False,
+        clean_mask_authority="text_area_component_authorization_map",
+        dense_or_local_fallback_used=False,
+        bbox_executable_foreground_detected=False,
+        page_level_executable_foreground_detected=False,
+        clean_mask_foreground_pixels=foreground_pixels,
+        clean_mask_erase_pixels=erase_pixels,
+        foreground_to_owned_segmentation_ratio=1.0,
+        erase_to_foreground_ratio=1.0,
+        protected_component_pixels_removed=0,
+        ambiguous_component_pixels=0,
+        unowned_component_pixels=0,
+        clean_mask_state="cleanup_mask_ready_with_binding_contract_error",
+        clean_mask_failure_reason="cleanup_job_binding_contract_error",
+        cleanup_authorization="cleanup_translate_binding_contract_error",
+        authorization_source_stage=",".join(source_stages),
+        foreground_outside_allowed_pixels=0,
+        upstream_container_mismatch_pixels=0,
+        upstream_container_mismatch_ratio=0.0,
+        green_to_foreground_component_coverage_ratio=1.0,
+        green_to_erase_component_coverage_ratio=1.0,
+        ctd_refined_segmentation_mask_ref="",
+        foreground_mask=foreground.copy(),
+        erase_mask=erase.copy(),
+    )
+
+
+def _component_authorized_for_job(component: Mapping[str, Any], job_id: str) -> bool:
+    if not job_id:
+        return False
+    if str(component.get("owner_cleanup_job_id") or "") == job_id:
+        return True
+    for key in ("scope_cleanup_job_ids", "candidate_cleanup_job_ids"):
+        if job_id in {str(item) for item in component.get(key) or []}:
+            return True
+    return False
+
+
+def _component_pixels_in_allowed(component: Mapping[str, Any], allowed: list[int]) -> int:
+    bbox = _valid_bbox(component.get("bbox"))
+    allowed_box = _valid_bbox(allowed)
+    if bbox is None or allowed_box is None:
+        return 0
+    intersection = _intersect_bboxes(bbox, allowed_box)
+    if intersection is None:
+        return 0
+    bbox_area = max(1, _bbox_area(bbox))
+    intersection_area = max(0, _bbox_area(intersection))
+    pixels = int(component.get("pixel_count") or 0)
+    if intersection_area >= bbox_area:
+        return pixels
+    return int(round(pixels * (intersection_area / float(bbox_area))))
 
 
 def _component_projection_unresolved_reasons(
@@ -1981,7 +2403,7 @@ def _component_projection_unresolved_reasons(
     if protected:
         reasons.append("protected_component_overlap")
     if ambiguous:
-        reasons.append("ambiguous_multi_owner_components")
+        reasons.append("ambiguous_component_owner_components")
     if unowned:
         reasons.append("unowned_visible_text_components")
     return reasons
@@ -2039,17 +2461,32 @@ def _index_region_records(records: Sequence[Mapping[str, Any]] | None) -> dict[s
 
 
 def _region_bbox(region: Mapping[str, Any]) -> list[int] | None:
-    for key in ("bbox", "xyxy", "bounds"):
-        bbox = _valid_or_xywh_bbox(region.get(key))
+    for key in ("xyxy", "bounds"):
+        bbox = _valid_bbox(region.get(key))
         if bbox is not None:
             return bbox
+    bbox = _xywh_bbox(region.get("bbox"))
+    if bbox is not None:
+        return bbox
     render = region.get("render")
     if isinstance(render, Mapping):
         for key in ("bbox", "source_bbox", "text_area_container_bbox"):
-            bbox = _valid_or_xywh_bbox(render.get(key))
+            bbox = _xywh_bbox(render.get(key)) if key in {"bbox", "text_area_container_bbox"} else _valid_or_xywh_bbox(render.get(key))
             if bbox is not None:
                 return bbox
     return None
+
+
+def _xywh_bbox(value: Any) -> list[int] | None:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or len(value) != 4:
+        return None
+    try:
+        x, y, w, h = [int(round(float(item))) for item in value]
+    except (TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return [x, y, x + w, y + h]
 
 
 def _valid_or_xywh_bbox(value: Any) -> list[int] | None:

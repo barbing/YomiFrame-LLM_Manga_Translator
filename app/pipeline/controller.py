@@ -364,6 +364,7 @@ class PipelineWorker(QtCore.QThread):
         )
         from app.pipeline.render_eligibility import build_render_eligibility_decisions
         from app.pipeline.source_glyph_masks import generate_source_glyph_masks
+        from app.pipeline.text_area_plan import build_text_area_component_authorization_map
         from app.pipeline.debug_artifacts import (
             debug_enabled,
             debug_pages,
@@ -771,6 +772,22 @@ class PipelineWorker(QtCore.QThread):
                         job_count=len(getattr(cleanup_job_contract_result, "jobs", []) or []),
                         source_glyph_record_count=len(getattr(source_glyph_mask_result, "masks_by_region", {}) or {}),
                     )
+                    cleanup_mask_region_records = _cleanup_mask_region_records_with_protection(regions, debug_context)
+                    component_authorization_map = build_text_area_component_authorization_map(
+                        page_id=page_id,
+                        text_foreground_segmentation=text_foreground_segmentation_mask,
+                        text_area_plan=(debug_context.get("text_area_plan") if isinstance(debug_context, dict) else None),
+                        page_region_records=cleanup_mask_region_records,
+                        cleanup_jobs=cleanup_job_contract_result.jobs,
+                    )
+                    if debug_context is not None:
+                        if not debug_context.get("perf_telemetry_only"):
+                            debug_context["text_area_component_authorization_map"] = component_authorization_map.to_audit_dict()
+                        set_count(
+                            debug_context,
+                            "text_area_component_authorization_components",
+                            len(component_authorization_map.components),
+                        )
                     cleanup_mask_contract_result = build_cleanup_masks(
                         page_id=page_id,
                         job_candidates=cleanup_job_contract_result.jobs,
@@ -778,7 +795,8 @@ class PipelineWorker(QtCore.QThread):
                         image_size=source_image_size,
                         source_image_path=source_path,
                         text_foreground_segmentation=text_foreground_segmentation_mask,
-                        page_region_records=_cleanup_mask_region_records_with_protection(regions, debug_context),
+                        page_region_records=cleanup_mask_region_records,
+                        component_authorization_map=component_authorization_map,
                     )
                     _page014_timeout_checkpoint(
                         "cleanup_mask_build",
