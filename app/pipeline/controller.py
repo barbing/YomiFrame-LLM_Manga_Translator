@@ -2385,6 +2385,11 @@ def _record_text_area_fallback_decision(
 
 
 _TEXT_AREA_TRANSLATABLE_ROUTES = {"translate_speech", "translate_caption_background"}
+_TEXT_AREA_TRANSLATABLE_AUTHORIZATION_STATES = {
+    "cleanup_translate_speech",
+    "cleanup_translate_background",
+    "cleanup_translate_caption",
+}
 _OCR_TRANSLATION_READY_STATE = "recognized_for_translation"
 _OCR_LOW_CONFIDENCE_WARNING_STATE = "recognized_low_confidence_warning"
 _OCR_TRANSLATION_QUEUED_STATES = {
@@ -2403,8 +2408,19 @@ def _is_text_area_translatable_assignment(assignment: dict | None) -> bool:
         return False
     if assignment.get("text_area_ocr_eligible") is False:
         return False
+    if assignment.get("text_area_translation_eligible") is False:
+        return False
     route = str(assignment.get("text_area_route_intent") or "").strip()
-    return route in _TEXT_AREA_TRANSLATABLE_ROUTES
+    if route not in _TEXT_AREA_TRANSLATABLE_ROUTES:
+        return False
+    if not bool(assignment.get("text_area_authorization_explicit")):
+        return False
+    state = str(
+        assignment.get("text_area_semantic_authorization_state")
+        or assignment.get("text_area_cleanup_authorization")
+        or ""
+    ).strip()
+    return state in _TEXT_AREA_TRANSLATABLE_AUTHORIZATION_STATES
 
 
 def _region_has_translatable_text_area_route(region: dict | None) -> bool:

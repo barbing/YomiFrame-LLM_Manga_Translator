@@ -45,6 +45,7 @@ KITSUMED_MASK_THRESHOLD = 0.50
 OGKALU_CONFIDENCE_THRESHOLD = 0.50
 
 SEMANTIC_EVIDENCE_PROVIDER_VERSION = "semantic_evidence_provider_v1"
+OGKALU_STRONG_SINGLE_MODEL_CONFIDENCE = 0.85
 PROVIDER_KITSUMED_SPEECH_MASK = "kitsumed_speech_mask_evidence"
 PROVIDER_OGKALU_TEXT_BUBBLE = "ogkalu_text_bubble_evidence"
 PROVIDER_OGKALU_TEXT_FREE_BACKGROUND = "ogkalu_text_free_background_evidence"
@@ -317,7 +318,15 @@ def run_bubble_detection(request: BubbleDetectionInput | Mapping[str, Any]) -> B
         provider_fallback = kitsumed_provider != "CUDAExecutionProvider" or ogkalu_provider != "CUDAExecutionProvider"
 
         bubble_evidence = _serialize_kitsumed(page_id, kitsumed_raw, kitsumed_provider, kitsumed_latency, runtime)
-        text_area_evidence = _serialize_ogkalu(page_id, ogkalu_raw, ogkalu_provider, ogkalu_latency, runtime, kitsumed_raw)
+        text_area_evidence = _serialize_ogkalu(
+            page_id,
+            ogkalu_raw,
+            ogkalu_provider,
+            ogkalu_latency,
+            runtime,
+            kitsumed_raw,
+            image_size=image_size,
+        )
         region_links = runtime.fusion_module.link_regions(list(req.regions or []), kitsumed_raw, ogkalu_raw)
         fused_containers = runtime.fusion_module.build_fusion(page_id, kitsumed_raw, ogkalu_raw, region_links)
         _annotate_fused_container_semantic_role_evidence(fused_containers, bubble_evidence, text_area_evidence, region_links)
@@ -1091,6 +1100,8 @@ def _serialize_ogkalu(
     latency: Mapping[str, Any],
     runtime: _BubbleDetectionRuntime,
     kitsumed_raw: Sequence[Mapping[str, Any]],
+    *,
+    image_size: Tuple[int, int] | None = None,
 ) -> List[Dict[str, Any]]:
     fallback_used = provider != "CUDAExecutionProvider"
     records: List[Dict[str, Any]] = []
@@ -1112,6 +1123,8 @@ def _serialize_ogkalu(
             latency_sec=float((latency.get("latency_seconds") or {}).get("mean") or 0.0),
             fallback_used=fallback_used,
         ).to_dict()
+        edge_flags = _ogkalu_page_edge_flags(record["bbox_xyxy"], image_size)
+        record_with_edge_flags = {**record, **edge_flags}
         record.update(
             {
                 "evidence_id": record["model_evidence_id"],
@@ -1119,12 +1132,47 @@ def _serialize_ogkalu(
                 "source_model": record["model_name"],
                 "evidence_type": "TextBubbleDetectionEvidence",
                 "bbox": record["bbox_xyxy"],
-                "semantic_role_evidence": _semantic_role_evidence_for_ogkalu_record(record, linked_masks),
+                **edge_flags,
+                "semantic_role_evidence": _semantic_role_evidence_for_ogkalu_record(record_with_edge_flags, linked_masks),
                 "latency_mean_sec": record["latency_sec"],
             }
         )
         records.append(record)
     return records
+
+
+def _ogkalu_page_edge_flags(bbox_xyxy: Sequence[Any], image_size: Tuple[int, int] | None) -> Dict[str, Any]:
+    if not image_size:
+        return {
+            "page_edge_contact": False,
+            "page_edge_contact_flags": [],
+            "clipped_by_page_bounds": False,
+        }
+    try:
+        x0, y0, x1, y1 = [float(value) for value in list(bbox_xyxy or [])[:4]]
+        width, height = max(1.0, float(image_size[0])), max(1.0, float(image_size[1]))
+    except Exception:
+        return {
+            "page_edge_contact": False,
+            "page_edge_contact_flags": ["invalid_bbox_for_edge_audit"],
+            "clipped_by_page_bounds": False,
+        }
+    eps = 1.0
+    flags: List[str] = []
+    if x0 <= eps:
+        flags.append("left")
+    if y0 <= eps:
+        flags.append("top")
+    if x1 >= width - eps:
+        flags.append("right")
+    if y1 >= height - eps:
+        flags.append("bottom")
+    clipped = x0 < 0 or y0 < 0 or x1 > width or y1 > height
+    return {
+        "page_edge_contact": bool(flags),
+        "page_edge_contact_flags": flags,
+        "clipped_by_page_bounds": bool(clipped),
+    }
 
 
 def _semantic_role_evidence_for_ogkalu_record(record: Mapping[str, Any], linked_masks: Sequence[str]) -> Dict[str, Any]:
@@ -1140,20 +1188,39 @@ def _semantic_role_evidence_for_ogkalu_record(record: Mapping[str, Any], linked_
     role_signals: List[str] = []
     candidate_roles: List[str] = []
     authority_roles: List[str] = []
+    normalized_kind = "review_unknown"
+    candidate_authority_state = AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
+    reason_codes: List[str] = []
     if class_name in {"bubble", "text_bubble"}:
         role_signals.append("text_container_candidate")
         candidate_roles.append("speech")
+        normalized_kind = "speech_container" if class_name == "bubble" else "speech_text_area"
+        candidate_authority_state = AUTH_CLEANUP_TRANSLATE_SPEECH
+        reason_codes.append(
+            "ogkalu_bubble_speech_container_evidence"
+            if class_name == "bubble"
+            else "ogkalu_text_bubble_first_class_speech_evidence"
+        )
     if class_name == "text_bubble":
         role_signals.append("speech_or_narration_text_candidate")
     if class_name == "text_free":
         role_signals.append("caption_background_candidate")
         candidate_roles.append("background_narration")
+        normalized_kind = "background_narration"
+        candidate_authority_state = AUTH_CLEANUP_TRANSLATE_BACKGROUND
+        reason_codes.append("ogkalu_text_free_background_evidence")
     if class_name in {"sfx", "decorative", "sfx_or_decorative", "sfx_or_decorative_candidate"}:
         role_signals.append("sfx_decorative_candidate")
         candidate_roles.append("sfx_decorative")
+        normalized_kind = "sfx_decorative"
+        candidate_authority_state = AUTH_PROTECT_SFX_DECORATIVE
+        reason_codes.append("ogkalu_sfx_decorative_evidence")
     if class_name in {"art", "non_text", "non-text"}:
         role_signals.append("art_non_text_candidate")
         candidate_roles.append("art_or_non_text")
+        normalized_kind = "art_or_non_text"
+        candidate_authority_state = AUTH_PROTECT_ART_OR_NON_TEXT
+        reason_codes.append("ogkalu_art_or_non_text_evidence")
     if linked_masks:
         role_signals.append("speech_bubble_mask_support")
     else:
@@ -1175,6 +1242,11 @@ def _semantic_role_evidence_for_ogkalu_record(record: Mapping[str, Any], linked_
         protected_candidate_states.append("protect_sfx_decorative")
     elif class_name in {"art", "non_text", "non-text"}:
         protected_candidate_states.append("protect_art_or_non_text")
+    evidence_strength = "single_model_candidate"
+    if cleanup_authority_states or protected_authority_states:
+        evidence_strength = "linked_model_authority" if linked_masks else "model_authority"
+    elif (float(record.get("confidence") or 0.0) >= OGKALU_STRONG_SINGLE_MODEL_CONFIDENCE and class_name in {"bubble", "text_bubble", "text_free"}):
+        evidence_strength = "strong_single_model_candidate"
     semantic_evidence_records: List[Dict[str, Any]] = []
     if class_name in {"bubble", "text_bubble"}:
         semantic_evidence_records.append(
@@ -1222,6 +1294,21 @@ def _semantic_role_evidence_for_ogkalu_record(record: Mapping[str, Any], linked_
         "role_signals": sorted(set(role_signals)),
         "source": "ogkalu_text_area_detection",
         "evidence_source_list": ["ogkalu_text_area_detection"],
+        "provider_model_identity": {
+            "model_name": str(record.get("model_name") or OGKALU_MODEL_NAME),
+            "model_role": str(record.get("model_role") or OGKALU_MODEL_ROLE),
+            "provider": str(record.get("provider") or ""),
+        },
+        "raw_class_name": class_name,
+        "normalized_semantic_candidate_kind": normalized_kind,
+        "candidate_authority_state": candidate_authority_state,
+        "evidence_strength": evidence_strength,
+        "reason_codes": sorted(set(reason_codes)),
+        "source_evidence_ids": [evidence_id] if evidence_id else [],
+        "page_edge_contact": bool(record.get("page_edge_contact")),
+        "page_edge_contact_flags": [str(item) for item in record.get("page_edge_contact_flags") or [] if str(item)],
+        "clipped_by_page_bounds": bool(record.get("clipped_by_page_bounds")),
+        "neighboring_speech_context_ids": [str(item) for item in record.get("neighboring_speech_context_ids") or [] if str(item)],
         "candidate_roles": sorted(set(candidate_roles)),
         "authority_roles": sorted(set(authority_roles)),
         "model_evidence_ids": [evidence_id],

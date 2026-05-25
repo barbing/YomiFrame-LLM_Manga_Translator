@@ -58,6 +58,7 @@ SEMANTIC_KIND_ART_OR_NON_TEXT = "art_or_non_text"
 SEMANTIC_KIND_UNKNOWN = "unknown"
 
 TEXT_AREA_COMPONENT_AUTHORIZATION_MAP_VERSION = "text_area_component_authorization_map_v1"
+OGKALU_SINGLE_MODEL_AUTHORITY_CONFIDENCE = 0.85
 
 PROJECTION_READY = "projection_ready"
 PROJECTION_NO_SEMANTIC_AUTHORITY = "projection_no_semantic_authority"
@@ -143,6 +144,11 @@ WEAK_SIDE_BACKGROUND_AUTHORITY_REASON_TOKENS = (
     "typed_side_narration_background_authority",
     "deterministic_side_narration_background_authority",
     "side_narration_background_authority",
+)
+
+OGKALU_ONLY_SPEECH_AUTHORITY_REASON_TOKENS = (
+    "typed_bright_ogkalu_bubble_speech_authority",
+    "typed_ogkalu_text_bubble_speech_authority",
 )
 
 DETECTION_SCOPED = "scoped"
@@ -318,6 +324,9 @@ class TextAreaSemanticAuthorizationRecord:
     review_required: bool = False
     ocr_eligible: bool = False
     comic_text_detector_scope_eligible: bool = False
+    translation_eligible: bool = False
+    render_eligible: bool = False
+    cleanup_executable: bool = False
     semantic_authorization_state: str = AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
     semantic_authority_owner: str = "TextAreaPlan/BubbleDetection"
     container_id: str = ""
@@ -2665,6 +2674,7 @@ def assign_bbox_to_text_area_plan(
         source = DETECTION_BLOCKED
     cleanup_authorization = str(container.get("cleanup_authorization") or "")
     protection_reason = str(container.get("protection_reason") or "")
+    eligibility = _container_authorization_eligibility(container)
     return {
         "text_area_container_id": container.get("container_id"),
         "text_area_semantic_unit_id": container.get("semantic_unit_id") or container.get("container_id"),
@@ -2679,7 +2689,12 @@ def assign_bbox_to_text_area_plan(
         "text_area_authorization_explicit": bool(container.get("authorization_explicit", False)),
         "text_area_authorization_field_origin": container.get("authorization_field_origin") or "",
         "text_area_semantic_authorization_state": container.get("semantic_authorization_state") or cleanup_authorization,
-        "text_area_ocr_eligible": bool(container.get("ocr_eligible", True)),
+        "text_area_ctd_scope_eligible": eligibility["ctd_scope_eligible"],
+        "text_area_comic_text_detector_scope_eligible": eligibility["ctd_scope_eligible"],
+        "text_area_ocr_eligible": eligibility["ocr_eligible"],
+        "text_area_translation_eligible": eligibility["translation_eligible"],
+        "text_area_render_eligible": eligibility["render_eligible"],
+        "text_area_cleanup_executable": eligibility["cleanup_executable"],
         "text_area_detection_source": source,
         "text_area_fallback_reason": container.get("fallback_reason"),
         "text_area_confidence_tier": container.get("confidence_tier") or "low",
@@ -2801,6 +2816,11 @@ def apply_text_area_assignment_to_region(region: Dict[str, Any], assignment: Map
         "text_area_authorization_explicit",
         "text_area_authorization_field_origin",
         "text_area_semantic_authorization_state",
+        "text_area_ctd_scope_eligible",
+        "text_area_comic_text_detector_scope_eligible",
+        "text_area_translation_eligible",
+        "text_area_render_eligible",
+        "text_area_cleanup_executable",
     ):
         region[key] = assignment.get(key)
     render = region.setdefault("render", {})
@@ -3065,11 +3085,12 @@ def _semantic_evidence_provider_for_kind(
     role_evidence: Mapping[str, Any],
     state: str,
 ) -> str:
+    role_signals = set(_semantic_role_values(role_evidence, "role_signals"))
     text = " ".join(
         [
             evidence_kind,
             str(role_evidence.get("source") or ""),
-            " ".join(_semantic_role_values(role_evidence, "role_signals")),
+            " ".join(role_signals),
             " ".join(_semantic_role_values(role_evidence, "ogkalu_class_names")),
             " ".join(_semantic_role_values(role_evidence, "current_region_roles")),
             " ".join(_semantic_role_values(role_evidence, "evidence_source_list")),
@@ -3083,7 +3104,10 @@ def _semantic_evidence_provider_for_kind(
         return PROVIDER_TEXTAREA_DETERMINISTIC_LARGE_SFX
     if "current_region" in text or "current_" in evidence_kind:
         return PROVIDER_CURRENT_REGION_SEMANTIC
-    if "kitsumed" in text or "speech_bubble_mask" in text or "speech_mask" in text:
+    has_positive_speech_mask_evidence = bool(
+        role_signals & {"speech_bubble_mask_evidence", "kitsumed_speech_mask_evidence"}
+    )
+    if has_positive_speech_mask_evidence or "kitsumed_speech_mask" in text or "typed_model_speech_bubble_mask" in evidence_kind:
         return PROVIDER_KITSUMED_SPEECH_MASK
     if state == AUTH_PROTECT_SFX_DECORATIVE or any(token in text for token in ("sfx", "decorative")):
         return PROVIDER_OGKALU_SFX_DECORATIVE
@@ -3401,6 +3425,15 @@ def _cleanup_authority_is_weak_background_when_protected(role_evidence: Mapping[
     return any(any(token in reason for token in weak_background_tokens) for reason in typed_reasons)
 
 
+def _ogkalu_speech_authority_blocked_by_protected(role_evidence: Mapping[str, Any]) -> bool:
+    role_signals = set(_semantic_role_values(role_evidence, "role_signals"))
+    conflict_evidence = set(_semantic_role_values(role_evidence, "conflict_evidence"))
+    return bool(
+        "ogkalu_speech_authority_blocked_by_protected" in role_signals
+        or "protected_overlap_blocks_ogkalu_speech_authority" in conflict_evidence
+    )
+
+
 def _adjudicate_text_area_semantic_authorization(
     container: Mapping[str, Any] | TextAreaContainer,
     evidence_context: Mapping[str, Any] | None = None,
@@ -3429,6 +3462,7 @@ def _adjudicate_text_area_semantic_authorization(
         and bool(protected_authority_states or recognized_sfx_decorative or recognized_art_or_non_text)
         and _cleanup_authority_is_weak_background_when_protected(role_evidence)
     )
+    blocked_ogkalu_speech_by_protected = _ogkalu_speech_authority_blocked_by_protected(role_evidence)
 
     if cleanup_authority_states and (protected_authority_states or recognized_sfx_decorative or recognized_art_or_non_text) and not protected_dominates_weak_cleanup:
         adjudication_reason_codes.append("text_area_plan:typed_cleanup_protected_conflict")
@@ -3439,6 +3473,18 @@ def _adjudicate_text_area_semantic_authorization(
             must_not_mutate=True,
             protection_reason="typed_cleanup_protected_conflict",
             authorization_explicit=True,
+            reason_codes=adjudication_reason_codes,
+        )
+
+    if blocked_ogkalu_speech_by_protected:
+        adjudication_reason_codes.append("text_area_plan:ogkalu_speech_authority_blocked_by_protected")
+        return TextAreaSemanticAdjudication(
+            cleanup_authorization=AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+            semantic_authorization_state=AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+            semantic_kind=SEMANTIC_KIND_UNKNOWN,
+            must_not_mutate=True,
+            protection_reason="ogkalu_speech_authority_overlaps_protected",
+            authorization_explicit=False,
             reason_codes=adjudication_reason_codes,
         )
 
@@ -3619,6 +3665,35 @@ def _authorization_is_explicit(auth: str) -> bool:
         AUTH_CLEANUP_TRANSLATE_CAPTION,
         AUTH_PROTECT_SFX_DECORATIVE,
         AUTH_PROTECT_ART_OR_NON_TEXT,
+    }
+
+
+def _authorization_is_cleanup_executable(auth: str) -> bool:
+    return auth in {
+        AUTH_CLEANUP_TRANSLATE_SPEECH,
+        AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+        AUTH_CLEANUP_TRANSLATE_CAPTION,
+    }
+
+
+def _container_authorization_eligibility(container: Mapping[str, Any] | TextAreaContainer) -> Dict[str, bool]:
+    auth = str(
+        _container_value(container, "semantic_authorization_state", "")
+        or _container_value(container, "cleanup_authorization", "")
+        or ""
+    )
+    explicit = bool(_container_value(container, "authorization_explicit", False))
+    ocr_eligible = bool(_container_value(container, "ocr_eligible", False))
+    ctd_scope_eligible = bool(_container_value(container, "comic_text_detector_scope_eligible", False))
+    cleanup_executable = bool(explicit and _authorization_is_cleanup_executable(auth))
+    translation_eligible = bool(cleanup_executable and ocr_eligible)
+    render_eligible = translation_eligible
+    return {
+        "ctd_scope_eligible": ctd_scope_eligible,
+        "ocr_eligible": ocr_eligible,
+        "translation_eligible": translation_eligible,
+        "render_eligible": render_eligible,
+        "cleanup_executable": cleanup_executable,
     }
 
 
@@ -3851,6 +3926,7 @@ def _semantic_unit_from_container(
         requires_review=bool(container.human_review_required),
     )
     semantic_records = _semantic_evidence_records(role_evidence)
+    eligibility = _container_authorization_eligibility(container)
     evidence_sources = []
     for key in ("source", "authority_evidence_kind"):
         value = str(role_evidence.get(key) or "")
@@ -3886,8 +3962,11 @@ def _semantic_unit_from_container(
         semantic_evidence_trace=semantic_records,
         must_not_mutate=bool(container.must_not_mutate),
         review_required=bool(container.human_review_required or _component_auth_family(auth) in {"review", "outside", "ambiguous"}),
-        ocr_eligible=bool(container.ocr_eligible),
-        comic_text_detector_scope_eligible=bool(container.comic_text_detector_scope_eligible),
+        ocr_eligible=eligibility["ocr_eligible"],
+        comic_text_detector_scope_eligible=eligibility["ctd_scope_eligible"],
+        translation_eligible=eligibility["translation_eligible"],
+        render_eligible=eligibility["render_eligible"],
+        cleanup_executable=eligibility["cleanup_executable"],
         semantic_authorization_state=str(container.semantic_authorization_state or auth),
         container_id=str(container.container_id or ""),
         route_intent=str(container.route_intent or ROUTE_REVIEW_FALLBACK),
@@ -3971,6 +4050,7 @@ def _finish_plan(plan: TextAreaPlan, started: float) -> TextAreaPlan:
     ocr_eligible = 0
     scope_eligible = 0
     review_only_blocked = 0
+    _demote_ogkalu_speech_authority_overlapping_protected(plan.containers, plan.image_size)
     for container in plan.containers:
         _apply_cleanup_authorization(container)
     semantic_units: List[TextAreaSemanticAuthorizationRecord] = []
@@ -4523,6 +4603,25 @@ def _container_from_unlinked_text_area_evidence(
     visual = _container_visual_stats(luma_image, bbox, image_size)
     top_caption = class_name == "text_free" and _looks_like_caption_background_bbox(bbox, image_size)
     if top_caption:
+        reasons = ["ogkalu_text_free_without_kitsumed_mask", "text_area_plan:top_caption_background_candidate"]
+        has_background_authority = (
+            confidence >= OGKALU_SINGLE_MODEL_AUTHORITY_CONFIDENCE
+            and not _text_free_caption_candidate_is_protected_sfx(
+                fused_type="free_text",
+                reasons=reasons,
+                bbox=bbox,
+                visual=visual,
+                image_size=image_size,
+                luma_image=luma_image,
+            )
+        )
+        if has_background_authority:
+            semantic_role_evidence = _semantic_role_evidence_with_state(
+                semantic_role_evidence,
+                "cleanup_authority_states",
+                AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+                evidence_kind="typed_ogkalu_text_free_background_authority",
+            )
         return TextAreaContainer(
             container_id=f"ogkalu_{evidence_id}",
             page_id=page_id,
@@ -4531,13 +4630,20 @@ def _container_from_unlinked_text_area_evidence(
             source_model_ids=[evidence_id],
             semantic_role_evidence=semantic_role_evidence,
             confidence=round(confidence, 6),
-            confidence_tier="text_free_review_only",
+            confidence_tier="text_free_background_authority" if has_background_authority else "text_free_review_only",
             route_intent=ROUTE_TRANSLATE_CAPTION,
             ocr_eligible=True,
             comic_text_detector_scope_eligible=True,
-            fallback_reason="top_row_text_free_caption_candidate",
-            evidence_reason_codes=["ogkalu_text_free", "text_area_plan:top_caption_background_candidate"] + _visual_reason_codes(visual),
-            human_review_required=True,
+            fallback_reason=None if has_background_authority else "top_row_text_free_caption_candidate",
+            evidence_reason_codes=["ogkalu_text_free"]
+            + reasons[1:]
+            + (
+                ["text_area_plan:high_confidence_ogkalu_text_free_background_authority"]
+                if has_background_authority
+                else []
+            )
+            + _visual_reason_codes(visual),
+            human_review_required=not has_background_authority,
             ocr_eligibility_reason="caption_background_container",
         )
     if class_name == "text_free" and _looks_like_pre_ocr_sfx_or_decorative("free_text", [f"ogkalu_class:{class_name}"], bbox, visual, image_size):
@@ -4557,6 +4663,42 @@ def _container_from_unlinked_text_area_evidence(
             evidence_reason_codes=[f"ogkalu_class:{class_name}", "text_area_plan:text_free_non_caption_preserve_review"] + _visual_reason_codes(visual),
             human_review_required=True,
             ocr_eligibility_reason="blocked_text_free_non_caption",
+        )
+    if class_name in {"bubble", "text_bubble"} and _looks_like_standalone_ogkalu_speech_bubble(
+        fused_type="ambiguous",
+        reasons=[f"ogkalu_{class_name}_without_kitsumed_mask"],
+        bbox=bbox,
+        visual=visual,
+        image_size=image_size,
+        semantic_role_evidence=semantic_role_evidence,
+        clipped=_is_clipped_or_degenerate_bbox(bbox, image_size),
+    ):
+        semantic_role_evidence = _semantic_role_evidence_with_state(
+            semantic_role_evidence,
+            "cleanup_authority_states",
+            AUTH_CLEANUP_TRANSLATE_SPEECH,
+            evidence_kind="typed_ogkalu_text_bubble_speech_authority",
+        )
+        return TextAreaContainer(
+            container_id=f"ogkalu_{evidence_id}",
+            page_id=page_id,
+            container_type=CONTAINER_SPEECH,
+            bbox=bbox,
+            source_model_ids=[evidence_id],
+            semantic_role_evidence=semantic_role_evidence,
+            confidence=round(confidence, 6),
+            confidence_tier="ogkalu_text_bubble_speech_authority",
+            route_intent=ROUTE_TRANSLATE_SPEECH,
+            ocr_eligible=True,
+            comic_text_detector_scope_eligible=True,
+            fallback_reason=None,
+            evidence_reason_codes=[
+                f"ogkalu_class:{class_name}",
+                f"text_area_plan:ogkalu_{class_name}_speech_authority",
+            ]
+            + _visual_reason_codes(visual),
+            human_review_required=False,
+            ocr_eligibility_reason="ogkalu_text_bubble_speech_container",
         )
     return TextAreaContainer(
         container_id=f"ogkalu_{evidence_id}",
@@ -5375,6 +5517,83 @@ def _demote_weak_background_authority_overlapping_protected(
             container.evidence_reason_codes.append("text_area_plan:weak_background_authority_blocked_by_protected")
 
 
+def _is_ogkalu_only_speech_authority_container(container: TextAreaContainer) -> bool:
+    role_evidence = _container_semantic_role_evidence(container)
+    cleanup_states = set(_semantic_role_state_values(role_evidence, "cleanup_authority_states"))
+    if AUTH_CLEANUP_TRANSLATE_SPEECH not in cleanup_states:
+        return False
+    role_classes = set(_semantic_role_values(role_evidence, "ogkalu_class_names"))
+    if not (role_classes & {"bubble", "text_bubble"}):
+        return False
+    role_signals = set(_semantic_role_values(role_evidence, "role_signals"))
+    current_roles = set(_semantic_role_values(role_evidence, "current_region_roles"))
+    if "speech_bubble_mask_evidence" in role_signals or "speech" in current_roles:
+        return False
+    typed_reasons = {str(item) for item in _semantic_role_values(role_evidence, "typed_authority_reason_codes")}
+    evidence_kind = str(role_evidence.get("authority_evidence_kind") or "")
+    reason_text = " ".join(sorted(typed_reasons | {evidence_kind}))
+    return any(token in reason_text for token in OGKALU_ONLY_SPEECH_AUTHORITY_REASON_TOKENS)
+
+
+def _demote_ogkalu_speech_authority_overlapping_protected(
+    containers: Sequence[TextAreaContainer],
+    image_size: Tuple[int, int],
+) -> None:
+    protected_boxes: List[List[int]] = []
+    for container in containers:
+        role_evidence = _container_semantic_role_evidence(container)
+        protected_states = set(_semantic_role_state_values(role_evidence, "protected_authority_states"))
+        if (
+            container.container_type == CONTAINER_SFX
+            or container.route_intent == ROUTE_PRESERVE_SFX
+            or AUTH_PROTECT_SFX_DECORATIVE in protected_states
+            or AUTH_PROTECT_ART_OR_NON_TEXT in protected_states
+        ):
+            bbox = _normalize_xywh(container.bbox, image_size)
+            if bbox:
+                protected_boxes.append([bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]])
+    if not protected_boxes:
+        return
+
+    for container in containers:
+        if not _is_ogkalu_only_speech_authority_container(container):
+            continue
+        bbox = _normalize_xywh(container.bbox, image_size)
+        if not bbox:
+            continue
+        bbox_xyxy = [bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]]
+        inside_protected = _max_inside_ratio_xyxy(bbox_xyxy, protected_boxes)
+        protected_coverage = _max_coverage_of_boxes_xyxy(bbox_xyxy, protected_boxes)
+        if inside_protected < 0.16 and protected_coverage < 0.25:
+            continue
+
+        role_evidence = _container_semantic_role_evidence(container)
+        cleanup_states = set(_semantic_role_state_values(role_evidence, "cleanup_authority_states"))
+        cleanup_states.discard(AUTH_CLEANUP_TRANSLATE_SPEECH)
+        updated_evidence = dict(role_evidence)
+        updated_evidence["cleanup_authority_states"] = sorted(cleanup_states)
+        updated_evidence["cleanup_candidate_states"] = sorted(
+            set(_semantic_role_state_values(role_evidence, "cleanup_candidate_states")) | {AUTH_CLEANUP_TRANSLATE_SPEECH}
+        )
+        role_signals = set(_semantic_role_values(updated_evidence, "role_signals"))
+        role_signals.add("ogkalu_speech_authority_blocked_by_protected")
+        updated_evidence["role_signals"] = sorted(role_signals)
+        conflict_evidence = set(_semantic_role_values(updated_evidence, "conflict_evidence"))
+        conflict_evidence.add("protected_overlap_blocks_ogkalu_speech_authority")
+        updated_evidence["conflict_evidence"] = sorted(conflict_evidence)
+        container.semantic_role_evidence = updated_evidence
+        container.text_area_pre_ocr_authority = False
+        container.pre_ocr_authority = False
+        container.ocr_eligible = False
+        container.comic_text_detector_scope_eligible = False
+        container.human_review_required = True
+        container.fallback_reason = "ogkalu_speech_authority_overlaps_protected"
+        container.confidence_tier = "ogkalu_speech_authority_blocked_by_protected"
+        container.ocr_eligibility_reason = "blocked_ogkalu_speech_authority_overlaps_protected"
+        if "text_area_plan:ogkalu_speech_authority_blocked_by_protected" not in container.evidence_reason_codes:
+            container.evidence_reason_codes.append("text_area_plan:ogkalu_speech_authority_blocked_by_protected")
+
+
 def _deterministic_large_sfx_component_bboxes(
     luma_image: Any,
     image_size: Tuple[int, int],
@@ -6098,28 +6317,73 @@ def _semantic_role_evidence_from_fused(fused: Mapping[str, Any]) -> Dict[str, An
 
 def _semantic_role_evidence_from_text_area_evidence(evidence: Mapping[str, Any]) -> Dict[str, Any]:
     class_name = str(evidence.get("class_name") or "")
-    role_signals: List[str] = []
-    cleanup_candidate_states: List[str] = []
-    cleanup_authority_states: List[str] = []
+    base = dict(evidence.get("semantic_role_evidence") or {}) if isinstance(evidence.get("semantic_role_evidence"), Mapping) else {}
+    role_signals: List[str] = list(_semantic_role_values(base, "role_signals"))
+    cleanup_candidate_states: List[str] = list(_semantic_role_state_values(base, "cleanup_candidate_states"))
+    cleanup_authority_states: List[str] = list(_semantic_role_state_values(base, "cleanup_authority_states"))
+    protected_authority_states: List[str] = list(_semantic_role_state_values(base, "protected_authority_states"))
+    protected_candidate_states: List[str] = list(_semantic_role_state_values(base, "protected_candidate_states"))
+    evidence_id = str(evidence.get("model_evidence_id") or evidence.get("evidence_id") or "")
+    confidence = _optional_float(evidence.get("confidence"))
+    normalized_kind = str(base.get("normalized_semantic_candidate_kind") or "review_unknown")
+    candidate_authority_state = str(base.get("candidate_authority_state") or AUTH_REVIEW_UNKNOWN_NOT_CLEANUP)
+    reason_codes = list(_semantic_role_values(base, "reason_codes"))
     if class_name in {"bubble", "text_bubble"}:
         role_signals.append("text_container_candidate")
         cleanup_candidate_states.append(AUTH_CLEANUP_TRANSLATE_SPEECH)
+        normalized_kind = "speech_container" if class_name == "bubble" else "speech_text_area"
+        candidate_authority_state = AUTH_CLEANUP_TRANSLATE_SPEECH
+        reason_codes.append(
+            "ogkalu_bubble_speech_container_evidence"
+            if class_name == "bubble"
+            else "ogkalu_text_bubble_first_class_speech_evidence"
+        )
     if class_name == "text_free":
         role_signals.append("caption_background_candidate")
         cleanup_candidate_states.append(AUTH_CLEANUP_TRANSLATE_BACKGROUND)
+        normalized_kind = "background_narration"
+        candidate_authority_state = AUTH_CLEANUP_TRANSLATE_BACKGROUND
+        reason_codes.append("ogkalu_text_free_background_evidence")
     if evidence.get("linked_bubble_mask_ids"):
         role_signals.append("speech_bubble_mask_evidence")
         cleanup_candidate_states = [state for state in cleanup_candidate_states if state != AUTH_CLEANUP_TRANSLATE_SPEECH]
         cleanup_authority_states = [AUTH_CLEANUP_TRANSLATE_SPEECH]
+    ogkalu_classes = set(_semantic_role_values(base, "ogkalu_class_names"))
+    if class_name:
+        ogkalu_classes.add(class_name)
+    source_model_ids = set(_semantic_role_values(base, "source_model_ids"))
+    model_evidence_ids = set(_semantic_role_values(base, "model_evidence_ids"))
+    if evidence_id:
+        source_model_ids.add(evidence_id)
+        model_evidence_ids.add(evidence_id)
+    evidence_strength = str(base.get("evidence_strength") or "")
+    if not evidence_strength:
+        evidence_strength = (
+            "strong_single_model_candidate"
+            if confidence is not None
+            and confidence >= OGKALU_SINGLE_MODEL_AUTHORITY_CONFIDENCE
+            and class_name in {"bubble", "text_bubble", "text_free"}
+            else "single_model_candidate"
+        )
     return {
+        **base,
         "role_signals": sorted(set(role_signals)),
-        "ogkalu_class_names": [class_name] if class_name else [],
+        "ogkalu_class_names": sorted(ogkalu_classes),
         "cleanup_authority_states": sorted(set(cleanup_authority_states)),
         "cleanup_candidate_states": sorted(set(cleanup_candidate_states)),
-        "protected_authority_states": [],
-        "protected_candidate_states": [],
-        "authority_evidence_kind": "typed_text_area_model_evidence",
+        "protected_authority_states": sorted(set(protected_authority_states)),
+        "protected_candidate_states": sorted(set(protected_candidate_states)),
+        "authority_evidence_kind": str(base.get("authority_evidence_kind") or "typed_text_area_model_evidence"),
         "source": "bubble_detection_text_area_evidence",
+        "raw_class_name": str(base.get("raw_class_name") or class_name),
+        "normalized_semantic_candidate_kind": normalized_kind,
+        "candidate_authority_state": candidate_authority_state,
+        "evidence_strength": evidence_strength,
+        "reason_codes": sorted({str(item) for item in reason_codes if str(item)}),
+        "source_evidence_ids": sorted(source_model_ids),
+        "source_model_ids": sorted(source_model_ids),
+        "model_evidence_ids": sorted(model_evidence_ids),
+        "confidence": evidence.get("confidence", base.get("confidence")),
     }
 
 
@@ -6577,25 +6841,35 @@ def _looks_like_standalone_ogkalu_speech_bubble(
     semantic_role_evidence: Mapping[str, Any],
     clipped: bool,
 ) -> bool:
-    if clipped:
-        return False
     if fused_type not in {"ambiguous", "speech_bubble"}:
         return False
     role_classes = set(_semantic_role_values(semantic_role_evidence, "ogkalu_class_names"))
     role_signals = set(_semantic_role_values(semantic_role_evidence, "role_signals"))
-    if "bubble" not in role_classes:
+    if not (role_classes & {"bubble", "text_bubble"}):
         return False
     if "speech_bubble_mask_evidence" in role_signals:
         return False
     reason_text = " ".join(str(item).lower() for item in reasons)
     if any(token in reason_text for token in ("sfx", "decorative", "preserve", "text_free")):
         return False
+    conflicts = set(_semantic_role_values(semantic_role_evidence, "conflict_evidence"))
+    if any(any(token in conflict.lower() for token in ("sfx", "decorative", "preserve", "art")) for conflict in conflicts):
+        return False
+    confidence = _optional_float(semantic_role_evidence.get("confidence")) or 0.0
+    neighbor_ids = _semantic_role_values(semantic_role_evidence, "neighboring_speech_context_ids")
+    edge_or_clip_supported_by_context = bool(
+        confidence >= OGKALU_SINGLE_MODEL_AUTHORITY_CONFIDENCE
+        and neighbor_ids
+        and role_classes & {"bubble", "text_bubble"}
+    )
+    if clipped and not edge_or_clip_supported_by_context:
+        return False
     x, y, w, h = _coerce_xywh(bbox)
     width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
     if w <= 0 or h <= 0:
         return False
     page_edge_touching = x <= 1 or y <= 1 or x + w >= width - 1 or y + h >= height - 1
-    if page_edge_touching:
+    if page_edge_touching and not edge_or_clip_supported_by_context:
         return False
     if w < width * 0.08 or h < height * 0.06:
         return False
