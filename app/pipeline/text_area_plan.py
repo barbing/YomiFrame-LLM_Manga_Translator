@@ -5453,7 +5453,7 @@ def _side_caption_search_bbox(seed_bbox: Sequence[int], image_size: Tuple[int, i
             x0 = int(width * 0.72)
             x1 = min(width - 1, int(width * 0.985))
             y0 = max(int(height * 0.20), y + max(60, int(max(1, h) * 0.18)))
-            y1 = min(int(height * 0.78), y + max(1, h) + max(160, int(max(1, h) * 0.55)))
+            y1 = min(int(height * 0.78), y + max(1, h) + max(350, int(max(1, h) * 0.85)))
         else:
             x0 = max(int(width * 0.72), x - max(72, int(max(1, w) * 0.55)))
             x1 = min(width - 1, max(x + max(1, w), int(width * 0.97)))
@@ -6265,6 +6265,9 @@ def _looks_like_standalone_ogkalu_speech_bubble(
     x, y, w, h = _coerce_xywh(bbox)
     width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
     if w <= 0 or h <= 0:
+        return False
+    page_edge_touching = x <= 1 or y <= 1 or x + w >= width - 1 or y + h >= height - 1
+    if page_edge_touching:
         return False
     if w < width * 0.08 or h < height * 0.06:
         return False
