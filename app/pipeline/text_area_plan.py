@@ -48,7 +48,30 @@ AUTH_REVIEW_UNKNOWN_NOT_CLEANUP = "review_unknown_not_cleanup"
 AUTH_OUTSIDE_CLEANUP_SCOPE = "outside_cleanup_scope"
 AUTH_AMBIGUOUS_COMPONENT_OWNER = "ambiguous_component_owner"
 
+SEMANTIC_KIND_SPEECH = "speech"
+SEMANTIC_KIND_BACKGROUND_NARRATION = "background_narration"
+SEMANTIC_KIND_TITLE = "title"
+SEMANTIC_KIND_CAPTION = "caption"
+SEMANTIC_KIND_SFX = "sfx"
+SEMANTIC_KIND_DECORATIVE = "decorative"
+SEMANTIC_KIND_ART_OR_NON_TEXT = "art_or_non_text"
+SEMANTIC_KIND_UNKNOWN = "unknown"
+
 TEXT_AREA_COMPONENT_AUTHORIZATION_MAP_VERSION = "text_area_component_authorization_map_v1"
+
+PROJECTION_READY = "projection_ready"
+PROJECTION_NO_SEMANTIC_AUTHORITY = "projection_no_semantic_authority"
+PROJECTION_UNDERCOVERAGE = "segmentation_undercoverage"
+PROJECTION_COMPONENT_MISSING = "segmentation_component_missing"
+PROJECTION_COMPONENT_FRAGMENTED = "segmentation_component_fragmented"
+PROJECTION_COMPONENT_MERGED = "segmentation_component_merged"
+PROJECTION_AMBIGUOUS_COMPONENT = "projection_ambiguous_component"
+PROJECTION_OUTSIDE_AUTHORIZED_AREA = "projection_outside_authorized_area"
+EFFECTIVE_MASK_NOT_READY = "effective_mask_not_ready"
+
+MASK_READY = "mask_ready"
+MASK_NOT_READY = "mask_not_ready"
+MASK_NOT_APPLICABLE = "mask_not_applicable"
 
 COMPONENT_AUTHORIZATION_STATES = {
     AUTH_CLEANUP_TRANSLATE_SPEECH,
@@ -61,6 +84,8 @@ COMPONENT_AUTHORIZATION_STATES = {
     AUTH_AMBIGUOUS_COMPONENT_OWNER,
 }
 
+SEMANTIC_AUTHORIZATION_FINAL_STATES = set(COMPONENT_AUTHORIZATION_STATES)
+
 COMPONENT_AUTHORIZATION_COLORS = {
     AUTH_CLEANUP_TRANSLATE_SPEECH: "green",
     AUTH_CLEANUP_TRANSLATE_BACKGROUND: "green",
@@ -70,6 +95,14 @@ COMPONENT_AUTHORIZATION_COLORS = {
     AUTH_REVIEW_UNKNOWN_NOT_CLEANUP: "gray",
     AUTH_OUTSIDE_CLEANUP_SCOPE: "blue",
     AUTH_AMBIGUOUS_COMPONENT_OWNER: "orange",
+}
+
+FRESH_AUTHORIZATION_FIELD_ORIGIN = "fresh_text_area_plan"
+REPLAY_AUTHORIZATION_FIELD_ORIGINS = {
+    "replay_old_artifact_baseline",
+    "old_artifact_baseline",
+    "stale_artifact",
+    "fixture",
 }
 
 DETECTION_SCOPED = "scoped"
@@ -173,8 +206,15 @@ class TextAreaContainer:
     cleanup_authorization: str = ""
     must_not_mutate: bool = False
     protection_reason: str = ""
+    semantic_kind: str = ""
+    semantic_role_evidence: Dict[str, Any] = field(default_factory=dict)
     pre_ocr_authority: bool = True
     source_stage: str = "text_area_plan"
+    authorization_source_stage: str = ""
+    authorization_basis: str = ""
+    authorization_explicit: bool = False
+    authorization_field_origin: str = ""
+    semantic_authorization_state: str = ""
     parent_source_evidence: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -201,9 +241,63 @@ class TextAreaScope:
     protection_reason: str = ""
     pre_ocr_authority: bool = True
     source_stage: str = "text_area_plan"
+    authorization_source_stage: str = ""
+    authorization_basis: str = ""
+    authorization_explicit: bool = False
+    authorization_field_origin: str = ""
+    semantic_authorization_state: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)
+
+
+@dataclass
+class TextAreaSemanticAuthorizationRecord:
+    semantic_unit_id: str
+    page_id: str
+    bbox: List[int]
+    polygon: List[List[float]] = field(default_factory=list)
+    semantic_kind: str = "unknown"
+    cleanup_authorization: str = AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
+    authorization_source_stage: str = ""
+    authorization_basis: str = ""
+    authorization_explicit: bool = False
+    authorization_field_origin: str = ""
+    source_evidence_ids: List[str] = field(default_factory=list)
+    source_model_ids: List[str] = field(default_factory=list)
+    evidence_source_list: List[str] = field(default_factory=list)
+    confidence_tier: str = "low"
+    reason_codes: List[str] = field(default_factory=list)
+    evidence_reason_codes: List[str] = field(default_factory=list)
+    conflict_flags: List[str] = field(default_factory=list)
+    semantic_role_evidence: Dict[str, Any] = field(default_factory=dict)
+    must_not_mutate: bool = False
+    review_required: bool = False
+    ocr_eligible: bool = False
+    comic_text_detector_scope_eligible: bool = False
+    semantic_authorization_state: str = AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
+    semantic_authority_owner: str = "TextAreaPlan/BubbleDetection"
+    container_id: str = ""
+    route_intent: str = ROUTE_REVIEW_FALLBACK
+    container_type: str = CONTAINER_UNKNOWN
+    protection_reason: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return dict(self.__dict__)
+
+
+@dataclass
+class TextAreaSemanticAdjudication:
+    cleanup_authorization: str
+    semantic_authorization_state: str
+    semantic_kind: str
+    must_not_mutate: bool
+    protection_reason: str = ""
+    authorization_source_stage: str = "text_area_plan_pre_ocr"
+    authorization_basis: str = ""
+    authorization_explicit: bool = False
+    authorization_field_origin: str = FRESH_AUTHORIZATION_FIELD_ORIGIN
+    reason_codes: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -229,6 +323,11 @@ class ScopedDetectionCandidate:
     protection_reason: str = ""
     pre_ocr_authority: bool = True
     source_stage: str = "text_area_plan"
+    authorization_source_stage: str = ""
+    authorization_basis: str = ""
+    authorization_explicit: bool = False
+    authorization_field_origin: str = ""
+    semantic_authorization_state: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)
@@ -257,6 +356,11 @@ class ScopedOcrCandidate:
     protection_reason: str = ""
     pre_ocr_authority: bool = True
     source_stage: str = "text_area_plan"
+    authorization_source_stage: str = ""
+    authorization_basis: str = ""
+    authorization_explicit: bool = False
+    authorization_field_origin: str = ""
+    semantic_authorization_state: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)
@@ -287,6 +391,7 @@ class TextAreaPlan:
     generated: bool = False
     containers: List[TextAreaContainer] = field(default_factory=list)
     scopes: List[TextAreaScope] = field(default_factory=list)
+    semantic_units: List[TextAreaSemanticAuthorizationRecord] = field(default_factory=list)
     fallback_reasons: List[TextAreaFallbackReason] = field(default_factory=list)
     evidence: List[TextAreaPlanEvidence] = field(default_factory=list)
     runtime: TextAreaPlanRuntime = field(default_factory=TextAreaPlanRuntime)
@@ -302,6 +407,7 @@ class TextAreaPlan:
             "generated": self.generated,
             "containers": [item.to_dict() for item in self.containers],
             "scopes": [item.to_dict() for item in self.scopes],
+            "semantic_units": [item.to_dict() for item in self.semantic_units],
             "fallback_reasons": [item.to_dict() for item in self.fallback_reasons],
             "evidence": [item.to_dict() for item in self.evidence],
             "runtime": self.runtime.to_dict(),
@@ -314,7 +420,9 @@ class TextAreaPlan:
 class TextAreaComponentAuthorizationRecord:
     page_id: str
     component_id: str
+    bbox: List[int]
     component_bbox: List[int]
+    pixel_count: int
     component_pixel_count: int
     authorization_state: str
     cleanup_authorization: str
@@ -322,6 +430,8 @@ class TextAreaComponentAuthorizationRecord:
     must_not_mutate: bool
     owning_container_ids: List[str] = field(default_factory=list)
     protection_container_ids: List[str] = field(default_factory=list)
+    cleanup_owner_ids: List[str] = field(default_factory=list)
+    protection_owner_ids: List[str] = field(default_factory=list)
     source_stage: str = "text_area_plan_component_authorization"
     confidence_tier: str = "low"
     reason_codes: List[str] = field(default_factory=list)
@@ -346,11 +456,38 @@ class TextAreaComponentAuthorizationRecord:
     sourceglyph_overlap_pixels: int = 0
     sourceglyph_missing: bool = True
     ambiguity_reasons: List[str] = field(default_factory=list)
+    unresolved_reason_codes: List[str] = field(default_factory=list)
+    protected_reason_codes: List[str] = field(default_factory=list)
+    ambiguous_reason_codes: List[str] = field(default_factory=list)
     semantic_authorization_state: str = ""
     semantic_visual_color: str = ""
     job_binding_state: str = ""
     job_binding_failure_reason: str = ""
     final_mask_authorization_state: str = ""
+    authorization_warning_codes: List[str] = field(default_factory=list)
+    component_contract_defect_codes: List[str] = field(default_factory=list)
+    requires_visual_review: bool = False
+    candidate_conflict_reason: str = ""
+    explicit_cleanup_authority: bool = False
+    explicit_protected_authority: bool = False
+    explicit_authority_source: str = ""
+    authorization_basis: str = ""
+    authorization_explicit: bool = False
+    authorization_field_origin: str = ""
+    semantic_unit_ids: List[str] = field(default_factory=list)
+    semantic_unit_states: List[str] = field(default_factory=list)
+    semantic_kind: str = ""
+    semantic_kinds: List[str] = field(default_factory=list)
+    source_evidence_ids: List[str] = field(default_factory=list)
+    semantic_authority_owner: str = "TextAreaPlan/BubbleDetection"
+    projection_owner: str = "TextForegroundSegmentationMask/TextAreaPlan projection"
+    projection_quality_state: str = PROJECTION_NO_SEMANTIC_AUTHORITY
+    projection_quality_reasons: List[str] = field(default_factory=list)
+    mask_readiness_state: str = MASK_NOT_READY
+    mask_readiness_failure_reason: str = ""
+    projected_label_ids: List[int] = field(default_factory=list)
+    projection_overlap_pixels: int = 0
+    projection_overlap_ratio: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)
@@ -593,6 +730,22 @@ def _component_auth_scopes(
             container_jobs.setdefault(container_id, []).append(job_id)
 
     scopes: List[Dict[str, Any]] = []
+    semantic_unit_records = list(plan.get("semantic_units") or [])
+    for index, semantic_unit in enumerate(semantic_unit_records):
+        if isinstance(semantic_unit, Mapping):
+            scope = _component_auth_scope(
+                source=semantic_unit,
+                source_kind="text_area_semantic_unit",
+                fallback_id=f"semantic_unit_{index:04d}",
+                bbox_mode="xywh",
+                mask_shape=mask_shape,
+                region_jobs=region_jobs,
+                container_jobs=container_jobs,
+            )
+            if scope:
+                scopes.append(scope)
+    if semantic_unit_records:
+        return scopes
     for index, container in enumerate(plan.get("containers") or []):
         if isinstance(container, Mapping):
             scope = _component_auth_scope(
@@ -653,28 +806,44 @@ def _component_auth_scope(
     )
     if not bbox:
         return None
-    auth = str(source.get("cleanup_authorization") or source.get("text_area_cleanup_authorization") or "")
+    scope_mask = _component_auth_polygon_mask(source.get("polygon") or source.get("mask_polygon"), mask_shape)
+    raw_cleanup_authorization = source.get("cleanup_authorization")
+    raw_text_area_cleanup_authorization = source.get("text_area_cleanup_authorization")
+    raw_auth = str(raw_cleanup_authorization or raw_text_area_cleanup_authorization or "")
+    explicit_authority_source = ""
+    if raw_cleanup_authorization:
+        explicit_authority_source = "cleanup_authorization"
+    elif raw_text_area_cleanup_authorization:
+        explicit_authority_source = "text_area_cleanup_authorization"
+    authorization_field_origin = str(
+        source.get("authorization_field_origin")
+        or source.get("text_area_authorization_field_origin")
+        or ""
+    )
+    explicit_flag_value = source.get("authorization_explicit")
+    if explicit_flag_value is None:
+        explicit_flag_value = source.get("text_area_authorization_explicit")
+    authorization_explicit = bool(explicit_flag_value)
+    replay_authority = authorization_field_origin in REPLAY_AUTHORIZATION_FIELD_ORIGINS
+    if raw_auth and authorization_explicit and not replay_authority:
+        auth = raw_auth
+    else:
+        auth = AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
+        explicit_authority_source = ""
     protection_reason = str(source.get("protection_reason") or source.get("text_area_protection_reason") or "")
     must_not_mutate = bool(source.get("must_not_mutate") or source.get("text_area_must_not_mutate"))
-    if not auth:
-        try:
-            auth, protection_reason_from_container, must_not_mutate_from_container = _cleanup_authorization_for_container(source)
-            protection_reason = protection_reason or protection_reason_from_container
-            must_not_mutate = must_not_mutate or must_not_mutate_from_container
-        except Exception:
-            auth = _component_auth_infer_authorization(source)
-    if auth not in COMPONENT_AUTHORIZATION_STATES:
-        auth = _component_auth_infer_authorization(source)
-    family = _component_auth_family(auth)
     container_id = str(source.get("container_id") or source.get("text_area_container_id") or source.get("scope_id") or fallback_id)
     region_id = str(source.get("region_id") or source.get("id") or "")
     job_ids = []
+    direct_region_job_ids: List[str] = []
     for job_id in region_jobs.get(region_id, []) if region_id else []:
         if job_id not in job_ids:
             job_ids.append(str(job_id))
-    for job_id in container_jobs.get(container_id, []) if container_id else []:
-        if job_id not in job_ids:
-            job_ids.append(str(job_id))
+            direct_region_job_ids.append(str(job_id))
+    if not (source_kind == "region_record" and direct_region_job_ids):
+        for job_id in container_jobs.get(container_id, []) if container_id else []:
+            if job_id not in job_ids:
+                job_ids.append(str(job_id))
     reason_codes = _component_auth_list(
         source.get("reason_codes")
         or source.get("evidence_reason_codes")
@@ -684,21 +853,77 @@ def _component_auth_scope(
     if protection_reason and protection_reason not in reason_codes:
         reason_codes.append(protection_reason)
     conflict_flags = _component_auth_list(source.get("conflict_flags") or source.get("text_area_conflict_flags") or [])
+    if raw_auth and not authorization_explicit:
+        reason_codes.append("missing_explicit_authorization_field")
+    if replay_authority:
+        reason_codes.append("replay_artifact_authorization_ignored")
+    if auth not in COMPONENT_AUTHORIZATION_STATES:
+        auth = AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
+        explicit_authority_source = ""
+    explicit_cleanup_authority = _component_auth_family(auth) == "cleanup" and bool(explicit_authority_source)
+    explicit_protected_authority = _component_auth_family(auth) == "protected" and bool(explicit_authority_source)
+    family = _component_auth_family(auth)
     return {
         "source_kind": source_kind,
         "bbox": bbox,
+        "scope_mask": scope_mask,
         "authorization_state": auth,
         "family": family,
         "container_id": container_id,
         "region_id": region_id,
+        "semantic_unit_id": str(source.get("semantic_unit_id") or container_id or region_id or fallback_id),
+        "semantic_kind": str(source.get("semantic_kind") or source.get("container_type") or source.get("text_area_container_type") or ""),
         "route_intent": str(source.get("route_intent") or source.get("text_area_route_intent") or source.get("intent") or ""),
         "must_not_mutate": must_not_mutate or family in {"protected", "review", "outside", "ambiguous"},
         "source_stage": str(source.get("source_stage") or source.get("text_area_authorization_source_stage") or source_kind),
         "confidence_tier": str(source.get("confidence_tier") or source.get("text_area_confidence_tier") or "low"),
         "reason_codes": reason_codes,
         "conflict_flags": conflict_flags,
+        "source_evidence_ids": _component_auth_list(
+            source.get("source_evidence_ids")
+            or source.get("source_model_ids")
+            or source.get("text_area_source_evidence_ids")
+            or []
+        ),
         "cleanup_job_ids": job_ids,
+        "explicit_cleanup_authority": explicit_cleanup_authority,
+        "explicit_protected_authority": explicit_protected_authority,
+        "explicit_authority_source": explicit_authority_source,
+        "authorization_basis": str(source.get("authorization_basis") or source.get("text_area_authorization_basis") or ""),
+        "authorization_explicit": authorization_explicit and not replay_authority,
+        "authorization_field_origin": authorization_field_origin,
+        "semantic_authorization_state": str(
+            source.get("semantic_authorization_state")
+            or source.get("text_area_semantic_authorization_state")
+            or auth
+        ),
     }
+
+
+def _component_auth_polygon_mask(polygon: Any, mask_shape: tuple[int, int]) -> Any:
+    if np is None or cv2 is None:
+        return None
+    if not isinstance(polygon, Sequence) or isinstance(polygon, (str, bytes)) or len(polygon) < 3:
+        return None
+    points: List[List[int]] = []
+    height, width = int(mask_shape[0]), int(mask_shape[1])
+    for item in polygon:
+        if not isinstance(item, Sequence) or isinstance(item, (str, bytes)) or len(item) < 2:
+            continue
+        try:
+            x = max(0, min(width - 1, int(round(float(item[0])))))
+            y = max(0, min(height - 1, int(round(float(item[1])))))
+        except Exception:
+            continue
+        points.append([x, y])
+    if len(points) < 3:
+        return None
+    mask = np.zeros((height, width), dtype=np.uint8)
+    try:
+        cv2.fillPoly(mask, [np.asarray(points, dtype=np.int32)], 1)
+    except Exception:
+        return None
+    return mask
 
 
 def _component_auth_infer_authorization(source: Mapping[str, Any]) -> str:
@@ -761,12 +986,27 @@ def _component_auth_candidates(
         x0, y0, x1, y1 = [int(item) for item in bbox[:4]]
         if x1 <= x0 or y1 <= y0:
             continue
-        overlap = int(np.count_nonzero(component_mask[y0:y1, x0:x1]))
-        centroid_inside = x0 <= cx < x1 and y0 <= cy < y1
+        scope_mask = scope.get("scope_mask")
+        if scope_mask is not None:
+            try:
+                overlap = int(np.count_nonzero(np.logical_and(component_mask, scope_mask > 0)))
+                ix = max(0, min(scope_mask.shape[1] - 1, int(round(cx))))
+                iy = max(0, min(scope_mask.shape[0] - 1, int(round(cy))))
+                centroid_inside = bool(scope_mask[iy, ix] > 0)
+            except Exception:
+                overlap = int(np.count_nonzero(component_mask[y0:y1, x0:x1]))
+                centroid_inside = x0 <= cx < x1 and y0 <= cy < y1
+        else:
+            overlap = int(np.count_nonzero(component_mask[y0:y1, x0:x1]))
+            centroid_inside = x0 <= cx < x1 and y0 <= cy < y1
         if overlap <= 0 and not centroid_inside:
             continue
         ratio = overlap / float(max(1, pixel_count))
-        eligible = ratio >= 0.05 or overlap >= 3 or centroid_inside
+        eligible = _component_auth_projection_candidate_eligible(
+            overlap_pixels=overlap,
+            pixel_count=pixel_count,
+            overlap_ratio=ratio,
+        )
         candidates.append(
             {
                 **dict(scope),
@@ -776,8 +1016,164 @@ def _component_auth_candidates(
                 "eligible": eligible,
             }
         )
-    candidates.sort(key=lambda item: (int(item.get("overlap_pixels") or 0), bool(item.get("centroid_inside"))), reverse=True)
+    candidates.sort(
+        key=lambda item: (
+            int(item.get("overlap_pixels") or 0),
+            bool(item.get("centroid_inside")),
+            _component_auth_source_priority(str(item.get("source_kind") or "")),
+            bool(item.get("cleanup_job_ids")),
+        ),
+        reverse=True,
+    )
     return candidates
+
+
+def _component_auth_projection_candidate_eligible(
+    *,
+    overlap_pixels: int,
+    pixel_count: int,
+    overlap_ratio: float,
+) -> bool:
+    if overlap_ratio >= 0.25:
+        return True
+    # Tiny punctuation/caption fragments can fall just under the generic ratio
+    # because the CTD component includes antialiased edge pixels. This only
+    # affects projection readiness after explicit semantic authority exists.
+    if pixel_count <= 64 and overlap_pixels >= 8 and overlap_ratio >= 0.18:
+        return True
+    return False
+
+
+def _component_auth_source_priority(source_kind: str) -> int:
+    if source_kind == "text_area_semantic_unit":
+        return 4
+    if source_kind == "region_record":
+        return 3
+    if source_kind == "text_area_container":
+        return 2
+    if source_kind == "text_area_scope":
+        return 1
+    return 0
+
+
+def _component_auth_semantic_unit_key(candidate: Mapping[str, Any]) -> str:
+    return str(
+        candidate.get("semantic_unit_id")
+        or candidate.get("container_id")
+        or candidate.get("region_id")
+        or candidate.get("source_kind")
+        or ""
+    )
+
+
+def _component_auth_semantic_units(candidates: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    units: Dict[str, Dict[str, Any]] = {}
+    for candidate in candidates or []:
+        if not (int(candidate.get("overlap_pixels") or 0) > 0 or bool(candidate.get("centroid_inside"))):
+            continue
+        key = _component_auth_semantic_unit_key(candidate)
+        if not key:
+            continue
+        existing = units.get(key)
+        if existing is None:
+            units[key] = dict(candidate)
+            continue
+        existing_overlap = int(existing.get("overlap_pixels") or 0)
+        candidate_overlap = int(candidate.get("overlap_pixels") or 0)
+        if candidate_overlap > existing_overlap or (
+            candidate_overlap == existing_overlap
+            and _component_auth_source_priority(str(candidate.get("source_kind") or ""))
+            > _component_auth_source_priority(str(existing.get("source_kind") or ""))
+        ):
+            merged = dict(candidate)
+            merged["cleanup_job_ids"] = sorted(
+                {
+                    str(job_id)
+                    for source in (existing, candidate)
+                    for job_id in (source.get("cleanup_job_ids") or [])
+                    if str(job_id)
+                }
+            )
+            merged["reason_codes"] = _component_auth_merged_values([existing, candidate], "reason_codes")
+            merged["conflict_flags"] = _component_auth_merged_values([existing, candidate], "conflict_flags")
+            merged["source_evidence_ids"] = _component_auth_merged_values([existing, candidate], "source_evidence_ids")
+            units[key] = merged
+        else:
+            existing["cleanup_job_ids"] = sorted(
+                {
+                    str(job_id)
+                    for source in (existing, candidate)
+                    for job_id in (source.get("cleanup_job_ids") or [])
+                    if str(job_id)
+                }
+            )
+            existing["reason_codes"] = _component_auth_merged_values([existing, candidate], "reason_codes")
+            existing["conflict_flags"] = _component_auth_merged_values([existing, candidate], "conflict_flags")
+            existing["source_evidence_ids"] = _component_auth_merged_values([existing, candidate], "source_evidence_ids")
+            existing["eligible"] = bool(existing.get("eligible") or candidate.get("eligible"))
+    values = list(units.values())
+    values.sort(
+        key=lambda item: (
+            bool(item.get("eligible")),
+            int(item.get("overlap_pixels") or 0),
+            _component_auth_source_priority(str(item.get("source_kind") or "")),
+        ),
+        reverse=True,
+    )
+    return values
+
+
+def _component_auth_projection_quality(
+    *,
+    semantic_units: Sequence[Mapping[str, Any]],
+    selected: Mapping[str, Any] | None,
+) -> tuple[str, List[str]]:
+    if not semantic_units:
+        return PROJECTION_NO_SEMANTIC_AUTHORITY, ["no_upstream_text_area_authorization"]
+    if len(semantic_units) > 1:
+        return PROJECTION_COMPONENT_MERGED, [PROJECTION_AMBIGUOUS_COMPONENT, PROJECTION_COMPONENT_MERGED]
+    if selected is None:
+        return PROJECTION_COMPONENT_MISSING, [PROJECTION_COMPONENT_MISSING]
+    if not bool(selected.get("eligible")):
+        if int(selected.get("overlap_pixels") or 0) <= 0:
+            return PROJECTION_COMPONENT_MISSING, [PROJECTION_COMPONENT_MISSING]
+        return PROJECTION_UNDERCOVERAGE, [PROJECTION_UNDERCOVERAGE]
+    return PROJECTION_READY, []
+
+
+def _component_auth_projection_ready_for_mask(
+    *,
+    semantic_authorization_state: str,
+    projection_quality_state: str,
+    job_binding_state: str,
+) -> tuple[str, str]:
+    family = _component_auth_family(semantic_authorization_state)
+    if family != "cleanup":
+        return MASK_NOT_APPLICABLE, ""
+    if projection_quality_state != PROJECTION_READY:
+        return MASK_NOT_READY, projection_quality_state or EFFECTIVE_MASK_NOT_READY
+    if job_binding_state != "bound_unique":
+        return MASK_NOT_READY, job_binding_state or "cleanup_job_binding_contract_error"
+    return MASK_READY, ""
+
+
+def _component_auth_projects_outside_authorized_area(
+    *,
+    semantic_authorization_state: str,
+    selected: Mapping[str, Any] | None,
+    pixel_count: int,
+) -> bool:
+    if selected is None:
+        return False
+    if _component_auth_family(semantic_authorization_state) not in {"cleanup", "protected"}:
+        return False
+    if bool(selected.get("eligible")):
+        return False
+    overlap_pixels = int(selected.get("overlap_pixels") or 0)
+    overlap_ratio = float(selected.get("overlap_ratio") or 0.0)
+    if overlap_pixels <= 0:
+        return False
+    return bool(pixel_count >= 512 and overlap_ratio < 0.05)
 
 
 def _component_auth_record(
@@ -790,55 +1186,131 @@ def _component_auth_record(
     centroid: Sequence[float],
     candidates: Sequence[Mapping[str, Any]],
 ) -> TextAreaComponentAuthorizationRecord:
-    eligible = [item for item in candidates if item.get("eligible")]
-    cleanup_candidates = [item for item in eligible if item.get("family") == "cleanup"]
-    protected_candidates = [item for item in eligible if item.get("family") == "protected"]
-    review_candidates = [item for item in eligible if item.get("family") == "review"]
-    outside_candidates = [item for item in eligible if item.get("family") == "outside"]
+    semantic_units = _component_auth_semantic_units(candidates)
+    accepted_semantic_units = [item for item in semantic_units if bool(item.get("eligible"))]
+    cleanup_candidates = [
+        item
+        for item in accepted_semantic_units
+        if item.get("family") == "cleanup" and bool(item.get("explicit_cleanup_authority"))
+    ]
+    protected_candidates = [
+        item
+        for item in accepted_semantic_units
+        if item.get("family") == "protected" and bool(item.get("explicit_protected_authority"))
+    ]
+    ambiguous_candidates = [
+        item
+        for item in accepted_semantic_units
+        if item.get("family") == "ambiguous" and bool(item.get("explicit_authority_source"))
+    ]
+    review_candidates = [item for item in semantic_units if item.get("family") == "review"]
+    outside_candidates = [item for item in semantic_units if item.get("family") == "outside"]
+    explicit_projection_candidates = [
+        item
+        for item in semantic_units
+        if (
+            (item.get("family") == "cleanup" and bool(item.get("explicit_cleanup_authority")))
+            or (item.get("family") == "protected" and bool(item.get("explicit_protected_authority")))
+        )
+    ]
+    explicit_units = cleanup_candidates + protected_candidates + ambiguous_candidates
+    explicit_projection_states = sorted(
+        {
+            str(item.get("authorization_state") or "")
+            for item in explicit_projection_candidates
+            if str(item.get("authorization_state") or "")
+        }
+    )
+    has_projection_authority_conflict = len(explicit_projection_states) > 1
     best_cleanup = cleanup_candidates[0] if cleanup_candidates else None
     best_protected = protected_candidates[0] if protected_candidates else None
     ambiguity_reasons: List[str] = []
 
     selected: Mapping[str, Any] | None = None
+    projection_candidate: Mapping[str, Any] | None = None
     semantic_authorization_state = AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
-    if best_cleanup and best_protected:
-        cleanup_ratio = float(best_cleanup.get("overlap_ratio") or 0.0)
-        protected_ratio = float(best_protected.get("overlap_ratio") or 0.0)
-        if protected_ratio >= 0.75 and cleanup_ratio < 0.25:
-            selected = best_protected
-            semantic_authorization_state = str(best_protected.get("authorization_state") or AUTH_PROTECT_SFX_DECORATIVE)
-        elif cleanup_ratio >= 0.75 and protected_ratio < 0.25:
-            selected = best_cleanup
-            semantic_authorization_state = str(best_cleanup.get("authorization_state") or AUTH_CLEANUP_TRANSLATE_SPEECH)
-        else:
-            selected = best_cleanup
-            semantic_authorization_state = AUTH_AMBIGUOUS_COMPONENT_OWNER
-            ambiguity_reasons = ["conflicting_authorization_evidence"]
+    if ambiguous_candidates:
+        selected = ambiguous_candidates[0]
+        projection_candidate = selected
+        semantic_authorization_state = AUTH_AMBIGUOUS_COMPONENT_OWNER
+        ambiguity_reasons = ["explicit_cleanup_protected_conflict"]
+    elif has_projection_authority_conflict:
+        selected = None
+        projection_candidate = explicit_projection_candidates[0] if explicit_projection_candidates else None
+        semantic_authorization_state = AUTH_AMBIGUOUS_COMPONENT_OWNER
+        ambiguity_reasons = [PROJECTION_COMPONENT_MERGED, PROJECTION_AMBIGUOUS_COMPONENT]
+    elif len(explicit_units) > 1:
+        selected = best_cleanup or best_protected or explicit_units[0]
+        projection_candidate = selected
+        semantic_authorization_state = str(selected.get("authorization_state") or AUTH_REVIEW_UNKNOWN_NOT_CLEANUP)
     elif best_cleanup:
         selected = best_cleanup
+        projection_candidate = selected
         semantic_authorization_state = str(best_cleanup.get("authorization_state") or AUTH_CLEANUP_TRANSLATE_SPEECH)
     elif best_protected:
         selected = best_protected
+        projection_candidate = selected
         semantic_authorization_state = str(best_protected.get("authorization_state") or AUTH_PROTECT_SFX_DECORATIVE)
+    elif explicit_projection_candidates:
+        projection_candidate = explicit_projection_candidates[0]
+        projection_state = str(projection_candidate.get("authorization_state") or AUTH_REVIEW_UNKNOWN_NOT_CLEANUP)
+        if _component_auth_family(projection_state) in {"cleanup", "protected", "outside", "ambiguous"}:
+            semantic_authorization_state = projection_state
+        else:
+            semantic_authorization_state = AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
     elif review_candidates:
         selected = review_candidates[0]
+        projection_candidate = selected
         semantic_authorization_state = AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
     elif outside_candidates:
         selected = outside_candidates[0]
+        projection_candidate = selected
         semantic_authorization_state = AUTH_OUTSIDE_CLEANUP_SCOPE
     else:
         selected = None
+        projection_candidate = None
         semantic_authorization_state = AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
 
-    family = _component_auth_family(semantic_authorization_state)
-    reason_codes = _component_auth_merged_values(eligible, "reason_codes")
-    conflict_flags = _component_auth_merged_values(eligible, "conflict_flags")
-    if not eligible and "no_upstream_text_area_authorization" not in reason_codes:
+    projection_quality_state, projection_quality_reasons = _component_auth_projection_quality(
+        semantic_units=semantic_units,
+        selected=projection_candidate,
+    )
+    if has_projection_authority_conflict:
+        projection_quality_state = PROJECTION_COMPONENT_MERGED
+        for reason in (PROJECTION_AMBIGUOUS_COMPONENT, PROJECTION_COMPONENT_MERGED):
+            if reason not in projection_quality_reasons:
+                projection_quality_reasons.append(reason)
+    elif (
+        selected is not None
+        and not has_projection_authority_conflict
+        and bool(selected.get("eligible"))
+    ):
+        projection_quality_state = PROJECTION_READY
+        projection_quality_reasons = [
+            reason
+            for reason in projection_quality_reasons
+            if reason not in {PROJECTION_AMBIGUOUS_COMPONENT, PROJECTION_COMPONENT_MERGED}
+        ]
+    elif (
+        projection_candidate is not None
+        and selected is None
+        and _component_auth_projects_outside_authorized_area(
+            semantic_authorization_state=str(projection_candidate.get("authorization_state") or ""),
+            selected=projection_candidate,
+            pixel_count=pixel_count,
+        )
+    ):
+        projection_quality_state = PROJECTION_OUTSIDE_AUTHORIZED_AREA
+        if PROJECTION_OUTSIDE_AUTHORIZED_AREA not in projection_quality_reasons:
+            projection_quality_reasons.append(PROJECTION_OUTSIDE_AUTHORIZED_AREA)
+    final_mask_authorization_state = semantic_authorization_state
+
+    family = _component_auth_family(final_mask_authorization_state)
+    reason_codes = _component_auth_merged_values(semantic_units, "reason_codes")
+    conflict_flags = _component_auth_merged_values(semantic_units, "conflict_flags")
+    if not semantic_units and "no_upstream_text_area_authorization" not in reason_codes:
         reason_codes.append("no_upstream_text_area_authorization")
-    if semantic_authorization_state == AUTH_AMBIGUOUS_COMPONENT_OWNER and "conflicting_authorization_evidence" not in reason_codes:
-        if not ambiguity_reasons:
-            reason_codes.append("conflicting_authorization_evidence")
-    for reason in ambiguity_reasons:
+    for reason in ambiguity_reasons + projection_quality_reasons:
         if reason and reason not in reason_codes:
             reason_codes.append(reason)
     component_id = f"tauthcomp_{_component_auth_safe_id(page_id)}_{component_index:04d}"
@@ -847,28 +1319,92 @@ def _component_auth_record(
     if semantic_authorization_state == AUTH_AMBIGUOUS_COMPONENT_OWNER:
         owning_candidates = cleanup_candidates
         protection_candidates = protected_candidates
+    selected_cleanup_candidates = (
+        [selected] if selected and selected.get("family") == "cleanup" and family == "cleanup" else cleanup_candidates if family == "cleanup" else []
+    )
+    if (
+        family == "cleanup"
+        and not selected_cleanup_candidates
+        and projection_candidate is not None
+        and projection_candidate.get("family") == "cleanup"
+    ):
+        selected_cleanup_candidates = [projection_candidate]
     binding_state, binding_failure_reason, owner_cleanup_job_id, scope_cleanup_job_ids = _component_auth_job_binding(
-        semantic_authorization_state,
-        cleanup_candidates,
+        final_mask_authorization_state,
+        selected_cleanup_candidates,
+    )
+    mask_readiness_state, mask_readiness_failure_reason = _component_auth_projection_ready_for_mask(
+        semantic_authorization_state=final_mask_authorization_state,
+        projection_quality_state=projection_quality_state,
+        job_binding_state=binding_state,
     )
     if binding_failure_reason and binding_failure_reason not in reason_codes:
         reason_codes.append(binding_failure_reason)
     if binding_state in {"missing_cleanup_job", "non_unique_cleanup_job"} and binding_state not in reason_codes:
         reason_codes.append(binding_state)
-    final_mask_authorization_state = semantic_authorization_state
+    if mask_readiness_failure_reason and mask_readiness_failure_reason not in reason_codes:
+        reason_codes.append(mask_readiness_failure_reason)
+    explicit_context = selected or projection_candidate
+    explicit_cleanup_authority = bool(best_cleanup) if final_mask_authorization_state == AUTH_AMBIGUOUS_COMPONENT_OWNER else (
+        bool(explicit_context.get("explicit_cleanup_authority")) if explicit_context else False
+    )
+    explicit_protected_authority = bool(best_protected) if final_mask_authorization_state == AUTH_AMBIGUOUS_COMPONENT_OWNER else (
+        bool(explicit_context.get("explicit_protected_authority")) if explicit_context else False
+    )
+    explicit_authority_source = ",".join(
+        sorted(
+            {
+                str(item.get("explicit_authority_source") or "")
+                for item in (explicit_context, best_protected)
+                if item and str(item.get("explicit_authority_source") or "")
+            }
+        )
+    )
+    authorization_field_origin = ",".join(
+        sorted(
+            {
+                str(item.get("authorization_field_origin") or "")
+                for item in (explicit_context, best_protected)
+                if item and str(item.get("authorization_field_origin") or "")
+            }
+        )
+    )
+    authorization_basis = " | ".join(
+        str(item.get("authorization_basis") or "")
+        for item in (explicit_context, best_protected)
+        if item and str(item.get("authorization_basis") or "")
+    )
+    semantic_unit_ids = _component_auth_unique_ids(semantic_units, "semantic_unit_id")
+    semantic_unit_states = sorted(
+        {
+            str(item.get("authorization_state") or "")
+            for item in semantic_units
+            if str(item.get("authorization_state") or "")
+        }
+    )
+    semantic_kinds = sorted({str(item.get("semantic_kind") or "") for item in semantic_units if str(item.get("semantic_kind") or "")})
+    source_evidence_ids = _component_auth_merged_values(semantic_units, "source_evidence_ids")
+    projection_overlap_pixels = int(projection_candidate.get("overlap_pixels") or 0) if projection_candidate else 0
+    projection_overlap_ratio = round(float(projection_candidate.get("overlap_ratio") or 0.0), 4) if projection_candidate else 0.0
+    selected_context = selected or projection_candidate
+
     return TextAreaComponentAuthorizationRecord(
         page_id=page_id,
         component_id=component_id,
+        bbox=[int(item) for item in bbox],
         component_bbox=[int(item) for item in bbox],
+        pixel_count=int(pixel_count),
         component_pixel_count=int(pixel_count),
         authorization_state=final_mask_authorization_state,
         cleanup_authorization=final_mask_authorization_state if family in {"cleanup", "protected", "ambiguous"} else "",
-        route_intent=str(selected.get("route_intent") or "") if selected else "",
+        route_intent=str(selected_context.get("route_intent") or "") if selected_context else "",
         must_not_mutate=family != "cleanup",
         owning_container_ids=_component_auth_unique_ids(owning_candidates, "container_id"),
         protection_container_ids=_component_auth_unique_ids(protection_candidates, "container_id"),
-        source_stage=str(selected.get("source_stage") or "text_area_plan_component_authorization") if selected else "text_area_plan_component_authorization",
-        confidence_tier=str(selected.get("confidence_tier") or "low") if selected else "low",
+        cleanup_owner_ids=_component_auth_unique_ids(owning_candidates, "container_id"),
+        protection_owner_ids=_component_auth_unique_ids(protection_candidates, "container_id"),
+        source_stage=str(selected_context.get("source_stage") or "text_area_plan_component_authorization") if selected_context else "text_area_plan_component_authorization",
+        confidence_tier=str(selected_context.get("confidence_tier") or "low") if selected_context else "low",
         reason_codes=reason_codes,
         conflict_flags=conflict_flags,
         review_required=family in {"review", "outside", "ambiguous"},
@@ -876,7 +1412,7 @@ def _component_auth_record(
         label=int(label),
         owner_cleanup_job_id=owner_cleanup_job_id,
         scope_cleanup_job_ids=scope_cleanup_job_ids,
-        candidate_cleanup_job_ids=_component_auth_unique_jobs(eligible),
+        candidate_cleanup_job_ids=_component_auth_unique_jobs(semantic_units),
         owning_region_ids=_component_auth_unique_ids(owning_candidates, "region_id"),
         protection_region_ids=_component_auth_unique_ids(protection_candidates, "region_id"),
         overlap_pixels=int(selected.get("overlap_pixels") or 0) if selected else 0,
@@ -884,14 +1420,37 @@ def _component_auth_record(
         protected_overlap_pixels=int(best_protected.get("overlap_pixels") or 0) if best_protected else 0,
         protected_overlap_ratio=round(float(best_protected.get("overlap_ratio") or 0.0), 4) if best_protected else 0.0,
         centroid=[round(float(centroid[0]), 3), round(float(centroid[1]), 3)],
-        candidate_container_ids=_component_auth_unique_ids(eligible, "container_id"),
-        candidate_region_ids=_component_auth_unique_ids(eligible, "region_id"),
+        candidate_container_ids=_component_auth_unique_ids(semantic_units, "container_id"),
+        candidate_region_ids=_component_auth_unique_ids(semantic_units, "region_id"),
         ambiguity_reasons=ambiguity_reasons,
+        unresolved_reason_codes=reason_codes if family in {"review", "outside"} else [],
+        protected_reason_codes=reason_codes if family == "protected" else [],
+        ambiguous_reason_codes=reason_codes if family == "ambiguous" else [],
         semantic_authorization_state=semantic_authorization_state,
         semantic_visual_color=COMPONENT_AUTHORIZATION_COLORS.get(semantic_authorization_state, "gray"),
         job_binding_state=binding_state,
         job_binding_failure_reason=binding_failure_reason,
         final_mask_authorization_state=final_mask_authorization_state,
+        explicit_cleanup_authority=explicit_cleanup_authority,
+        explicit_protected_authority=explicit_protected_authority,
+        explicit_authority_source=explicit_authority_source,
+        authorization_basis=authorization_basis,
+        authorization_explicit=bool(explicit_cleanup_authority or explicit_protected_authority),
+        authorization_field_origin=authorization_field_origin,
+        semantic_unit_ids=semantic_unit_ids,
+        semantic_unit_states=semantic_unit_states,
+        semantic_kind=str(selected_context.get("semantic_kind") or "") if selected_context else "",
+        semantic_kinds=semantic_kinds,
+        source_evidence_ids=source_evidence_ids,
+        semantic_authority_owner="TextAreaPlan/BubbleDetection",
+        projection_owner="TextForegroundSegmentationMask/TextAreaPlan projection",
+        projection_quality_state=projection_quality_state,
+        projection_quality_reasons=projection_quality_reasons,
+        mask_readiness_state=mask_readiness_state,
+        mask_readiness_failure_reason=mask_readiness_failure_reason,
+        projected_label_ids=[int(label)],
+        projection_overlap_pixels=projection_overlap_pixels,
+        projection_overlap_ratio=projection_overlap_ratio,
     )
 
 
@@ -930,13 +1489,12 @@ def _component_auth_assign_groups(page_id: str, records: Sequence[TextAreaCompon
                 AUTH_OUTSIDE_CLEANUP_SCOPE,
                 AUTH_AMBIGUOUS_COMPONENT_OWNER,
             }:
-                record.authorization_state = group_state
-                record.cleanup_authorization = group_state
-                record.must_not_mutate = _component_auth_family(group_state) != "cleanup"
-                record.review_required = False
-                record.visual_debug_color = COMPONENT_AUTHORIZATION_COLORS.get(group_state, record.visual_debug_color)
-                if "group_authorization_promoted_review_component" not in record.reason_codes:
-                    record.reason_codes.append("group_authorization_promoted_review_component")
+                _component_auth_add_contract_diagnostic(
+                    record,
+                    "group_authorization_candidate_not_semantic_authority",
+                    warning=True,
+                    visual_review=True,
+                )
 
 
 def _component_auth_apply_protected_sfx_grouping(records: Sequence[TextAreaComponentAuthorizationRecord]) -> None:
@@ -970,17 +1528,19 @@ def _component_auth_apply_protected_sfx_grouping(records: Sequence[TextAreaCompo
                 or is_local_sfx_continuation
             ):
                 continue
-            _component_auth_set_state(
+            _component_auth_add_contract_diagnostic(
                 record,
-                AUTH_AMBIGUOUS_COMPONENT_OWNER,
-                reason="sfx_group_conflicts_with_cleanup_authorization",
-                ambiguity=True,
+                "sfx_group_conflicts_with_cleanup_authorization",
+                defect=True,
+                visual_review=True,
+                candidate_conflict=True,
             )
         else:
-            _component_auth_set_state(
+            _component_auth_add_contract_diagnostic(
                 record,
-                AUTH_PROTECT_SFX_DECORATIVE,
-                reason="sfx_group_propagated_from_protected_neighbor",
+                "sfx_group_propagated_from_protected_neighbor_candidate",
+                warning=True,
+                visual_review=True,
             )
         for container_id in matching_seed.protection_container_ids:
             if container_id and container_id not in record.protection_container_ids:
@@ -1012,33 +1572,12 @@ def _component_auth_apply_vertical_review_text_groups(records: Sequence[TextArea
         if not _component_auth_is_vertical_review_text_group(group):
             continue
         for item in group:
-            _component_auth_set_state(
+            _component_auth_add_contract_diagnostic(
                 item,
-                AUTH_CLEANUP_TRANSLATE_BACKGROUND,
-                reason="vertical_review_text_group_promoted_to_cleanup_background",
+                "vertical_review_text_group_candidate_missing_upstream_cleanup_authority",
+                defect=True,
+                visual_review=True,
             )
-            item.route_intent = "translate_caption_background"
-            item.protection_container_ids = []
-            item.reason_codes = [
-                reason
-                for reason in item.reason_codes
-                if not any(token in str(reason).lower() for token in ("sfx", "decorative", "preserve"))
-            ]
-            item.conflict_flags = [
-                flag
-                for flag in item.conflict_flags
-                if not any(token in str(flag).lower() for token in ("sfx", "decorative", "preserve"))
-            ]
-            if "vertical_review_text_group_promoted_to_cleanup_background" not in item.reason_codes:
-                item.reason_codes.append("vertical_review_text_group_promoted_to_cleanup_background")
-            item.job_binding_state = "missing_cleanup_job"
-            item.job_binding_failure_reason = "cleanup_job_binding_contract_error"
-            item.owner_cleanup_job_id = ""
-            item.scope_cleanup_job_ids = []
-            if item.job_binding_failure_reason not in item.reason_codes:
-                item.reason_codes.append(item.job_binding_failure_reason)
-            if item.job_binding_state not in item.reason_codes:
-                item.reason_codes.append(item.job_binding_state)
 
 
 def _component_auth_is_vertical_review_text_candidate(record: TextAreaComponentAuthorizationRecord) -> bool:
@@ -1132,20 +1671,12 @@ def _component_auth_apply_orphan_text_near_cleanup_groups(records: Sequence[Text
         state = AUTH_CLEANUP_TRANSLATE_SPEECH if str(anchor.route_intent or "") == "translate_speech" else AUTH_CLEANUP_TRANSLATE_BACKGROUND
         route = "translate_speech" if state == AUTH_CLEANUP_TRANSLATE_SPEECH else "translate_caption_background"
         for item in group:
-            _component_auth_set_state(
+            _component_auth_add_contract_diagnostic(
                 item,
-                state,
-                reason="small_orphan_text_group_promoted_near_cleanup_text",
+                "small_orphan_text_group_near_cleanup_missing_upstream_authority",
+                defect=True,
+                visual_review=True,
             )
-            item.route_intent = route
-            item.job_binding_state = "missing_cleanup_job"
-            item.job_binding_failure_reason = "cleanup_job_binding_contract_error"
-            item.owner_cleanup_job_id = ""
-            item.scope_cleanup_job_ids = []
-            if item.job_binding_failure_reason not in item.reason_codes:
-                item.reason_codes.append(item.job_binding_failure_reason)
-            if item.job_binding_state not in item.reason_codes:
-                item.reason_codes.append(item.job_binding_state)
 
 
 def _component_auth_is_orphan_text_candidate(record: TextAreaComponentAuthorizationRecord) -> bool:
@@ -1327,25 +1858,25 @@ def _component_auth_apply_review_only_caption_guard(records: Sequence[TextAreaCo
     for record in records:
         if not _component_auth_is_large_review_only_caption_seed(record):
             continue
-        if record.authorization_state != AUTH_AMBIGUOUS_COMPONENT_OWNER:
-            _component_auth_set_state(
-                record,
-                AUTH_AMBIGUOUS_COMPONENT_OWNER,
-                reason="large_review_only_caption_component_conflicts_with_cleanup_authority",
-                ambiguity=True,
-            )
+        _component_auth_add_contract_diagnostic(
+            record,
+            "large_review_only_caption_component_conflicts_with_cleanup_authority",
+            defect=True,
+            visual_review=True,
+            candidate_conflict=True,
+        )
         guarded.append(record)
     for group in _component_auth_review_only_caption_groups(records):
         if not _component_auth_is_large_review_only_caption_group(group):
             continue
         for record in group:
-            if record.authorization_state != AUTH_AMBIGUOUS_COMPONENT_OWNER:
-                _component_auth_set_state(
-                    record,
-                    AUTH_AMBIGUOUS_COMPONENT_OWNER,
-                    reason="large_review_only_caption_group_conflicts_with_cleanup_authority",
-                    ambiguity=True,
-                )
+            _component_auth_add_contract_diagnostic(
+                record,
+                "large_review_only_caption_group_conflicts_with_cleanup_authority",
+                defect=True,
+                visual_review=True,
+                candidate_conflict=True,
+            )
             if record not in guarded:
                 guarded.append(record)
     if not guarded:
@@ -1366,11 +1897,12 @@ def _component_auth_apply_review_only_caption_guard(records: Sequence[TextAreaCo
             continue
         if not any(_component_auth_shares_local_caption_guard(record, seed) for seed in guarded):
             continue
-        _component_auth_set_state(
+        _component_auth_add_contract_diagnostic(
             record,
-            AUTH_AMBIGUOUS_COMPONENT_OWNER,
-            reason="large_review_only_caption_group_conflicts_with_cleanup_authority",
-            ambiguity=True,
+            "large_review_only_caption_group_conflicts_with_cleanup_authority",
+            defect=True,
+            visual_review=True,
+            candidate_conflict=True,
         )
 
 
@@ -1550,6 +2082,30 @@ def _component_auth_set_state(
         record.ambiguity_reasons.append(reason)
 
 
+def _component_auth_add_contract_diagnostic(
+    record: TextAreaComponentAuthorizationRecord,
+    reason: str,
+    *,
+    warning: bool = False,
+    defect: bool = False,
+    visual_review: bool = False,
+    candidate_conflict: bool = False,
+) -> None:
+    if not reason:
+        return
+    if warning and reason not in record.authorization_warning_codes:
+        record.authorization_warning_codes.append(reason)
+    if defect and reason not in record.component_contract_defect_codes:
+        record.component_contract_defect_codes.append(reason)
+    if visual_review:
+        record.requires_visual_review = True
+        record.review_required = True
+    if candidate_conflict:
+        record.candidate_conflict_reason = reason
+        if reason not in record.ambiguity_reasons:
+            record.ambiguity_reasons.append(reason)
+
+
 def _component_auth_apply_large_decorative_review_rule(records: Sequence[TextAreaComponentAuthorizationRecord]) -> None:
     for record in records:
         if record.authorization_state in {AUTH_PROTECT_SFX_DECORATIVE, AUTH_PROTECT_ART_OR_NON_TEXT, AUTH_AMBIGUOUS_COMPONENT_OWNER}:
@@ -1566,18 +2122,20 @@ def _component_auth_apply_large_decorative_review_rule(records: Sequence[TextAre
             AUTH_CLEANUP_TRANSLATE_CAPTION,
         }:
             if _component_auth_has_decorative_evidence(record):
-                _component_auth_set_state(
+                _component_auth_add_contract_diagnostic(
                     record,
-                    AUTH_AMBIGUOUS_COMPONENT_OWNER,
-                    reason="large_decorative_component_conflicts_with_cleanup_authority",
-                    ambiguity=True,
+                    "large_decorative_component_conflicts_with_cleanup_authority",
+                    defect=True,
+                    visual_review=True,
+                    candidate_conflict=True,
                 )
             continue
         if record.authorization_state == AUTH_REVIEW_UNKNOWN_NOT_CLEANUP and _component_auth_has_decorative_evidence(record):
-            _component_auth_set_state(
+            _component_auth_add_contract_diagnostic(
                 record,
-                AUTH_PROTECT_SFX_DECORATIVE,
-                reason="large_decorative_component_without_translation_authority",
+                "large_decorative_component_without_translation_authority_candidate",
+                warning=True,
+                visual_review=True,
             )
 
 
@@ -1621,10 +2179,11 @@ def _component_auth_apply_large_decorative_review_groups(records: Sequence[TextA
         if width < 55 and height < 140:
             continue
         for item in group:
-            _component_auth_set_state(
+            _component_auth_add_contract_diagnostic(
                 item,
-                AUTH_PROTECT_SFX_DECORATIVE,
-                reason="large_decorative_component_group_without_translation_authority",
+                "large_decorative_component_group_without_translation_authority_candidate",
+                warning=True,
+                visual_review=True,
             )
 
 
@@ -1652,16 +2211,18 @@ def _component_auth_apply_unowned_display_neighbor_conflicts(records: Sequence[T
         neighbor = next((item for item in unowned if _component_auth_display_fragments_adjacent(record, item)), None)
         if neighbor is None:
             continue
-        _component_auth_set_state(
+        _component_auth_add_contract_diagnostic(
             neighbor,
-            AUTH_PROTECT_SFX_DECORATIVE,
-            reason="unowned_display_fragment_protected_near_cleanup_claim",
+            "unowned_display_fragment_protected_near_cleanup_claim_candidate",
+            warning=True,
+            visual_review=True,
         )
-        _component_auth_set_state(
+        _component_auth_add_contract_diagnostic(
             record,
-            AUTH_AMBIGUOUS_COMPONENT_OWNER,
-            reason="unowned_display_neighbor_conflicts_with_cleanup_authority",
-            ambiguity=True,
+            "unowned_display_neighbor_conflicts_with_cleanup_authority",
+            defect=True,
+            visual_review=True,
+            candidate_conflict=True,
         )
 
 
@@ -1841,6 +2402,9 @@ def build_text_area_plan(
             container = _container_from_fused(page_id, fused, image_size, luma_image=luma_image)
             if not container or container.container_id in seen:
                 continue
+            if _duplicate_semantic_text_area_container(container, plan.containers):
+                seen.add(container.container_id)
+                continue
             seen.add(container.container_id)
             plan.containers.append(container)
 
@@ -1867,6 +2431,14 @@ def build_text_area_plan(
             luma_image=luma_image,
             seen=seen,
         )
+        _append_deterministic_large_sfx_containers(
+            plan,
+            page_id,
+            image_size,
+            luma_image=luma_image,
+            seen=seen,
+        )
+        _demote_weak_background_authority_overlapping_protected(plan.containers, image_size)
 
         if not plan.containers:
             reason = TextAreaFallbackReason(
@@ -1989,14 +2561,22 @@ def assign_bbox_to_text_area_plan(
     source = detection_source or DETECTION_SCOPED
     if not bool(container.get("ocr_eligible", True)):
         source = DETECTION_BLOCKED
+    cleanup_authorization = str(container.get("cleanup_authorization") or "")
+    protection_reason = str(container.get("protection_reason") or "")
     return {
         "text_area_container_id": container.get("container_id"),
+        "text_area_semantic_unit_id": container.get("semantic_unit_id") or container.get("container_id"),
+        "text_area_semantic_kind": container.get("semantic_kind") or _semantic_kind_for_container_dict(container),
         "text_area_container_type": container.get("container_type") or CONTAINER_UNKNOWN,
         "text_area_route_intent": container.get("route_intent") or ROUTE_REVIEW_FALLBACK,
-        "text_area_cleanup_authorization": container.get("cleanup_authorization") or _cleanup_authorization_for_container(container)[0],
+        "text_area_cleanup_authorization": cleanup_authorization,
         "text_area_must_not_mutate": bool(container.get("must_not_mutate", False)),
-        "text_area_protection_reason": container.get("protection_reason") or _cleanup_authorization_for_container(container)[1],
-        "text_area_authorization_source_stage": container.get("source_stage") or "text_area_plan",
+        "text_area_protection_reason": protection_reason,
+        "text_area_authorization_source_stage": container.get("authorization_source_stage") or container.get("source_stage") or "text_area_plan",
+        "text_area_authorization_basis": container.get("authorization_basis") or "",
+        "text_area_authorization_explicit": bool(container.get("authorization_explicit", False)),
+        "text_area_authorization_field_origin": container.get("authorization_field_origin") or "",
+        "text_area_semantic_authorization_state": container.get("semantic_authorization_state") or cleanup_authorization,
         "text_area_ocr_eligible": bool(container.get("ocr_eligible", True)),
         "text_area_detection_source": source,
         "text_area_fallback_reason": container.get("fallback_reason"),
@@ -2043,6 +2623,11 @@ def build_scoped_detection_candidates(
             protection_reason=assignment.get("text_area_protection_reason") or "",
             pre_ocr_authority=bool(assignment.get("text_area_pre_ocr_authority", True)),
             source_stage=assignment.get("text_area_authorization_source_stage") or "text_area_plan",
+            authorization_source_stage=assignment.get("text_area_authorization_source_stage") or "text_area_plan",
+            authorization_basis=assignment.get("text_area_authorization_basis") or "",
+            authorization_explicit=bool(assignment.get("text_area_authorization_explicit", False)),
+            authorization_field_origin=assignment.get("text_area_authorization_field_origin") or "",
+            semantic_authorization_state=assignment.get("text_area_semantic_authorization_state") or "",
         )
         candidates.append(candidate.to_dict())
     return candidates
@@ -2079,6 +2664,11 @@ def build_scoped_ocr_candidate(
         protection_reason=assignment.get("text_area_protection_reason") or "",
         pre_ocr_authority=bool(assignment.get("text_area_pre_ocr_authority", True)),
         source_stage=assignment.get("text_area_authorization_source_stage") or "text_area_plan",
+        authorization_source_stage=assignment.get("text_area_authorization_source_stage") or "text_area_plan",
+        authorization_basis=assignment.get("text_area_authorization_basis") or "",
+        authorization_explicit=bool(assignment.get("text_area_authorization_explicit", False)),
+        authorization_field_origin=assignment.get("text_area_authorization_field_origin") or "",
+        semantic_authorization_state=assignment.get("text_area_semantic_authorization_state") or "",
     ).to_dict()
 
 
@@ -2087,6 +2677,8 @@ def apply_text_area_assignment_to_region(region: Dict[str, Any], assignment: Map
         return
     for key in (
         "text_area_container_id",
+        "text_area_semantic_unit_id",
+        "text_area_semantic_kind",
         "text_area_container_type",
         "text_area_route_intent",
         "text_area_ocr_eligible",
@@ -2103,6 +2695,10 @@ def apply_text_area_assignment_to_region(region: Dict[str, Any], assignment: Map
         "text_area_must_not_mutate",
         "text_area_protection_reason",
         "text_area_authorization_source_stage",
+        "text_area_authorization_basis",
+        "text_area_authorization_explicit",
+        "text_area_authorization_field_origin",
+        "text_area_semantic_authorization_state",
     ):
         region[key] = assignment.get(key)
     render = region.setdefault("render", {})
@@ -2295,49 +2891,758 @@ def _summary_for_container_dicts(
     }
 
 
-def _cleanup_authorization_for_container(container: Mapping[str, Any] | TextAreaContainer) -> tuple[str, str, bool]:
+def _container_value(container: Mapping[str, Any] | TextAreaContainer, key: str, default: Any = "") -> Any:
     if isinstance(container, TextAreaContainer):
-        route = str(container.route_intent or ROUTE_REVIEW_FALLBACK)
-        ctype = str(container.container_type or CONTAINER_UNKNOWN)
-        reason_values = list(container.evidence_reason_codes or []) + list(container.conflict_flags or [])
-        fallback = str(container.fallback_reason or "")
-    else:
-        route = str(container.get("route_intent") or ROUTE_REVIEW_FALLBACK)
-        ctype = str(container.get("container_type") or CONTAINER_UNKNOWN)
-        reason_values = list(container.get("evidence_reason_codes") or []) + list(container.get("conflict_flags") or [])
-        fallback = str(container.get("fallback_reason") or "")
-    marker = " ".join([route, ctype, fallback] + [str(item) for item in reason_values]).lower()
-    if any(token in marker for token in ("non_text", "non-text", "art_only", "non_translation_art")):
-        return AUTH_PROTECT_ART_OR_NON_TEXT, "explicit_art_or_non_text_authorization", True
-    if route == ROUTE_PRESERVE_SFX or ctype == CONTAINER_SFX or any(
-        token in marker for token in ("sfx", "decorative", "preserve_sfx_decorative")
-    ):
-        return AUTH_PROTECT_SFX_DECORATIVE, "explicit_sfx_decorative_authorization", True
-    if route == ROUTE_TRANSLATE_SPEECH:
-        return AUTH_CLEANUP_TRANSLATE_SPEECH, "", False
-    if route == ROUTE_TRANSLATE_CAPTION:
-        if "deterministic_vertical_side_caption_search" in marker or "vertical_side_caption_search" in marker:
-            return AUTH_REVIEW_UNKNOWN_NOT_CLEANUP, "deterministic_side_caption_requires_review", True
-        if "caption" in marker and "background" not in marker:
-            return AUTH_CLEANUP_TRANSLATE_CAPTION, "", False
-        return AUTH_CLEANUP_TRANSLATE_BACKGROUND, "", False
+        return getattr(container, key, default)
+    return container.get(key, default)
+
+
+def _container_list_value(container: Mapping[str, Any] | TextAreaContainer, key: str) -> List[str]:
+    value = _container_value(container, key, [])
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item)]
+    if value:
+        return [str(value)]
+    return []
+
+
+def _container_semantic_role_evidence(container: Mapping[str, Any] | TextAreaContainer) -> Dict[str, Any]:
+    value = _container_value(container, "semantic_role_evidence", {})
+    if isinstance(value, Mapping):
+        return dict(value)
+    return {}
+
+
+def _semantic_role_values(role_evidence: Mapping[str, Any], key: str) -> List[str]:
+    value = role_evidence.get(key)
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item)]
+    if value:
+        return [str(value)]
+    return []
+
+
+def _semantic_role_state_values(role_evidence: Mapping[str, Any], key: str) -> List[str]:
+    return [item for item in _semantic_role_values(role_evidence, key) if item in COMPONENT_AUTHORIZATION_STATES]
+
+
+def _semantic_role_has_state(role_evidence: Mapping[str, Any], key: str, state: str) -> bool:
+    return state in set(_semantic_role_state_values(role_evidence, key))
+
+
+def _semantic_role_evidence_with_state(
+    role_evidence: Mapping[str, Any],
+    key: str,
+    state: str,
+    *,
+    evidence_kind: str,
+) -> Dict[str, Any]:
+    evidence = dict(role_evidence or {})
+    states = set(_semantic_role_state_values(evidence, key))
+    states.add(state)
+    evidence[key] = sorted(states)
+    evidence.setdefault("authority_evidence_kind", evidence_kind)
+    typed_reasons = set(_semantic_role_values(evidence, "typed_authority_reason_codes"))
+    typed_reasons.add(evidence_kind)
+    evidence["typed_authority_reason_codes"] = sorted(typed_reasons)
+    return evidence
+
+
+def _container_marker_text(
+    container: Mapping[str, Any] | TextAreaContainer,
+    *,
+    route: str,
+    ctype: str,
+    reasons: Sequence[str],
+    conflicts: Sequence[str],
+    role_evidence: Mapping[str, Any],
+) -> str:
+    pieces = [
+        route,
+        ctype,
+        str(_container_value(container, "fallback_reason", "") or ""),
+        str(_container_value(container, "confidence_tier", "") or _container_value(container, "text_area_confidence_tier", "") or ""),
+        " ".join(reasons),
+        " ".join(conflicts),
+        " ".join(_semantic_role_values(role_evidence, "role_signals")),
+        " ".join(_semantic_role_values(role_evidence, "ogkalu_class_names")),
+        " ".join(_semantic_role_values(role_evidence, "current_region_roles")),
+        " ".join(_semantic_role_values(role_evidence, "conflict_evidence")),
+    ]
+    return " ".join(str(item) for item in pieces if str(item)).lower()
+
+
+def _has_art_or_non_text_authority(marker: str, role_evidence: Mapping[str, Any]) -> bool:
+    del marker
+    return _semantic_role_has_state(role_evidence, "protected_authority_states", AUTH_PROTECT_ART_OR_NON_TEXT)
+
+
+def _has_recognized_art_or_non_text_evidence(role_evidence: Mapping[str, Any]) -> bool:
+    """Typed upstream art/non-text evidence, excluding marker/geometry inference."""
+
+    protected_candidates = set(_semantic_role_state_values(role_evidence, "protected_candidate_states"))
+    protected_authority = set(_semantic_role_state_values(role_evidence, "protected_authority_states"))
+    if AUTH_PROTECT_ART_OR_NON_TEXT in protected_authority:
+        return True
+    if AUTH_PROTECT_ART_OR_NON_TEXT not in protected_candidates:
+        return False
+    role_signals = set(_semantic_role_values(role_evidence, "role_signals"))
+    model_classes = set(_semantic_role_values(role_evidence, "ogkalu_class_names"))
+    current_roles = set(_semantic_role_values(role_evidence, "current_region_roles"))
+    typed_reasons = set(_semantic_role_values(role_evidence, "typed_authority_reason_codes"))
+    source = str(role_evidence.get("source") or "")
+    evidence_kind = str(role_evidence.get("authority_evidence_kind") or "")
+    recognized_signal = bool(role_signals & {"art_non_text_candidate"})
+    recognized_class = any(
+        token in model_class
+        for model_class in model_classes
+        for token in ("art", "non_text", "non-text")
+    )
+    recognized_current_role = "art_or_non_text_preserve" in current_roles
+    typed_source = bool(source or evidence_kind or typed_reasons)
+    return typed_source and bool(recognized_signal or recognized_class or recognized_current_role)
+
+
+def _has_sfx_or_decorative_authority(route: str, ctype: str, marker: str, role_evidence: Mapping[str, Any]) -> bool:
+    del route, ctype, marker
+    return _semantic_role_has_state(role_evidence, "protected_authority_states", AUTH_PROTECT_SFX_DECORATIVE)
+
+
+def _has_recognized_sfx_or_decorative_evidence(role_evidence: Mapping[str, Any]) -> bool:
+    """Typed upstream SFX/decorative evidence, excluding marker/geometry inference."""
+
+    protected_candidates = set(_semantic_role_state_values(role_evidence, "protected_candidate_states"))
+    protected_authority = set(_semantic_role_state_values(role_evidence, "protected_authority_states"))
+    if AUTH_PROTECT_SFX_DECORATIVE in protected_authority:
+        return True
+    if AUTH_PROTECT_SFX_DECORATIVE not in protected_candidates:
+        return False
+    role_signals = set(_semantic_role_values(role_evidence, "role_signals"))
+    model_classes = set(_semantic_role_values(role_evidence, "ogkalu_class_names"))
+    current_roles = set(_semantic_role_values(role_evidence, "current_region_roles"))
+    typed_reasons = set(_semantic_role_values(role_evidence, "typed_authority_reason_codes"))
+    source = str(role_evidence.get("source") or "")
+    evidence_kind = str(role_evidence.get("authority_evidence_kind") or "")
+    recognized_signal = bool(
+        role_signals
+        & {
+            "sfx_candidate",
+            "sfx_decorative_candidate",
+            "decorative_candidate",
+            "art_non_text_candidate",
+        }
+    )
+    recognized_class = any(
+        token in model_class
+        for model_class in model_classes
+        for token in ("sfx", "decorative", "art", "non_text", "non-text")
+    )
+    recognized_current_role = any(
+        role in {"sfx_decorative_preserve", "art_or_non_text_preserve"}
+        for role in current_roles
+    )
+    typed_source = bool(source or evidence_kind or typed_reasons)
+    return typed_source and bool(recognized_signal or recognized_class or recognized_current_role)
+
+
+def _has_speech_authority(route: str, ctype: str, marker: str, role_evidence: Mapping[str, Any]) -> bool:
+    del route, ctype, marker
+    return _semantic_role_has_state(role_evidence, "cleanup_authority_states", AUTH_CLEANUP_TRANSLATE_SPEECH)
+
+
+def _caption_background_authority_reason(marker: str, role_evidence: Mapping[str, Any]) -> str:
+    del marker
+    cleanup_states = set(_semantic_role_state_values(role_evidence, "cleanup_authority_states"))
+    if AUTH_CLEANUP_TRANSLATE_CAPTION in cleanup_states:
+        return "typed_caption_authority"
+    if AUTH_CLEANUP_TRANSLATE_BACKGROUND in cleanup_states:
+        return "typed_background_authority"
+    current_roles = set(_semantic_role_values(role_evidence, "current_region_roles"))
+    if "caption_background" in current_roles:
+        return "current_region_caption_background_authority"
+    return ""
+
+
+def _caption_background_review_reason(marker: str, role_evidence: Mapping[str, Any]) -> str:
+    if "deterministic_top_band_far_right_caption_search" in marker:
+        return "deterministic_far_right_caption_requires_review"
+    if "deterministic_top_band" in marker or "top_caption_background_candidate" in marker:
+        return "top_band_caption_candidate_requires_upstream_confirmation"
+    if "vertical_side_caption_localized_ink" in marker:
+        return "deterministic_side_caption_localized_ink_requires_review"
+    if "vertical_side_caption_search" in marker or "side_narration_candidate" in marker:
+        return "side_narration_candidate_requires_upstream_confirmation"
+    if (
+        "text_free_review_only" in marker
+        or "ogkalu_text_free_without_kitsumed_mask" in marker
+        or "caption_background_model_candidate_review" in marker
+        ):
+            return "text_free_review_only_requires_upstream_confirmation"
+    roles = set(_semantic_role_values(role_evidence, "role_signals"))
+    if "caption_background_candidate" in roles:
+        return "caption_background_candidate_requires_upstream_confirmation"
+    if "side_narration_candidate" in roles:
+        return "side_narration_candidate_requires_upstream_confirmation"
+    return ""
+
+
+def _cleanup_authority_is_weak_background_when_protected(role_evidence: Mapping[str, Any]) -> bool:
+    """Protected evidence wins when cleanup evidence is deterministic/background-only."""
+
+    cleanup_states = set(_semantic_role_state_values(role_evidence, "cleanup_authority_states"))
+    if not cleanup_states or AUTH_CLEANUP_TRANSLATE_SPEECH in cleanup_states:
+        return False
+    if not cleanup_states.issubset({AUTH_CLEANUP_TRANSLATE_BACKGROUND, AUTH_CLEANUP_TRANSLATE_CAPTION}):
+        return False
+    typed_reasons = {str(item) for item in _semantic_role_values(role_evidence, "typed_authority_reason_codes")}
+    current_roles = set(_semantic_role_values(role_evidence, "current_region_roles"))
+    if current_roles & {"speech", "caption_background", "cleanup_translate_background", "cleanup_translate_caption"}:
+        return False
+    strong_cleanup_tokens = (
+        "typed_speech",
+        "typed_current_region",
+        "typed_bright_ogkalu_bubble_speech_authority",
+    )
+    if any(any(token in reason for token in strong_cleanup_tokens) for reason in typed_reasons):
+        return False
+    weak_background_tokens = (
+        "typed_deterministic_side_narration_background_authority",
+        "typed_deterministic_top_band_background_authority",
+        "typed_text_free_background_model_authority",
+    )
+    return any(any(token in reason for token in weak_background_tokens) for reason in typed_reasons)
+
+
+def _adjudicate_text_area_semantic_authorization(
+    container: Mapping[str, Any] | TextAreaContainer,
+    evidence_context: Mapping[str, Any] | None = None,
+) -> TextAreaSemanticAdjudication:
+    del evidence_context
+    route = str(_container_value(container, "route_intent", ROUTE_REVIEW_FALLBACK) or ROUTE_REVIEW_FALLBACK)
+    ctype = str(_container_value(container, "container_type", CONTAINER_UNKNOWN) or CONTAINER_UNKNOWN)
+    reasons = _container_list_value(container, "evidence_reason_codes")
+    conflicts = _container_list_value(container, "conflict_flags")
+    role_evidence = _container_semantic_role_evidence(container)
+    marker = _container_marker_text(
+        container,
+        route=route,
+        ctype=ctype,
+        reasons=reasons,
+        conflicts=conflicts,
+        role_evidence=role_evidence,
+    )
+    adjudication_reason_codes: List[str] = ["text_area_plan:semantic_adjudicator_v1"]
+    cleanup_authority_states = set(_semantic_role_state_values(role_evidence, "cleanup_authority_states"))
+    protected_authority_states = set(_semantic_role_state_values(role_evidence, "protected_authority_states"))
+    recognized_art_or_non_text = _has_recognized_art_or_non_text_evidence(role_evidence)
+    recognized_sfx_decorative = _has_recognized_sfx_or_decorative_evidence(role_evidence)
+    protected_dominates_weak_cleanup = (
+        bool(cleanup_authority_states)
+        and bool(protected_authority_states or recognized_sfx_decorative or recognized_art_or_non_text)
+        and _cleanup_authority_is_weak_background_when_protected(role_evidence)
+    )
+
+    if cleanup_authority_states and (protected_authority_states or recognized_sfx_decorative or recognized_art_or_non_text) and not protected_dominates_weak_cleanup:
+        adjudication_reason_codes.append("text_area_plan:typed_cleanup_protected_conflict")
+        return TextAreaSemanticAdjudication(
+            cleanup_authorization=AUTH_AMBIGUOUS_COMPONENT_OWNER,
+            semantic_authorization_state=AUTH_AMBIGUOUS_COMPONENT_OWNER,
+            semantic_kind=SEMANTIC_KIND_UNKNOWN,
+            must_not_mutate=True,
+            protection_reason="typed_cleanup_protected_conflict",
+            authorization_explicit=True,
+            reason_codes=adjudication_reason_codes,
+        )
+
+    if recognized_art_or_non_text:
+        adjudication_reason_codes.append("text_area_plan:recognized_art_non_text_typed_evidence")
+        return TextAreaSemanticAdjudication(
+            cleanup_authorization=AUTH_PROTECT_ART_OR_NON_TEXT,
+            semantic_authorization_state=AUTH_PROTECT_ART_OR_NON_TEXT,
+            semantic_kind=SEMANTIC_KIND_ART_OR_NON_TEXT,
+            must_not_mutate=True,
+            protection_reason="recognized_art_non_text_typed_evidence",
+            authorization_explicit=True,
+            reason_codes=adjudication_reason_codes,
+        )
+
+    if _has_art_or_non_text_authority(marker, role_evidence):
+        adjudication_reason_codes.append("text_area_plan:semantic_art_or_non_text_authority")
+        return TextAreaSemanticAdjudication(
+            cleanup_authorization=AUTH_PROTECT_ART_OR_NON_TEXT,
+            semantic_authorization_state=AUTH_PROTECT_ART_OR_NON_TEXT,
+            semantic_kind=SEMANTIC_KIND_ART_OR_NON_TEXT,
+            must_not_mutate=True,
+            protection_reason="explicit_art_or_non_text_authorization",
+            authorization_explicit=True,
+            reason_codes=adjudication_reason_codes,
+        )
+
+    if _has_sfx_or_decorative_authority(route, ctype, marker, role_evidence):
+        adjudication_reason_codes.append("text_area_plan:semantic_sfx_decorative_authority")
+        kind = "decorative" if "decorative" in marker else "sfx"
+        return TextAreaSemanticAdjudication(
+            cleanup_authorization=AUTH_PROTECT_SFX_DECORATIVE,
+            semantic_authorization_state=AUTH_PROTECT_SFX_DECORATIVE,
+            semantic_kind=kind,
+            must_not_mutate=True,
+            protection_reason="explicit_sfx_decorative_authorization",
+            authorization_explicit=True,
+            reason_codes=adjudication_reason_codes,
+        )
+
+    if recognized_sfx_decorative:
+        adjudication_reason_codes.append("text_area_plan:recognized_sfx_decorative_typed_evidence")
+        kind = SEMANTIC_KIND_DECORATIVE if "decorative" in marker else SEMANTIC_KIND_SFX
+        return TextAreaSemanticAdjudication(
+            cleanup_authorization=AUTH_PROTECT_SFX_DECORATIVE,
+            semantic_authorization_state=AUTH_PROTECT_SFX_DECORATIVE,
+            semantic_kind=kind,
+            must_not_mutate=True,
+            protection_reason="recognized_sfx_decorative_typed_evidence",
+            authorization_explicit=True,
+            reason_codes=adjudication_reason_codes,
+        )
+
+    if _has_speech_authority(route, ctype, marker, role_evidence):
+        adjudication_reason_codes.append("text_area_plan:semantic_speech_authority")
+        return TextAreaSemanticAdjudication(
+            cleanup_authorization=AUTH_CLEANUP_TRANSLATE_SPEECH,
+            semantic_authorization_state=AUTH_CLEANUP_TRANSLATE_SPEECH,
+            semantic_kind=SEMANTIC_KIND_SPEECH,
+            must_not_mutate=False,
+            authorization_explicit=True,
+            reason_codes=adjudication_reason_codes,
+        )
+
+    if route == ROUTE_TRANSLATE_CAPTION or ctype == CONTAINER_CAPTION:
+        review_reason = _caption_background_review_reason(marker, role_evidence)
+        authority_reason = _caption_background_authority_reason(marker, role_evidence)
+        if review_reason and not authority_reason:
+            adjudication_reason_codes.append(f"text_area_plan:{review_reason}")
+            return TextAreaSemanticAdjudication(
+                cleanup_authorization=AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+                semantic_authorization_state=AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+                semantic_kind="background_narration" if ctype == CONTAINER_CAPTION else "unknown",
+                must_not_mutate=True,
+                protection_reason=review_reason,
+                authorization_explicit=False,
+                reason_codes=adjudication_reason_codes,
+            )
+        if authority_reason:
+            adjudication_reason_codes.append(f"text_area_plan:{authority_reason}")
+            cleanup_states = set(_semantic_role_state_values(role_evidence, "cleanup_authority_states"))
+            if AUTH_CLEANUP_TRANSLATE_CAPTION in cleanup_states and AUTH_CLEANUP_TRANSLATE_BACKGROUND not in cleanup_states:
+                auth = AUTH_CLEANUP_TRANSLATE_CAPTION
+                kind = SEMANTIC_KIND_CAPTION
+            else:
+                auth = AUTH_CLEANUP_TRANSLATE_BACKGROUND
+                kind = SEMANTIC_KIND_BACKGROUND_NARRATION
+            return TextAreaSemanticAdjudication(
+                cleanup_authorization=auth,
+                semantic_authorization_state=auth,
+                semantic_kind=kind,
+                must_not_mutate=False,
+                authorization_explicit=True,
+                reason_codes=adjudication_reason_codes,
+            )
+        adjudication_reason_codes.append("text_area_plan:caption_background_requires_explicit_authority")
+        return TextAreaSemanticAdjudication(
+            cleanup_authorization=AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+            semantic_authorization_state=AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+            semantic_kind="background_narration" if ctype == CONTAINER_CAPTION else "unknown",
+            must_not_mutate=True,
+            protection_reason="caption_background_requires_explicit_authority",
+            authorization_explicit=False,
+            reason_codes=adjudication_reason_codes,
+        )
+
     if route == ROUTE_REVIEW_FALLBACK or ctype == CONTAINER_UNKNOWN:
-        return AUTH_REVIEW_UNKNOWN_NOT_CLEANUP, "review_unknown_not_cleanup", True
-    return AUTH_OUTSIDE_CLEANUP_SCOPE, "outside_cleanup_scope", True
+        adjudication_reason_codes.append("text_area_plan:review_unknown_not_cleanup")
+        return TextAreaSemanticAdjudication(
+            cleanup_authorization=AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+            semantic_authorization_state=AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+            semantic_kind="unknown",
+            must_not_mutate=True,
+            protection_reason="review_unknown_not_cleanup",
+            authorization_explicit=False,
+            reason_codes=adjudication_reason_codes,
+        )
+
+    adjudication_reason_codes.append("text_area_plan:outside_cleanup_scope")
+    return TextAreaSemanticAdjudication(
+        cleanup_authorization=AUTH_OUTSIDE_CLEANUP_SCOPE,
+        semantic_authorization_state=AUTH_OUTSIDE_CLEANUP_SCOPE,
+        semantic_kind="unknown",
+        must_not_mutate=True,
+        protection_reason="outside_cleanup_scope",
+        authorization_explicit=False,
+        reason_codes=adjudication_reason_codes,
+    )
+
+
+def _cleanup_authorization_for_container(container: Mapping[str, Any] | TextAreaContainer) -> tuple[str, str, bool]:
+    adjudication = _adjudicate_text_area_semantic_authorization(container)
+    return adjudication.cleanup_authorization, adjudication.protection_reason, adjudication.must_not_mutate
 
 
 def _apply_cleanup_authorization(container: TextAreaContainer) -> None:
-    auth, reason, must_not_mutate = _cleanup_authorization_for_container(container)
-    container.cleanup_authorization = auth
-    container.must_not_mutate = must_not_mutate
-    container.protection_reason = reason
+    adjudication = _adjudicate_text_area_semantic_authorization(container)
+    container.cleanup_authorization = adjudication.cleanup_authorization
+    container.must_not_mutate = adjudication.must_not_mutate
+    container.protection_reason = adjudication.protection_reason
+    container.semantic_kind = adjudication.semantic_kind
     container.pre_ocr_authority = bool(container.text_area_pre_ocr_authority)
     container.source_stage = "text_area_plan_pre_ocr" if container.text_area_pre_ocr_authority else "text_area_plan_region_enriched"
+    container.authorization_source_stage = container.source_stage
+    for reason_code in adjudication.reason_codes:
+        if reason_code and reason_code not in container.evidence_reason_codes:
+            container.evidence_reason_codes.append(reason_code)
+    container.authorization_basis = _authorization_basis_for_container(
+        container,
+        adjudication.cleanup_authorization,
+        adjudication.protection_reason,
+    )
+    container.authorization_explicit = bool(adjudication.authorization_explicit)
+    container.authorization_field_origin = adjudication.authorization_field_origin
+    container.semantic_authorization_state = adjudication.semantic_authorization_state
     container.parent_source_evidence = {
         "source_model_ids": list(container.source_model_ids or []),
         "evidence_reason_codes": list(container.evidence_reason_codes or []),
         "conflict_flags": list(container.conflict_flags or []),
+        "semantic_role_evidence": dict(container.semantic_role_evidence or {}),
     }
+
+
+def _authorization_is_explicit(auth: str) -> bool:
+    return auth in {
+        AUTH_CLEANUP_TRANSLATE_SPEECH,
+        AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+        AUTH_CLEANUP_TRANSLATE_CAPTION,
+        AUTH_PROTECT_SFX_DECORATIVE,
+        AUTH_PROTECT_ART_OR_NON_TEXT,
+    }
+
+
+def _authorization_basis_for_container(container: TextAreaContainer, auth: str, reason: str) -> str:
+    basis = [
+        f"auth={auth or AUTH_REVIEW_UNKNOWN_NOT_CLEANUP}",
+        f"route_intent={container.route_intent or ROUTE_REVIEW_FALLBACK}",
+        f"container_type={container.container_type or CONTAINER_UNKNOWN}",
+    ]
+    if reason:
+        basis.append(f"reason={reason}")
+    if container.evidence_reason_codes:
+        basis.append("evidence_reason_codes=" + ",".join(str(item) for item in container.evidence_reason_codes if str(item)))
+    if container.conflict_flags:
+        basis.append("conflict_flags=" + ",".join(str(item) for item in container.conflict_flags if str(item)))
+    if container.semantic_role_evidence:
+        role_values = []
+        for key in ("role_signals", "ogkalu_class_names", "current_region_roles"):
+            role_values.extend(_semantic_role_values(container.semantic_role_evidence, key))
+        if role_values:
+            basis.append("semantic_role_evidence=" + ",".join(str(item) for item in role_values if str(item)))
+    return ";".join(item for item in basis if item)
+
+
+def _copy_container_authorization_to_scope(scope: TextAreaScope, container: TextAreaContainer) -> None:
+    scope.cleanup_authorization = container.cleanup_authorization
+    scope.must_not_mutate = container.must_not_mutate
+    scope.protection_reason = container.protection_reason
+    scope.pre_ocr_authority = container.pre_ocr_authority
+    scope.source_stage = container.source_stage
+    scope.authorization_source_stage = container.authorization_source_stage
+    scope.authorization_basis = container.authorization_basis
+    scope.authorization_explicit = container.authorization_explicit
+    scope.authorization_field_origin = container.authorization_field_origin
+    scope.semantic_authorization_state = container.semantic_authorization_state
+
+
+def _semantic_kind_for_container(container: TextAreaContainer) -> str:
+    if str(container.semantic_kind or ""):
+        return str(container.semantic_kind)
+    auth = str(container.cleanup_authorization or container.semantic_authorization_state or "")
+    ctype = str(container.container_type or CONTAINER_UNKNOWN)
+    marker = " ".join(
+        [
+            str(container.route_intent or ""),
+            ctype,
+            str(container.confidence_tier or ""),
+            str(container.fallback_reason or ""),
+            " ".join(str(item) for item in container.evidence_reason_codes or []),
+            " ".join(str(item) for item in container.conflict_flags or []),
+        ]
+    ).lower()
+    if auth == AUTH_CLEANUP_TRANSLATE_SPEECH or ctype == CONTAINER_SPEECH:
+        return "speech"
+    if auth == AUTH_CLEANUP_TRANSLATE_CAPTION:
+        return "caption"
+    if auth == AUTH_CLEANUP_TRANSLATE_BACKGROUND or ctype == CONTAINER_CAPTION:
+        return "background_narration"
+    if auth == AUTH_PROTECT_ART_OR_NON_TEXT:
+        return "art_or_non_text"
+    if auth == AUTH_PROTECT_SFX_DECORATIVE or ctype == CONTAINER_SFX:
+        if "art" in marker or "non_text" in marker or "non-text" in marker:
+            return "art_or_non_text"
+        if "decorative" in marker:
+            return "decorative"
+        return "sfx"
+    return "unknown"
+
+
+def _semantic_kind_for_container_dict(container: Mapping[str, Any]) -> str:
+    if str(container.get("semantic_kind") or ""):
+        return str(container.get("semantic_kind"))
+    auth = str(container.get("cleanup_authorization") or container.get("semantic_authorization_state") or "")
+    ctype = str(container.get("container_type") or CONTAINER_UNKNOWN)
+    route = str(container.get("route_intent") or "")
+    marker = " ".join(
+        [
+            route,
+            ctype,
+            str(container.get("confidence_tier") or ""),
+            str(container.get("fallback_reason") or ""),
+            " ".join(str(item) for item in container.get("evidence_reason_codes") or []),
+            " ".join(str(item) for item in container.get("conflict_flags") or []),
+        ]
+    ).lower()
+    if auth == AUTH_CLEANUP_TRANSLATE_SPEECH or ctype == CONTAINER_SPEECH:
+        return "speech"
+    if auth == AUTH_CLEANUP_TRANSLATE_CAPTION:
+        return "caption"
+    if auth == AUTH_CLEANUP_TRANSLATE_BACKGROUND or ctype == CONTAINER_CAPTION:
+        return "background_narration"
+    if auth == AUTH_PROTECT_ART_OR_NON_TEXT:
+        return "art_or_non_text"
+    if auth == AUTH_PROTECT_SFX_DECORATIVE or ctype == CONTAINER_SFX:
+        if "art" in marker or "non_text" in marker or "non-text" in marker:
+            return "art_or_non_text"
+        if "decorative" in marker:
+            return "decorative"
+        return "sfx"
+    return "unknown"
+
+
+def _semantic_unit_bbox_from_evidence(entry: Mapping[str, Any]) -> List[int]:
+    values = entry.get("bbox")
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)) or len(values) < 4:
+        return []
+    try:
+        x0 = float(values[0])
+        y0 = float(values[1])
+        x1 = float(values[2])
+        y1 = float(values[3])
+    except Exception:
+        return []
+    if x1 <= x0 or y1 <= y0:
+        return []
+    return [
+        max(0, int(round(x0))),
+        max(0, int(round(y0))),
+        max(1, int(round(x1 - x0))),
+        max(1, int(round(y1 - y0))),
+    ]
+
+
+def _semantic_unit_projection_bbox_for_container(
+    container: TextAreaContainer,
+    entry: Mapping[str, Any],
+    bbox: Sequence[int],
+) -> List[int]:
+    x, y, w, h = _coerce_xywh(bbox)
+    if w <= 0 or h <= 0:
+        return []
+    class_name = str(entry.get("class_name") or "")
+    auth = str(container.cleanup_authorization or container.semantic_authorization_state or "")
+    if auth == AUTH_CLEANUP_TRANSLATE_SPEECH and class_name == "text_bubble" and w >= 24 and h >= 24:
+        pad_x = min(90, max(0, int(round(w * 0.38))))
+        pad_y = min(40, max(0, int(round(h * 0.18))))
+    elif auth in {AUTH_CLEANUP_TRANSLATE_BACKGROUND, AUTH_CLEANUP_TRANSLATE_CAPTION} and class_name == "text_free" and w >= 24 and h >= 24:
+        pad_x = min(32, max(0, int(round(w * 0.12))))
+        pad_y = min(32, max(0, int(round(h * 0.12))))
+    else:
+        pad_x = 0
+        pad_y = 0
+    if pad_x <= 0 and pad_y <= 0:
+        return [x, y, w, h]
+    cx, cy, cw, ch = _coerce_xywh(container.bbox)
+    nx0 = x - pad_x
+    ny0 = y - pad_y
+    nx1 = x + w + pad_x
+    ny1 = y + h + pad_y
+    if cw > 0 and ch > 0:
+        nx0 = max(cx, nx0)
+        ny0 = max(cy, ny0)
+        nx1 = min(cx + cw, nx1)
+        ny1 = min(cy + ch, ny1)
+    if nx1 <= nx0 or ny1 <= ny0:
+        return [x, y, w, h]
+    return [int(nx0), int(ny0), int(nx1 - nx0), int(ny1 - ny0)]
+
+
+def _semantic_unit_evidence_bboxes_for_container(container: TextAreaContainer) -> List[Dict[str, Any]]:
+    role_evidence = dict(container.semantic_role_evidence or {})
+    entries = role_evidence.get("text_unit_evidence_bboxes") or []
+    if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+        return []
+    auth = str(container.cleanup_authorization or container.semantic_authorization_state or "")
+    if auth == AUTH_CLEANUP_TRANSLATE_SPEECH:
+        preferred_classes = {"text_bubble"}
+    elif auth in {AUTH_CLEANUP_TRANSLATE_BACKGROUND, AUTH_CLEANUP_TRANSLATE_CAPTION}:
+        preferred_classes = {"text_free", "text_bubble"}
+    elif auth == AUTH_PROTECT_SFX_DECORATIVE:
+        preferred_classes = {"sfx", "decorative", "sfx_or_decorative", "sfx_or_decorative_candidate", "text_free", "text_bubble"}
+    elif auth == AUTH_PROTECT_ART_OR_NON_TEXT:
+        preferred_classes = {"art", "non_text", "non-text", "text_free"}
+    else:
+        preferred_classes = set()
+    if not preferred_classes:
+        return []
+    bboxes: List[Dict[str, Any]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        class_name = str(entry.get("class_name") or "")
+        if class_name not in preferred_classes:
+            continue
+        bbox = _semantic_unit_bbox_from_evidence(entry)
+        if not bbox:
+            continue
+        bbox = _semantic_unit_projection_bbox_for_container(container, entry, bbox)
+        if not bbox:
+            continue
+        key = tuple(bbox)
+        if key in seen:
+            continue
+        seen.add(key)
+        bboxes.append(
+            {
+                "bbox": bbox,
+                "evidence_id": str(entry.get("evidence_id") or ""),
+                "class_name": class_name,
+            }
+        )
+    return bboxes
+
+
+def _semantic_unit_from_container(
+    container: TextAreaContainer,
+    *,
+    semantic_unit_id: str | None = None,
+    bbox: Sequence[int] | None = None,
+    polygon: Sequence[Sequence[float]] | None = None,
+    source_evidence_ids: Sequence[str] | None = None,
+    extra_reason_codes: Sequence[str] | None = None,
+) -> TextAreaSemanticAuthorizationRecord:
+    semantic_unit_id = str(semantic_unit_id or container.container_id or "")
+    auth = str(container.cleanup_authorization or container.semantic_authorization_state or AUTH_REVIEW_UNKNOWN_NOT_CLEANUP)
+    source_ids = [str(item) for item in (source_evidence_ids if source_evidence_ids is not None else container.source_model_ids or []) if str(item)]
+    reason_codes = [str(item) for item in container.evidence_reason_codes or [] if str(item)]
+    for reason in extra_reason_codes or []:
+        if str(reason) and str(reason) not in reason_codes:
+            reason_codes.append(str(reason))
+    role_evidence = dict(container.semantic_role_evidence or {})
+    evidence_sources = []
+    for key in ("source", "authority_evidence_kind"):
+        value = str(role_evidence.get(key) or "")
+        if value and value not in evidence_sources:
+            evidence_sources.append(value)
+    return TextAreaSemanticAuthorizationRecord(
+        semantic_unit_id=semantic_unit_id,
+        page_id=str(container.page_id or ""),
+        bbox=list(bbox or container.bbox or []),
+        polygon=[list(point) for point in polygon or []],
+        semantic_kind=_semantic_kind_for_container(container),
+        cleanup_authorization=auth,
+        authorization_source_stage=str(container.authorization_source_stage or container.source_stage or "text_area_plan"),
+        authorization_basis=str(container.authorization_basis or ""),
+        authorization_explicit=bool(container.authorization_explicit),
+        authorization_field_origin=str(container.authorization_field_origin or ""),
+        source_evidence_ids=source_ids,
+        source_model_ids=source_ids,
+        evidence_source_list=evidence_sources,
+        confidence_tier=str(container.confidence_tier or "low"),
+        reason_codes=reason_codes,
+        evidence_reason_codes=reason_codes,
+        conflict_flags=[str(item) for item in container.conflict_flags or [] if str(item)],
+        semantic_role_evidence=role_evidence,
+        must_not_mutate=bool(container.must_not_mutate),
+        review_required=bool(container.human_review_required or _component_auth_family(auth) in {"review", "outside", "ambiguous"}),
+        ocr_eligible=bool(container.ocr_eligible),
+        comic_text_detector_scope_eligible=bool(container.comic_text_detector_scope_eligible),
+        semantic_authorization_state=str(container.semantic_authorization_state or auth),
+        container_id=str(container.container_id or ""),
+        route_intent=str(container.route_intent or ROUTE_REVIEW_FALLBACK),
+        container_type=str(container.container_type or CONTAINER_UNKNOWN),
+        protection_reason=str(container.protection_reason or ""),
+    )
+
+
+def _semantic_unit_mask_polygons_for_container(container: TextAreaContainer) -> List[Dict[str, Any]]:
+    auth = str(container.cleanup_authorization or container.semantic_authorization_state or "")
+    if auth != AUTH_CLEANUP_TRANSLATE_SPEECH:
+        return []
+    role_evidence = dict(container.semantic_role_evidence or {})
+    entries = role_evidence.get("speech_mask_polygons") or []
+    if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+        return []
+    units: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        polygon = entry.get("polygon") or []
+        if not isinstance(polygon, Sequence) or isinstance(polygon, (str, bytes)) or len(polygon) < 3:
+            continue
+        evidence_id = str(entry.get("evidence_id") or "")
+        key = evidence_id or repr(polygon)
+        if key in seen:
+            continue
+        seen.add(key)
+        bbox = _semantic_unit_bbox_from_evidence(entry) or list(container.bbox or [])
+        units.append({"evidence_id": evidence_id, "bbox": bbox, "polygon": polygon})
+    return units
+
+
+def _semantic_units_from_container(container: TextAreaContainer) -> List[TextAreaSemanticAuthorizationRecord]:
+    mask_polygons = _semantic_unit_mask_polygons_for_container(container)
+    if mask_polygons:
+        units: List[TextAreaSemanticAuthorizationRecord] = []
+        for index, entry in enumerate(mask_polygons):
+            evidence_id = str(entry.get("evidence_id") or "")
+            suffix = evidence_id or f"mask_{index:02d}"
+            unit_id = f"{container.container_id}__{suffix}" if container.container_id else suffix
+            units.append(
+                _semantic_unit_from_container(
+                    container,
+                    semantic_unit_id=unit_id,
+                    bbox=entry.get("bbox") or container.bbox,
+                    polygon=entry.get("polygon") or [],
+                    source_evidence_ids=[evidence_id] if evidence_id else container.source_model_ids,
+                    extra_reason_codes=["text_area_plan:speech_mask_polygon_semantic_unit"],
+                )
+            )
+        return units
+    evidence_bboxes = _semantic_unit_evidence_bboxes_for_container(container)
+    if not evidence_bboxes:
+        return [_semantic_unit_from_container(container)]
+    units: List[TextAreaSemanticAuthorizationRecord] = []
+    for index, entry in enumerate(evidence_bboxes):
+        evidence_id = str(entry.get("evidence_id") or "")
+        suffix = evidence_id or f"text_{index:02d}"
+        unit_id = f"{container.container_id}__{suffix}" if container.container_id else suffix
+        reason = f"text_area_plan:text_evidence_semantic_unit_bbox:{entry.get('class_name') or 'unknown'}"
+        units.append(
+            _semantic_unit_from_container(
+                container,
+                semantic_unit_id=unit_id,
+                bbox=entry.get("bbox") or container.bbox,
+                source_evidence_ids=[evidence_id] if evidence_id else container.source_model_ids,
+                extra_reason_codes=[reason],
+            )
+        )
+    return units
 
 
 def _finish_plan(plan: TextAreaPlan, started: float) -> TextAreaPlan:
@@ -2351,6 +3656,16 @@ def _finish_plan(plan: TextAreaPlan, started: float) -> TextAreaPlan:
     review_only_blocked = 0
     for container in plan.containers:
         _apply_cleanup_authorization(container)
+    semantic_units: List[TextAreaSemanticAuthorizationRecord] = []
+    for container in plan.containers:
+        semantic_units.extend(_semantic_units_from_container(container))
+    plan.semantic_units = semantic_units
+    containers_by_id = {str(container.container_id or ""): container for container in plan.containers if str(container.container_id or "")}
+    for scope in plan.scopes:
+        container = containers_by_id.get(str(scope.container_id or ""))
+        if container:
+            _copy_container_authorization_to_scope(scope, container)
+    for container in plan.containers:
         by_type[container.container_type] = by_type.get(container.container_type, 0) + 1
         by_intent[container.route_intent] = by_intent.get(container.route_intent, 0) + 1
         if container.ocr_eligible:
@@ -2394,12 +3709,20 @@ def _container_from_fused(
     bbox = _bbox_xyxy_to_xywh(fused.get("mask_bbox") or fused.get("bbox"), image_size)
     source_ids = list(fused.get("linked_kitsumed_mask_ids") or []) + list(fused.get("linked_ogkalu_detection_ids") or [])
     confidence_tier = _confidence_tier_from_fused(fused)
+    semantic_role_evidence = _semantic_role_evidence_from_fused(fused)
     visual = _container_visual_stats(luma_image, bbox, image_size)
     clipped = _is_clipped_or_degenerate_bbox(bbox, image_size)
 
     if conflicts:
         ctype = CONTAINER_SFX if _has_preserve_conflict(conflicts, reasons) else CONTAINER_UNKNOWN
         route = ROUTE_PRESERVE_SFX if ctype == CONTAINER_SFX else ROUTE_REVIEW_FALLBACK
+        if ctype == CONTAINER_SFX:
+            semantic_role_evidence = _semantic_role_evidence_with_state(
+                semantic_role_evidence,
+                "protected_authority_states",
+                AUTH_PROTECT_SFX_DECORATIVE,
+                evidence_kind="typed_current_conflict_sfx_decorative_authority",
+            )
         return TextAreaContainer(
             container_id=container_id,
             page_id=page_id,
@@ -2407,6 +3730,7 @@ def _container_from_fused(
             bbox=bbox,
             mask_summary={"mask_bbox": _safe_list(fused.get("mask_bbox"))},
             source_model_ids=source_ids,
+            semantic_role_evidence=semantic_role_evidence,
             confidence=confidence,
             confidence_tier="conflict_preserve_wins" if ctype == CONTAINER_SFX else confidence_tier,
             route_intent=route,
@@ -2423,6 +3747,13 @@ def _container_from_fused(
         has_kitsumed = bool(fused.get("linked_kitsumed_mask_ids"))
         has_ogkalu = bool(fused.get("linked_ogkalu_detection_ids"))
         large_mask_primary = has_kitsumed and _bbox_area_xywh(bbox) >= 45000
+        if has_kitsumed:
+            semantic_role_evidence = _semantic_role_evidence_with_state(
+                semantic_role_evidence,
+                "cleanup_authority_states",
+                AUTH_CLEANUP_TRANSLATE_SPEECH,
+                evidence_kind="typed_speech_bubble_mask_authority",
+            )
         if (confidence == "high" and has_kitsumed) or (confidence == "medium" and large_mask_primary):
             extra_reasons = ["text_area_plan:medium_mask_primary_large_container"] if confidence == "medium" else []
             return TextAreaContainer(
@@ -2432,6 +3763,7 @@ def _container_from_fused(
                 bbox=bbox,
                 mask_summary={"mask_bbox": _safe_list(fused.get("mask_bbox"))},
                 source_model_ids=source_ids,
+                semantic_role_evidence=semantic_role_evidence,
                 confidence=confidence,
                 confidence_tier=confidence_tier,
                 route_intent=ROUTE_TRANSLATE_SPEECH,
@@ -2455,6 +3787,7 @@ def _container_from_fused(
                 bbox=bbox,
                 mask_summary={"mask_bbox": _safe_list(fused.get("mask_bbox"))},
                 source_model_ids=source_ids,
+                semantic_role_evidence=semantic_role_evidence,
                 confidence=confidence,
                 confidence_tier=confidence_tier,
                 route_intent=ROUTE_TRANSLATE_SPEECH,
@@ -2484,6 +3817,7 @@ def _container_from_fused(
                 bbox=bbox,
                 mask_summary={"mask_bbox": _safe_list(fused.get("mask_bbox"))},
                 source_model_ids=source_ids,
+                semantic_role_evidence=semantic_role_evidence,
                 confidence=confidence,
                 confidence_tier=confidence_tier,
                 route_intent=ROUTE_TRANSLATE_SPEECH,
@@ -2508,6 +3842,7 @@ def _container_from_fused(
             bbox=bbox,
             mask_summary={"mask_bbox": _safe_list(fused.get("mask_bbox"))},
             source_model_ids=source_ids,
+            semantic_role_evidence=semantic_role_evidence,
             confidence=confidence,
             confidence_tier=confidence_tier,
             route_intent=ROUTE_REVIEW_FALLBACK,
@@ -2520,30 +3855,109 @@ def _container_from_fused(
         )
 
     if (fused_type == "caption_or_background_candidate" or fused_type == "free_text") and _looks_like_caption_background_bbox(bbox, image_size):
+        if _text_free_caption_candidate_is_protected_sfx(
+            fused_type=fused_type,
+            reasons=reasons,
+            bbox=bbox,
+            visual=visual,
+            image_size=image_size,
+            luma_image=luma_image,
+        ):
+            semantic_role_evidence = _semantic_role_evidence_with_state(
+                semantic_role_evidence,
+                "protected_authority_states",
+                AUTH_PROTECT_SFX_DECORATIVE,
+                evidence_kind="typed_text_free_edge_sfx_decorative_authority",
+            )
+            return TextAreaContainer(
+                container_id=container_id,
+                page_id=page_id,
+                container_type=CONTAINER_SFX,
+                bbox=bbox,
+                source_model_ids=source_ids,
+                semantic_role_evidence=semantic_role_evidence,
+                confidence=confidence,
+                confidence_tier="text_free_edge_sfx_preserve",
+                route_intent=ROUTE_PRESERVE_SFX,
+                ocr_eligible=False,
+                comic_text_detector_scope_eligible=False,
+                fallback_reason="text_free_edge_sfx_decorative_preserve",
+                evidence_reason_codes=reasons
+                + _visual_reason_codes(visual)
+                + ["text_area_plan:text_free_edge_sfx_decorative_preserve"],
+                human_review_required=True,
+                ocr_eligibility_reason="blocked_text_free_edge_sfx_decorative",
+            )
+        authority_reason = (
+            "text_area_plan:caption_background_model_authority"
+            if _text_free_caption_candidate_has_background_authority(
+                fused_type=fused_type,
+                reasons=reasons,
+                bbox=bbox,
+                visual=visual,
+                image_size=image_size,
+                luma_image=luma_image,
+            )
+            else "text_area_plan:caption_background_candidate"
+        )
+        review_only = authority_reason != "text_area_plan:caption_background_model_authority"
+        if not review_only:
+            semantic_role_evidence = _semantic_role_evidence_with_state(
+                semantic_role_evidence,
+                "cleanup_authority_states",
+                AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+                evidence_kind="typed_text_free_background_model_authority",
+            )
+            expanded_bbox = _expand_compact_top_text_free_background_bbox(
+                luma_image=luma_image,
+                bbox=bbox,
+                reasons=reasons,
+                visual=visual,
+                image_size=image_size,
+            )
+            if list(expanded_bbox) != list(bbox):
+                semantic_role_evidence = dict(semantic_role_evidence)
+                x0, y0, bw, bh = _coerce_xywh(expanded_bbox)
+                semantic_role_evidence["text_unit_evidence_bboxes"] = [
+                    {
+                        "bbox": [x0, y0, x0 + bw, y0 + bh],
+                        "class_name": "text_free",
+                        "evidence_id": f"{container_id}_expanded_top_text_free",
+                    }
+                ]
+            bbox = expanded_bbox
         return TextAreaContainer(
             container_id=container_id,
             page_id=page_id,
             container_type=CONTAINER_CAPTION,
             bbox=bbox,
             source_model_ids=source_ids,
+            semantic_role_evidence=semantic_role_evidence,
             confidence=confidence,
-            confidence_tier="text_free_review_only",
+            confidence_tier="text_free_caption_background_authority" if not review_only else "text_free_review_only",
             route_intent=ROUTE_TRANSLATE_CAPTION,
             ocr_eligible=True,
             comic_text_detector_scope_eligible=True,
-            fallback_reason="caption_background_model_candidate_review",
-            evidence_reason_codes=reasons + ["text_area_plan:caption_background_candidate"],
-            human_review_required=True,
+            fallback_reason="caption_background_model_candidate_review" if review_only else None,
+            evidence_reason_codes=reasons + [authority_reason],
+            human_review_required=review_only,
             ocr_eligibility_reason="caption_background_container",
         )
 
     if fused_type == "sfx_or_decorative_candidate" or _looks_like_pre_ocr_sfx_or_decorative(fused_type, reasons, bbox, visual, image_size):
+        semantic_role_evidence = _semantic_role_evidence_with_state(
+            semantic_role_evidence,
+            "protected_authority_states",
+            AUTH_PROTECT_SFX_DECORATIVE,
+            evidence_kind="typed_sfx_decorative_model_authority",
+        )
         return TextAreaContainer(
             container_id=container_id,
             page_id=page_id,
             container_type=CONTAINER_SFX,
             bbox=bbox,
             source_model_ids=source_ids,
+            semantic_role_evidence=semantic_role_evidence,
             confidence=confidence,
             confidence_tier="conflict_preserve_wins",
             route_intent=ROUTE_PRESERVE_SFX,
@@ -2556,6 +3970,149 @@ def _container_from_fused(
             ocr_eligibility_reason="blocked_sfx_decorative_art_container",
         )
 
+    if _looks_like_standalone_ogkalu_speech_bubble(
+        fused_type=fused_type,
+        reasons=reasons,
+        bbox=bbox,
+        visual=visual,
+        image_size=image_size,
+        semantic_role_evidence=semantic_role_evidence,
+        clipped=clipped,
+    ):
+        semantic_role_evidence = _semantic_role_evidence_with_state(
+            semantic_role_evidence,
+            "cleanup_authority_states",
+            AUTH_CLEANUP_TRANSLATE_SPEECH,
+            evidence_kind="typed_bright_ogkalu_bubble_speech_authority",
+        )
+        return TextAreaContainer(
+            container_id=container_id,
+            page_id=page_id,
+            container_type=CONTAINER_SPEECH,
+            bbox=bbox,
+            source_model_ids=source_ids,
+            semantic_role_evidence=semantic_role_evidence,
+            confidence=confidence,
+            confidence_tier="bright_ogkalu_bubble_speech_authority",
+            route_intent=ROUTE_TRANSLATE_SPEECH,
+            ocr_eligible=True,
+            comic_text_detector_scope_eligible=True,
+            fallback_reason=None,
+            evidence_reason_codes=reasons
+            + _visual_reason_codes(visual)
+            + ["text_area_plan:bright_ogkalu_bubble_speech_authority"],
+            conflict_flags=conflicts,
+            human_review_required=False,
+            ocr_eligibility_reason="bright_ogkalu_bubble_speech_container",
+        )
+
+    if _looks_like_bright_unlinked_text_free_sfx_or_decorative(
+        fused_type=fused_type,
+        reasons=reasons,
+        bbox=bbox,
+        visual=visual,
+        image_size=image_size,
+        semantic_role_evidence=semantic_role_evidence,
+    ):
+        semantic_role_evidence = _semantic_role_evidence_with_state(
+            semantic_role_evidence,
+            "protected_authority_states",
+            AUTH_PROTECT_SFX_DECORATIVE,
+            evidence_kind="typed_bright_unlinked_text_free_sfx_decorative_authority",
+        )
+        return TextAreaContainer(
+            container_id=container_id,
+            page_id=page_id,
+            container_type=CONTAINER_SFX,
+            bbox=bbox,
+            source_model_ids=source_ids,
+            semantic_role_evidence=semantic_role_evidence,
+            confidence=confidence,
+            confidence_tier="bright_unlinked_text_free_sfx_decorative",
+            route_intent=ROUTE_PRESERVE_SFX,
+            ocr_eligible=False,
+            comic_text_detector_scope_eligible=False,
+            fallback_reason="bright_unlinked_text_free_sfx_decorative_preserve",
+            evidence_reason_codes=reasons
+            + _visual_reason_codes(visual)
+            + ["text_area_plan:bright_unlinked_text_free_sfx_decorative_preserve"],
+            conflict_flags=conflicts,
+            human_review_required=True,
+            ocr_eligibility_reason="blocked_bright_unlinked_text_free_sfx_decorative",
+        )
+
+    if _looks_like_side_narration_background_bbox(
+        fused_type=fused_type,
+        reasons=reasons,
+        bbox=bbox,
+        visual=visual,
+        image_size=image_size,
+        semantic_role_evidence=semantic_role_evidence,
+    ):
+        semantic_role_evidence = dict(semantic_role_evidence)
+        role_signals = set(_semantic_role_values(semantic_role_evidence, "role_signals"))
+        role_signals.add("side_narration_candidate")
+        semantic_role_evidence["role_signals"] = sorted(role_signals)
+        semantic_role_evidence = _semantic_role_evidence_with_state(
+            semantic_role_evidence,
+            "cleanup_authority_states",
+            AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+            evidence_kind="typed_side_narration_background_authority",
+        )
+        return TextAreaContainer(
+            container_id=container_id,
+            page_id=page_id,
+            container_type=CONTAINER_CAPTION,
+            bbox=bbox,
+            source_model_ids=source_ids,
+            semantic_role_evidence=semantic_role_evidence,
+            confidence=confidence,
+            confidence_tier="side_narration_background_authority",
+            route_intent=ROUTE_TRANSLATE_CAPTION,
+            ocr_eligible=True,
+            comic_text_detector_scope_eligible=True,
+            fallback_reason=None,
+            evidence_reason_codes=reasons + _visual_reason_codes(visual) + ["text_area_plan:side_narration_background_authority"],
+            conflict_flags=conflicts,
+            human_review_required=False,
+            ocr_eligibility_reason="side_narration_background_container",
+        )
+
+    if _looks_like_dark_unlinked_ogkalu_sfx_or_decorative(
+        fused_type=fused_type,
+        reasons=reasons,
+        bbox=bbox,
+        visual=visual,
+        image_size=image_size,
+        semantic_role_evidence=semantic_role_evidence,
+    ):
+        semantic_role_evidence = _semantic_role_evidence_with_state(
+            semantic_role_evidence,
+            "protected_authority_states",
+            AUTH_PROTECT_SFX_DECORATIVE,
+            evidence_kind="typed_dark_unlinked_ogkalu_sfx_decorative_authority",
+        )
+        return TextAreaContainer(
+            container_id=container_id,
+            page_id=page_id,
+            container_type=CONTAINER_SFX,
+            bbox=bbox,
+            source_model_ids=source_ids,
+            semantic_role_evidence=semantic_role_evidence,
+            confidence=confidence,
+            confidence_tier="dark_unlinked_ogkalu_sfx_decorative",
+            route_intent=ROUTE_PRESERVE_SFX,
+            ocr_eligible=False,
+            comic_text_detector_scope_eligible=False,
+            fallback_reason="dark_unlinked_ogkalu_sfx_decorative_preserve",
+            evidence_reason_codes=reasons
+            + _visual_reason_codes(visual)
+            + ["text_area_plan:dark_unlinked_ogkalu_sfx_decorative_preserve"],
+            conflict_flags=conflicts,
+            human_review_required=True,
+            ocr_eligibility_reason="blocked_dark_unlinked_ogkalu_sfx_decorative",
+        )
+
     safe_unknown = _safe_unknown_ocr_fallback(fused_type, reasons, bbox, visual, image_size)
     if safe_unknown:
         return TextAreaContainer(
@@ -2565,6 +4122,7 @@ def _container_from_fused(
             bbox=bbox,
             mask_summary={"mask_bbox": _safe_list(fused.get("mask_bbox"))},
             source_model_ids=source_ids,
+            semantic_role_evidence=semantic_role_evidence,
             confidence=confidence,
             confidence_tier=confidence_tier,
             route_intent=ROUTE_REVIEW_FALLBACK,
@@ -2583,6 +4141,7 @@ def _container_from_fused(
         container_type=CONTAINER_UNKNOWN,
         bbox=bbox,
         source_model_ids=source_ids,
+        semantic_role_evidence=semantic_role_evidence,
         confidence=confidence,
         confidence_tier=confidence_tier,
         route_intent=ROUTE_REVIEW_FALLBACK,
@@ -2598,6 +4157,33 @@ def _container_from_fused(
         human_review_required=True,
         ocr_eligibility_reason="blocked_unknown_review_only",
     )
+
+
+def _duplicate_semantic_text_area_container(container: TextAreaContainer, existing: Sequence[TextAreaContainer]) -> bool:
+    if container.container_type not in {CONTAINER_CAPTION, CONTAINER_SPEECH}:
+        return False
+    if container.route_intent not in {ROUTE_TRANSLATE_CAPTION, ROUTE_TRANSLATE_SPEECH}:
+        return False
+    reason_text = " ".join(str(item).lower() for item in container.evidence_reason_codes or [])
+    duplicate_sensitive = any(
+        token in reason_text
+        for token in (
+            "side_narration_background_authority",
+            "ogkalu_bubble_without_kitsumed_mask",
+            "ogkalu_text_bubble_without_kitsumed_mask",
+            "caption_background_model_authority",
+        )
+    )
+    if not duplicate_sensitive:
+        return False
+    for other in existing:
+        if other.container_type != container.container_type or other.route_intent != container.route_intent:
+            continue
+        overlap = _intersection_ratio_xywh(container.bbox, other.bbox)
+        reverse = _intersection_ratio_xywh(other.bbox, container.bbox)
+        if max(overlap, reverse) >= 0.55:
+            return True
+    return False
 
 
 def _container_from_unlinked_text_area_evidence(
@@ -2616,6 +4202,7 @@ def _container_from_unlinked_text_area_evidence(
     class_name = str(evidence.get("class_name") or "")
     bbox = _bbox_xyxy_to_xywh(evidence.get("bbox_xyxy") or evidence.get("bbox"), image_size)
     confidence = float(evidence.get("confidence") or 0.0)
+    semantic_role_evidence = _semantic_role_evidence_from_text_area_evidence(evidence)
     visual = _container_visual_stats(luma_image, bbox, image_size)
     top_caption = class_name == "text_free" and _looks_like_caption_background_bbox(bbox, image_size)
     if top_caption:
@@ -2625,6 +4212,7 @@ def _container_from_unlinked_text_area_evidence(
             container_type=CONTAINER_CAPTION,
             bbox=bbox,
             source_model_ids=[evidence_id],
+            semantic_role_evidence=semantic_role_evidence,
             confidence=round(confidence, 6),
             confidence_tier="text_free_review_only",
             route_intent=ROUTE_TRANSLATE_CAPTION,
@@ -2642,6 +4230,7 @@ def _container_from_unlinked_text_area_evidence(
             container_type=CONTAINER_SFX,
             bbox=bbox,
             source_model_ids=[evidence_id],
+            semantic_role_evidence=semantic_role_evidence,
             confidence=round(confidence, 6),
             confidence_tier="text_free_review_only",
             route_intent=ROUTE_PRESERVE_SFX,
@@ -2658,6 +4247,7 @@ def _container_from_unlinked_text_area_evidence(
         container_type=CONTAINER_UNKNOWN,
         bbox=bbox,
         source_model_ids=[evidence_id],
+        semantic_role_evidence=semantic_role_evidence,
         confidence=round(confidence, 6),
         confidence_tier="text_free_review_only" if class_name == "text_free" else "text_bubble_review_container",
         route_intent=ROUTE_REVIEW_FALLBACK,
@@ -2690,6 +4280,12 @@ def _append_deterministic_top_band_caption_containers(
             "det_top_caption_day_center",
             [int(width * 0.56), 0, int(width * 0.09), int(search_height * 0.72)],
             "text_area_plan:deterministic_top_band_day_caption_search",
+            "static",
+        ),
+        (
+            "det_top_caption_mid_left",
+            [int(width * 0.50), 0, int(width * 0.11), int(search_height * 0.82)],
+            "text_area_plan:deterministic_top_band_mid_left_caption_search",
             "static",
         ),
         (
@@ -2726,30 +4322,106 @@ def _append_deterministic_top_band_caption_containers(
             )
         )
     source_ids = _top_band_caption_search_source_ids(result, image_size)
-    pending: List[Tuple[str, List[int], str, str]] = []
+    pending: List[Tuple[str, List[int], str, str, bool]] = []
     for container_id, raw_bbox, search_reason, candidate_kind in candidates:
         if seen is not None and container_id in seen:
             continue
         bbox = _normalize_xywh(raw_bbox, image_size)
         if candidate_kind == "static":
+            if container_id in {
+                "det_top_caption_day_center",
+                "det_top_caption_mid_left",
+                "det_top_caption_center",
+                "det_top_caption_right",
+            }:
+                localized_columns = _top_band_character_column_bboxes(luma_image, bbox, image_size)
+                if localized_columns:
+                    for column_index, column_bbox in enumerate(localized_columns):
+                        column_id = f"{container_id}_visual_{column_index:02d}"
+                        if seen is not None and column_id in seen:
+                            continue
+                        authority_allowed = _top_band_caption_background_authority_allowed(
+                            container_id=column_id,
+                            bbox=column_bbox,
+                            search_reason=f"{search_reason}:localized_character_column",
+                            candidate_kind="visual_column",
+                            image_size=image_size,
+                            existing_containers=plan.containers,
+                        )
+                        if container_id == "det_top_caption_right" and not _top_band_right_column_has_background_context(
+                            luma_image,
+                            column_bbox,
+                            image_size,
+                        ):
+                            authority_allowed = False
+                        if _top_band_caption_candidate_is_duplicate(
+                            column_bbox,
+                            pending,
+                            plan.containers,
+                            source_ids,
+                        ):
+                            continue
+                        pending.append(
+                            (
+                                column_id,
+                                column_bbox,
+                                f"{search_reason}:localized_character_column",
+                                "visual_column",
+                                authority_allowed,
+                            )
+                        )
+                    continue
             localized = _localize_top_caption_bbox(luma_image, bbox, image_size)
             if localized is not None:
                 bbox = localized
                 search_reason = f"{search_reason}:localized_ink"
+            elif container_id == "det_top_caption_far_right":
+                # The far-right top band commonly contains action/SFX strokes.
+                # It can only become semantic background authority when the
+                # existing TextAreaPlan localization can isolate caption text.
+                continue
             else:
                 # Keep broad top-band boxes as scoped OCR search areas only.
                 # Controller/hierarchy must later render and clean against the
                 # OCR/glyph evidence, and duplicate partial captions are
                 # suppressed before translation.
                 search_reason = f"{search_reason}:search_scope_only"
-        if _top_band_caption_candidate_is_duplicate(bbox, pending, plan.containers, source_ids):
+        authority_allowed = _top_band_caption_background_authority_allowed(
+            container_id=container_id,
+            bbox=bbox,
+            search_reason=search_reason,
+            candidate_kind=candidate_kind,
+            image_size=image_size,
+            existing_containers=plan.containers,
+        )
+        if _top_band_caption_candidate_is_duplicate(bbox, pending, plan.containers, source_ids) and not (
+            authority_allowed and _top_band_caption_candidate_expands_existing_background_scope(bbox, plan.containers)
+        ):
             continue
-        pending.append((container_id, bbox, search_reason, candidate_kind))
+        pending.append((container_id, bbox, search_reason, candidate_kind, authority_allowed))
 
-    for container_id, bbox, search_reason, _candidate_kind in pending:
+    for container_id, bbox, search_reason, _candidate_kind, authority_allowed in pending:
         if _caption_search_overlaps_blocking_container(bbox, plan.containers):
             continue
         visual = _container_visual_stats(luma_image, bbox, image_size)
+        role_signals = ["caption_background_candidate"]
+        semantic_role_evidence: Dict[str, Any] = {
+            "role_signals": role_signals,
+            "source": "text_area_plan_deterministic_top_band",
+        }
+        reason_codes = [
+            search_reason,
+            "text_area_plan:caption_background_container",
+        ] + _visual_reason_codes(visual)
+        if authority_allowed:
+            role_signals.append("top_band_background_authority")
+            semantic_role_evidence = _semantic_role_evidence_with_state(
+                semantic_role_evidence,
+                "cleanup_authority_states",
+                AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+                evidence_kind="typed_deterministic_top_band_background_authority",
+            )
+            reason_codes.append("text_area_plan:deterministic_top_band_background_authority")
         plan.containers.append(
             TextAreaContainer(
                 container_id=container_id,
@@ -2757,18 +4429,19 @@ def _append_deterministic_top_band_caption_containers(
                 container_type=CONTAINER_CAPTION,
                 bbox=bbox,
                 source_model_ids=source_ids,
+                semantic_role_evidence=semantic_role_evidence,
                 confidence="deterministic",
-                confidence_tier="deterministic_top_band_caption_search",
+                confidence_tier=(
+                    "deterministic_top_band_background_authority"
+                    if authority_allowed
+                    else "deterministic_top_band_caption_search"
+                ),
                 route_intent=ROUTE_TRANSLATE_CAPTION,
                 ocr_eligible=True,
                 comic_text_detector_scope_eligible=True,
-                fallback_reason="deterministic_top_band_caption_search",
-                evidence_reason_codes=[
-                    search_reason,
-                    "text_area_plan:caption_background_container",
-                ]
-                + _visual_reason_codes(visual),
-                human_review_required=True,
+                fallback_reason=None if authority_allowed else "deterministic_top_band_caption_search",
+                evidence_reason_codes=reason_codes,
+                human_review_required=not authority_allowed,
                 ocr_eligibility_reason="caption_background_container_strict_ocr_gate",
             )
         )
@@ -2818,13 +4491,186 @@ def _localize_top_caption_bbox(luma_image: Any, search_bbox: Sequence[int], imag
         return None
 
 
+def _top_band_caption_background_authority_allowed(
+    *,
+    container_id: str,
+    bbox: Sequence[int],
+    search_reason: str,
+    candidate_kind: str,
+    image_size: Tuple[int, int],
+    existing_containers: Sequence[TextAreaContainer] | None = None,
+) -> bool:
+    if "far_right" in str(container_id):
+        return False
+    if not _looks_like_top_caption_bbox(bbox, image_size):
+        return False
+    x, y, w, h = _coerce_xywh(bbox)
+    width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    if w <= 0 or h <= 0:
+        return False
+    if x + w >= width - max(2, int(width * 0.002)):
+        return False
+    if candidate_kind == "visual_column":
+        if w < width * 0.030 or w > width * 0.10:
+            return False
+        if h < height * 0.045 or h > height * 0.24:
+            return False
+        return True
+    if w < width * 0.045 or w > width * 0.24:
+        return False
+    if h < height * 0.045 or h > height * 0.24:
+        return False
+    if candidate_kind == "visual":
+        return True
+    reason = str(search_reason)
+    if "localized_ink" in reason:
+        return True
+    if "search_scope_only" in reason:
+        # Broad static top-band scopes are candidate search areas. They can only
+        # carry OCR/projection context. Semantic authority must come from
+        # localized text-column evidence or an upstream typed model/current-region
+        # record, otherwise SFX/action strokes in the same band can turn green.
+        return False
+    return False
+
+
+def _top_band_caption_candidate_expands_existing_background_scope(
+    bbox: Sequence[int],
+    existing_containers: Sequence[TextAreaContainer],
+) -> bool:
+    candidate_area = _bbox_area_xywh(bbox)
+    if candidate_area <= 0:
+        return False
+    for container in existing_containers:
+        if container.container_type != CONTAINER_CAPTION:
+            continue
+        existing_area = _bbox_area_xywh(container.bbox)
+        if existing_area <= 0 or candidate_area <= existing_area * 1.20:
+            continue
+        if _inside_ratio_xywh(container.bbox, bbox) >= 0.65:
+            return True
+    return False
+
+
+def _top_band_character_column_bboxes(
+    luma_image: Any,
+    search_bbox: Sequence[int],
+    image_size: Tuple[int, int],
+) -> List[List[int]]:
+    """Find localized top-band vertical text columns without authorizing the full search scope."""
+    if luma_image is None or np is None or cv2 is None:
+        return []
+    x, y, w, h = _coerce_xywh(search_bbox)
+    width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    if w <= 0 or h <= 0:
+        return []
+    x0 = max(0, x)
+    y0 = max(0, y)
+    x1 = min(width, x + w)
+    y1 = min(height, y + h)
+    if x1 <= x0 or y1 <= y0:
+        return []
+    try:
+        crop = luma_image.crop((x0, y0, x1, y1)).convert("L")
+        arr = np.asarray(crop)
+        mask = (arr <= 96).astype("uint8")
+        _count, labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, 8)
+    except Exception:
+        return []
+
+    char_components: List[Tuple[int, int, int, int, int]] = []
+    for label in range(1, int(stats.shape[0])):
+        cx, cy, cw, ch, area = [int(value) for value in stats[label][:5]]
+        if area < 8 or area > 1800:
+            continue
+        if cw < 2 or ch < 4 or cw > 70 or ch > 80:
+            continue
+        aspect = ch / float(max(1, cw))
+        if aspect < 0.40 or aspect > 10.0:
+            continue
+        density = area / float(max(1, cw * ch))
+        if density < 0.08 or density > 0.75:
+            continue
+        char_components.append((cx, cy, cw, ch, area))
+    if len(char_components) < 4:
+        return []
+
+    clusters: List[Dict[str, Any]] = []
+    for comp in sorted(char_components, key=lambda item: item[0] + item[2] / 2.0):
+        center_x = comp[0] + comp[2] / 2.0
+        placed = False
+        for cluster in clusters:
+            if abs(center_x - float(cluster["center_x"])) <= max(24.0, float(cluster["max_width"]) * 0.70):
+                cluster["items"].append(comp)
+                centers = [item[0] + item[2] / 2.0 for item in cluster["items"]]
+                cluster["center_x"] = sum(centers) / float(len(centers))
+                cluster["max_width"] = max(item[2] for item in cluster["items"])
+                placed = True
+                break
+        if not placed:
+            clusters.append({"center_x": center_x, "max_width": comp[2], "items": [comp]})
+
+    candidates: List[List[int]] = []
+    for cluster in clusters:
+        items = list(cluster.get("items") or [])
+        if len(items) < 6:
+            continue
+        xs = [item[0] for item in items]
+        ys = [item[1] for item in items]
+        x2 = [item[0] + item[2] for item in items]
+        y2 = [item[1] + item[3] for item in items]
+        bx0, by0, bx1, by1 = min(xs), min(ys), max(x2), max(y2)
+        bw = bx1 - bx0
+        bh = by1 - by0
+        if bw < 8 or bw > 90:
+            continue
+        if bh < max(72, int(height * 0.045)) or bh > int(height * 0.24):
+            continue
+        row_bins = {
+            int((item[1] - by0) / float(max(1, bh)) * 5.0)
+            for item in items
+        }
+        if len(row_bins) < 3:
+            continue
+        pixel_area = sum(item[4] for item in items)
+        density = pixel_area / float(max(1, bw * bh))
+        median_height = sorted(item[3] for item in items)[len(items) // 2]
+        if density > 0.22 or median_height > 40:
+            continue
+        dominant_action_bar = any(
+            item[2] >= max(42, int(bw * 0.70))
+            and (item[3] / float(max(1, item[2]))) < 0.90
+            for item in items
+        )
+        if dominant_action_bar:
+            continue
+        pad_x = max(4, int(bw * 0.12))
+        pad_y = max(6, int(bh * 0.04))
+        candidate = _normalize_xywh(
+            [x0 + bx0 - pad_x, y0 + by0 - pad_y, bw + pad_x * 2, bh + pad_y * 2],
+            image_size,
+        )
+        if _looks_like_top_caption_bbox(candidate, image_size):
+            candidates.append(candidate)
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    deduped: List[List[int]] = []
+    for candidate in candidates:
+        if any(_intersection_ratio_xywh(candidate, existing) >= 0.65 for existing in deduped):
+            continue
+        deduped.append(candidate)
+        if len(deduped) >= 3:
+            break
+    return deduped
+
+
 def _top_band_caption_candidate_is_duplicate(
     bbox: Sequence[int],
-    pending: Sequence[Tuple[str, Sequence[int], str, str]],
+    pending: Sequence[Tuple[str, Sequence[int], str, str, bool]],
     existing_containers: Sequence[TextAreaContainer],
     source_ids: Sequence[str],
 ) -> bool:
-    for _cid, existing_bbox, _reason, _kind in pending:
+    for _cid, existing_bbox, _reason, _kind, _authority_allowed in pending:
         if _intersection_ratio_xywh(bbox, existing_bbox) >= 0.70:
             return True
         if _inside_ratio_xywh(bbox, existing_bbox) >= 0.80 or _inside_ratio_xywh(existing_bbox, bbox) >= 0.80:
@@ -2976,96 +4822,684 @@ def _append_deterministic_vertical_side_caption_containers(
         return
     added = 0
     added_boxes: list[list[int]] = []
+    per_side_counts: Dict[str, int] = {}
     for item in source_items:
         seed_bbox = _bbox_xyxy_to_xywh(item.get("mask_bbox") or item.get("bbox_xyxy") or item.get("bbox"), image_size)
+        if _side_caption_seed_overlaps_protected(seed_bbox, plan.containers):
+            continue
+        side = _side_caption_side_for_bbox(seed_bbox, image_size)
         search_bbox = _side_caption_search_bbox(seed_bbox, image_size)
+        trimmed = _trim_side_caption_search_bbox_against_protected(search_bbox, plan.containers, image_size)
+        if trimmed is None:
+            continue
+        search_bbox = trimmed
         localized = _localize_side_caption_bbox(luma_image, search_bbox, image_size)
-        bbox = localized or search_bbox
-        if any(_intersection_ratio_xywh(bbox, existing) >= 0.35 for existing in added_boxes):
-            continue
-        if _caption_search_overlaps_blocking_container(bbox, plan.containers):
-            continue
-        container_id = f"det_side_caption_right_{added:02d}"
+        localized_boxes = [localized] if localized else _side_caption_character_column_bboxes(luma_image, search_bbox, image_size)
+        if not localized_boxes:
+            localized_boxes = [search_bbox]
+        item_id = str(item.get("model_evidence_id") or item.get("evidence_id") or item.get("fused_container_id") or "")
+        authority_by_bbox: Dict[int, str] = {}
+        for pre_index, pre_bbox in enumerate(localized_boxes):
+            if _caption_search_overlaps_blocking_container(pre_bbox, plan.containers):
+                continue
+            pre_visual = _container_visual_stats(luma_image, pre_bbox, image_size)
+            pre_authority_reason = _side_caption_scope_authority_reason(item_id, pre_bbox, plan.containers)
+            if not pre_authority_reason and _side_caption_signal_item_has_background_authority(
+                item=item,
+                bbox=pre_bbox,
+                visual=pre_visual,
+                image_size=image_size,
+                luma_image=luma_image,
+                existing_containers=plan.containers,
+            ):
+                pre_authority_reason = "text_area_plan:deterministic_side_narration_background_authority"
+            if pre_authority_reason:
+                authority_by_bbox[pre_index] = pre_authority_reason
+        if authority_by_bbox and len(localized_boxes) >= 2:
+            for pre_index, pre_bbox in enumerate(localized_boxes):
+                if pre_index in authority_by_bbox:
+                    continue
+                if _caption_search_overlaps_blocking_container(pre_bbox, plan.containers):
+                    continue
+                authority_by_bbox[pre_index] = (
+                    "text_area_plan:deterministic_side_narration_background_authority:sibling_column"
+                )
+        if not authority_by_bbox and not localized and len(localized_boxes) >= 2:
+            for pre_index, pre_bbox in enumerate(localized_boxes):
+                if _caption_search_overlaps_blocking_container(pre_bbox, plan.containers):
+                    continue
+                authority_by_bbox[pre_index] = (
+                    "text_area_plan:deterministic_side_narration_background_authority:coherent_column_group"
+                )
+        for bbox_index, bbox in enumerate(localized_boxes):
+            duplicate_threshold = 0.62 if list(bbox) != list(search_bbox) else 0.35
+            if any(_intersection_ratio_xywh(bbox, existing) >= duplicate_threshold for existing in added_boxes):
+                continue
+            if _caption_search_overlaps_blocking_container(bbox, plan.containers):
+                continue
+            side_index = per_side_counts.get(side, 0)
+            container_id = f"det_side_caption_{side}_{side_index:02d}"
+            if seen is not None and container_id in seen:
+                continue
+            visual = _container_visual_stats(luma_image, bbox, image_size)
+            authority_reason = authority_by_bbox.get(bbox_index, "")
+            reason_codes = [
+                SIDE_CAPTION_SEARCH_REASON,
+                "text_area_plan:caption_background_container",
+                "text_area_plan:vertical_side_caption_search",
+                f"text_area_plan:vertical_side_caption_{side}_search",
+            ] + _visual_reason_codes(visual)
+            if authority_reason:
+                reason_codes.append(authority_reason)
+            if localized:
+                reason_codes.append("text_area_plan:vertical_side_caption_localized_ink")
+            elif list(bbox) != list(search_bbox):
+                reason_codes.append("text_area_plan:vertical_side_caption_localized_character_column")
+            else:
+                reason_codes.append("text_area_plan:vertical_side_caption_seed_scope")
+            role_signals = ["side_narration_candidate"]
+            if authority_reason:
+                role_signals.append("side_narration_background_authority")
+            semantic_role_evidence: Dict[str, Any] = {
+                "role_signals": sorted(set(role_signals)),
+                "source": "text_area_plan_deterministic_vertical_side",
+                "side": side,
+                "column_index": bbox_index,
+            }
+            if authority_reason:
+                semantic_role_evidence = _semantic_role_evidence_with_state(
+                    semantic_role_evidence,
+                    "cleanup_authority_states",
+                    AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+                    evidence_kind="typed_deterministic_side_narration_background_authority",
+                )
+            plan.containers.append(
+                TextAreaContainer(
+                    container_id=container_id,
+                    page_id=page_id,
+                    container_type=CONTAINER_CAPTION,
+                    bbox=bbox,
+                    source_model_ids=[item_id] if item_id else [],
+                    semantic_role_evidence=semantic_role_evidence,
+                    confidence="deterministic",
+                    confidence_tier=(
+                        "deterministic_side_narration_background_authority"
+                        if authority_reason
+                        else "deterministic_vertical_side_caption_search"
+                    ),
+                    route_intent=ROUTE_TRANSLATE_CAPTION,
+                    ocr_eligible=True,
+                    comic_text_detector_scope_eligible=True,
+                    fallback_reason=None if authority_reason else "deterministic_vertical_side_caption_search",
+                    evidence_reason_codes=reason_codes,
+                    human_review_required=not bool(authority_reason),
+                    ocr_eligibility_reason="caption_background_container_strict_ocr_gate",
+                )
+            )
+            if seen is not None:
+                seen.add(container_id)
+            added_boxes.append(list(bbox))
+            per_side_counts[side] = side_index + 1
+            added += 1
+            if added >= 4:
+                break
+        if added >= 4:
+            break
+
+
+def _append_deterministic_large_sfx_containers(
+    plan: TextAreaPlan,
+    page_id: str,
+    image_size: Tuple[int, int],
+    *,
+    luma_image: Any = None,
+    seen: set[str] | None = None,
+) -> None:
+    for index, bbox in enumerate(_deterministic_large_sfx_component_bboxes(luma_image, image_size, plan.containers)):
+        container_id = f"det_large_sfx_{index:03d}"
         if seen is not None and container_id in seen:
             continue
-        visual = _container_visual_stats(luma_image, bbox, image_size)
-        item_id = str(item.get("model_evidence_id") or item.get("evidence_id") or item.get("fused_container_id") or "")
-        reason_codes = [
-            SIDE_CAPTION_SEARCH_REASON,
-            "text_area_plan:caption_background_container",
-            "text_area_plan:vertical_side_caption_search",
-        ] + _visual_reason_codes(visual)
-        if localized:
-            reason_codes.append("text_area_plan:vertical_side_caption_localized_ink")
-        else:
-            reason_codes.append("text_area_plan:vertical_side_caption_seed_scope")
+        source_id = f"{page_id}_{container_id}"
+        semantic_role_evidence = {
+            "role_signals": ["large_stylized_text_foreground", "sfx_decorative_authority"],
+            "source": "text_area_plan_deterministic_large_sfx",
+            "source_model_ids": [source_id],
+            "evidence_source_list": ["text_area_plan_deterministic_visual_evidence"],
+            "protected_authority_states": [AUTH_PROTECT_SFX_DECORATIVE],
+            "protected_candidate_states": [],
+            "cleanup_authority_states": [],
+            "cleanup_candidate_states": [],
+            "authority_evidence_kind": "typed_deterministic_large_sfx_visual_authority",
+            "confidence": "deterministic",
+        }
         plan.containers.append(
             TextAreaContainer(
                 container_id=container_id,
                 page_id=page_id,
-                container_type=CONTAINER_CAPTION,
+                container_type=CONTAINER_SFX,
                 bbox=bbox,
-                source_model_ids=[item_id] if item_id else [],
+                source_model_ids=[source_id],
+                semantic_role_evidence=semantic_role_evidence,
                 confidence="deterministic",
-                confidence_tier="deterministic_vertical_side_caption_search",
-                route_intent=ROUTE_TRANSLATE_CAPTION,
-                ocr_eligible=True,
-                comic_text_detector_scope_eligible=True,
-                fallback_reason="deterministic_vertical_side_caption_search",
-                evidence_reason_codes=reason_codes,
+                confidence_tier="deterministic_large_sfx_visual_authority",
+                route_intent=ROUTE_PRESERVE_SFX,
+                ocr_eligible=False,
+                comic_text_detector_scope_eligible=False,
+                fallback_reason="deterministic_large_sfx_visual_preserve",
+                evidence_reason_codes=[
+                    "text_area_plan:deterministic_large_sfx_visual_search",
+                    "text_area_plan:deterministic_large_sfx_visual_authority",
+                ],
                 human_review_required=True,
-                ocr_eligibility_reason="caption_background_container_strict_ocr_gate",
+                ocr_eligibility_reason="blocked_deterministic_large_sfx_visual",
             )
         )
         if seen is not None:
             seen.add(container_id)
-        added_boxes.append(list(bbox))
-        added += 1
-        if added >= 1:
-            break
+
+
+def _demote_weak_background_authority_overlapping_protected(
+    containers: Sequence[TextAreaContainer],
+    image_size: Tuple[int, int],
+) -> None:
+    protected_boxes: List[List[int]] = []
+    for container in containers:
+        role_evidence = _container_semantic_role_evidence(container)
+        protected_states = set(_semantic_role_state_values(role_evidence, "protected_authority_states"))
+        if (
+            container.container_type == CONTAINER_SFX
+            or container.route_intent == ROUTE_PRESERVE_SFX
+            or AUTH_PROTECT_SFX_DECORATIVE in protected_states
+            or AUTH_PROTECT_ART_OR_NON_TEXT in protected_states
+        ):
+            bbox = _normalize_xywh(container.bbox, image_size)
+            if bbox:
+                protected_boxes.append([bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]])
+    if not protected_boxes:
+        return
+
+    for container in containers:
+        role_evidence = _container_semantic_role_evidence(container)
+        cleanup_states = set(_semantic_role_state_values(role_evidence, "cleanup_authority_states"))
+        if not cleanup_states or AUTH_CLEANUP_TRANSLATE_SPEECH in cleanup_states:
+            continue
+        if not cleanup_states.issubset({AUTH_CLEANUP_TRANSLATE_BACKGROUND, AUTH_CLEANUP_TRANSLATE_CAPTION}):
+            continue
+        typed_reasons = {str(item) for item in _semantic_role_values(role_evidence, "typed_authority_reason_codes")}
+        weak_background_tokens = (
+            "typed_deterministic_side_narration_background_authority",
+            "typed_side_narration_background_authority",
+            "typed_deterministic_top_band_background_authority",
+            "typed_text_free_background_model_authority",
+        )
+        if not any(any(token in reason for token in weak_background_tokens) for reason in typed_reasons):
+            continue
+        bbox = _normalize_xywh(container.bbox, image_size)
+        if not bbox:
+            continue
+        bbox_xyxy = [bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]]
+        inside_protected = _max_inside_ratio_xyxy(bbox_xyxy, protected_boxes)
+        protected_coverage = _max_coverage_of_boxes_xyxy(bbox_xyxy, protected_boxes)
+        if inside_protected < 0.16 and protected_coverage < 0.25:
+            continue
+
+        updated_evidence = dict(role_evidence)
+        updated_evidence["cleanup_authority_states"] = []
+        updated_evidence["cleanup_candidate_states"] = sorted(
+            set(_semantic_role_state_values(role_evidence, "cleanup_candidate_states")) | cleanup_states
+        )
+        role_signals = set(_semantic_role_values(updated_evidence, "role_signals"))
+        role_signals.add("weak_background_authority_blocked_by_protected")
+        updated_evidence["role_signals"] = sorted(role_signals)
+        conflict_evidence = set(_semantic_role_values(updated_evidence, "conflict_evidence"))
+        conflict_evidence.add("protected_overlap_blocks_weak_background_authority")
+        updated_evidence["conflict_evidence"] = sorted(conflict_evidence)
+        container.semantic_role_evidence = updated_evidence
+        container.text_area_pre_ocr_authority = False
+        container.pre_ocr_authority = False
+        container.human_review_required = True
+        container.fallback_reason = "weak_background_authority_overlaps_protected"
+        container.confidence_tier = "weak_background_authority_blocked_by_protected"
+        if "text_area_plan:weak_background_authority_blocked_by_protected" not in container.evidence_reason_codes:
+            container.evidence_reason_codes.append("text_area_plan:weak_background_authority_blocked_by_protected")
+
+
+def _deterministic_large_sfx_component_bboxes(
+    luma_image: Any,
+    image_size: Tuple[int, int],
+    existing_containers: Sequence[TextAreaContainer],
+) -> List[List[int]]:
+    if luma_image is None or np is None or cv2 is None:
+        return []
+    cleanup_boxes: List[List[int]] = []
+    protected_boxes: List[List[int]] = []
+    for container in existing_containers:
+        bbox = _normalize_xywh(container.bbox, image_size)
+        if not bbox:
+            continue
+        xyxy = [bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]]
+        role_evidence = _container_semantic_role_evidence(container)
+        cleanup_authority_states = set(_semantic_role_state_values(role_evidence, "cleanup_authority_states"))
+        has_cleanup_authority = bool(
+            cleanup_authority_states
+            or (
+                container.container_type == CONTAINER_SPEECH
+                and container.route_intent == ROUTE_TRANSLATE_SPEECH
+            )
+        )
+        if has_cleanup_authority:
+            cleanup_boxes.append(xyxy)
+        elif container.container_type == CONTAINER_SFX or container.route_intent == ROUTE_PRESERVE_SFX:
+            protected_boxes.append(xyxy)
+    try:
+        arr = np.asarray(luma_image.convert("L"))
+        mask = (arr <= 110).astype("uint8")
+        _count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, 8)
+    except Exception:
+        return []
+    candidates: List[List[int]] = []
+    for label in range(1, int(stats.shape[0])):
+        x, y, w, h, area = [int(value) for value in stats[label][:5]]
+        if area < 800 or area > 42000:
+            continue
+        if w < 16 or h < 16 or w > 360 or h > 360:
+            continue
+        density = area / float(max(1, w * h))
+        if density < 0.055 or density > 0.72:
+            continue
+        if (w > 190 or h > 245) and density > 0.48:
+            continue
+        if (w > 95 and h < 20) or (h > 180 and w < 12):
+            continue
+        bbox_xyxy = [x, y, x + w, y + h]
+        if _max_inside_ratio_xyxy(bbox_xyxy, cleanup_boxes) > 0.35:
+            continue
+        if _max_coverage_of_boxes_xyxy(bbox_xyxy, cleanup_boxes) > 0.50:
+            continue
+        if _max_inside_ratio_xyxy(bbox_xyxy, protected_boxes) > 0.92:
+            continue
+        padded = _normalize_xywh([x - 4, y - 4, w + 8, h + 8], image_size)
+        if padded:
+            candidates.append(padded)
+    candidates.sort(key=lambda item: (item[1], item[0], item[2] * item[3]))
+    deduped: List[List[int]] = []
+    for candidate in candidates:
+        if any(_intersection_ratio_xywh(candidate, existing) >= 0.70 for existing in deduped):
+            continue
+        deduped.append(candidate)
+    return deduped
+
+
+def _max_inside_ratio_xyxy(bbox: Sequence[int], boxes: Sequence[Sequence[int]]) -> float:
+    if not boxes:
+        return 0.0
+    try:
+        x0, y0, x1, y1 = [float(value) for value in bbox[:4]]
+    except Exception:
+        return 0.0
+    area = max(1.0, (x1 - x0) * (y1 - y0))
+    best = 0.0
+    for box in boxes:
+        try:
+            bx0, by0, bx1, by1 = [float(value) for value in box[:4]]
+        except Exception:
+            continue
+        iw = max(0.0, min(x1, bx1) - max(x0, bx0))
+        ih = max(0.0, min(y1, by1) - max(y0, by0))
+        best = max(best, (iw * ih) / area)
+    return best
+
+
+def _max_coverage_of_boxes_xyxy(bbox: Sequence[int], boxes: Sequence[Sequence[int]]) -> float:
+    if not boxes:
+        return 0.0
+    try:
+        x0, y0, x1, y1 = [float(value) for value in bbox[:4]]
+    except Exception:
+        return 0.0
+    best = 0.0
+    for box in boxes:
+        try:
+            bx0, by0, bx1, by1 = [float(value) for value in box[:4]]
+        except Exception:
+            continue
+        box_area = max(1.0, (bx1 - bx0) * (by1 - by0))
+        iw = max(0.0, min(x1, bx1) - max(x0, bx0))
+        ih = max(0.0, min(y1, by1) - max(y0, by0))
+        best = max(best, (iw * ih) / box_area)
+    return best
 
 
 def _side_caption_signal_items(result: Mapping[str, Any], image_size: Tuple[int, int]) -> List[Mapping[str, Any]]:
     items: List[Mapping[str, Any]] = []
     for evidence in result.get("text_area_model_evidence", []) or []:
         bbox = _bbox_xyxy_to_xywh(evidence.get("bbox_xyxy") or evidence.get("bbox"), image_size)
-        if _looks_like_vertical_side_caption_signal_bbox(bbox, image_size):
+        if _looks_like_vertical_side_caption_signal_bbox(bbox, image_size) or _looks_like_clipped_right_side_caption_signal_item(evidence, bbox, image_size):
             items.append(evidence)
     for fused in result.get("fused_containers", []) or []:
         bbox = _bbox_xyxy_to_xywh(fused.get("mask_bbox") or fused.get("bbox"), image_size)
-        if _looks_like_vertical_side_caption_signal_bbox(bbox, image_size):
+        if _looks_like_vertical_side_caption_signal_bbox(bbox, image_size) or _looks_like_clipped_right_side_caption_signal_item(fused, bbox, image_size):
             items.append(fused)
     return items
+
+
+def _side_caption_scope_authority_reason(
+    source_id: str,
+    candidate_bbox: Sequence[int],
+    containers: Sequence[TextAreaContainer],
+) -> str:
+    """Allow side-caption scope expansion only from an existing semantic authority."""
+    if not source_id:
+        return ""
+    source_id = str(source_id)
+    for container in containers:
+        reason_text = " ".join(str(item).lower() for item in container.evidence_reason_codes or [])
+        if "side_narration_background_authority" not in reason_text:
+            continue
+        container_sources = {str(item) for item in container.source_model_ids or [] if str(item)}
+        if source_id not in container_sources and source_id != str(container.container_id or ""):
+            continue
+        contains_existing = _inside_ratio_xywh(container.bbox, candidate_bbox) >= 0.65
+        intersects_existing = _intersection_ratio_xywh(container.bbox, candidate_bbox) >= 0.35
+        if contains_existing or intersects_existing:
+            return "text_area_plan:side_narration_background_authority:scope_extension"
+    return ""
+
+
+def _side_caption_signal_item_has_background_authority(
+    *,
+    item: Mapping[str, Any],
+    bbox: Sequence[int],
+    visual: Mapping[str, Any],
+    image_size: Tuple[int, int],
+    luma_image: Any,
+    existing_containers: Sequence[TextAreaContainer],
+) -> bool:
+    class_name = str(item.get("class_name") or item.get("fused_container_type") or "")
+    if class_name not in {"text_free", "free_text", "text_bubble", "caption_or_background_candidate"}:
+        return False
+    if _caption_search_overlaps_blocking_container(bbox, existing_containers):
+        return False
+    x, y, w, h = _coerce_xywh(bbox)
+    width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    if w <= 0 or h <= 0:
+        return False
+    side_context = (x <= width * 0.48 and x + w <= width * 0.56) or (x >= width * 0.54 and x + w <= width * 0.99)
+    if not side_context:
+        return False
+    if y < height * 0.15 or y + h > height * 0.84:
+        return False
+    if w < width * 0.025 or w > width * 0.18:
+        return False
+    if h < height * 0.10 or h > height * 0.44:
+        return False
+    area_ratio = float(visual.get("area_ratio") or 0.0)
+    if area_ratio <= 0.0 or area_ratio > 0.055:
+        return False
+    bright = _optional_float(visual.get("bright_ratio"))
+    dark = _optional_float(visual.get("dark_ratio"))
+    if dark is not None and dark >= 0.48:
+        return False
+    if bright is not None and bright < 0.18:
+        return False
+    return _side_caption_column_has_text_structure(luma_image, bbox, image_size)
+
+
+def _side_caption_column_has_text_structure(
+    luma_image: Any,
+    bbox: Sequence[int],
+    image_size: Tuple[int, int],
+) -> bool:
+    if luma_image is None or np is None or cv2 is None:
+        return False
+    x, y, w, h = _coerce_xywh(bbox)
+    width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    if w <= 0 or h <= 0:
+        return False
+    try:
+        crop = luma_image.crop((max(0, x), max(0, y), min(width, x + w), min(height, y + h))).convert("L")
+        arr = np.asarray(crop)
+        mask = (arr <= 112).astype("uint8")
+        _count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, 8)
+    except Exception:
+        return False
+    char_like: List[Tuple[int, int, int, int, int]] = []
+    large_marks = 0
+    for label in range(1, int(stats.shape[0])):
+        cx, cy, cw, ch, area = [int(value) for value in stats[label][:5]]
+        if area < 8:
+            continue
+        density = area / float(max(1, cw * ch))
+        if area > 2400 or cw > max(78, int(w * 0.78)) or ch > max(96, int(h * 0.42)):
+            large_marks += 1
+            continue
+        aspect = ch / float(max(1, cw))
+        if 2 <= cw <= 76 and 4 <= ch <= 96 and 0.05 <= density <= 0.86 and 0.32 <= aspect <= 12.0:
+            char_like.append((cx, cy, cw, ch, area))
+    if len(char_like) < 5:
+        return False
+    ys = [item[1] for item in char_like]
+    y2 = [item[1] + item[3] for item in char_like]
+    vertical_span = max(y2) - min(ys)
+    row_bins = {
+        int((item[1] - min(ys)) / float(max(1, vertical_span)) * 5.0)
+        for item in char_like
+    }
+    if len(row_bins) < 3:
+        return False
+    total_char_area = sum(item[4] for item in char_like)
+    char_density = total_char_area / float(max(1, w * h))
+    if char_density > 0.34:
+        return False
+    return large_marks <= max(1, len(char_like) // 4)
+
+
+def _side_caption_character_column_bboxes(
+    luma_image: Any,
+    search_bbox: Sequence[int],
+    image_size: Tuple[int, int],
+) -> List[List[int]]:
+    if luma_image is None or np is None or cv2 is None:
+        return []
+    x, y, w, h = _coerce_xywh(search_bbox)
+    width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    if w <= 0 or h <= 0:
+        return []
+    try:
+        crop = luma_image.crop((max(0, x), max(0, y), min(width, x + w), min(height, y + h))).convert("L")
+        arr = np.asarray(crop)
+        mask = (arr <= 108).astype("uint8")
+        _count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, 8)
+    except Exception:
+        return []
+    char_components: List[Tuple[int, int, int, int, int]] = []
+    for label in range(1, int(stats.shape[0])):
+        cx, cy, cw, ch, area = [int(value) for value in stats[label][:5]]
+        if area < 8 or area > 2200:
+            continue
+        if cw < 2 or ch < 4 or cw > 80 or ch > 110:
+            continue
+        density = area / float(max(1, cw * ch))
+        aspect = ch / float(max(1, cw))
+        if 0.05 <= density <= 0.86 and 0.30 <= aspect <= 12.0:
+            char_components.append((cx, cy, cw, ch, area))
+    if len(char_components) < 5:
+        return []
+    clusters: List[Dict[str, Any]] = []
+    for comp in sorted(char_components, key=lambda item: item[0] + item[2] / 2.0):
+        center_x = comp[0] + comp[2] / 2.0
+        placed = False
+        for cluster in clusters:
+            if abs(center_x - float(cluster["center_x"])) <= max(24.0, float(cluster["max_width"]) * 0.80):
+                cluster["items"].append(comp)
+                centers = [item[0] + item[2] / 2.0 for item in cluster["items"]]
+                cluster["center_x"] = sum(centers) / float(len(centers))
+                cluster["max_width"] = max(item[2] for item in cluster["items"])
+                placed = True
+                break
+        if not placed:
+            clusters.append({"center_x": center_x, "max_width": comp[2], "items": [comp]})
+
+    candidates: List[List[int]] = []
+    for cluster in clusters:
+        items = list(cluster.get("items") or [])
+        if len(items) < 5:
+            continue
+        xs = [item[0] for item in items]
+        ys = [item[1] for item in items]
+        x2 = [item[0] + item[2] for item in items]
+        y2 = [item[1] + item[3] for item in items]
+        bx0, by0, bx1, by1 = min(xs), min(ys), max(x2), max(y2)
+        bw = bx1 - bx0
+        bh = by1 - by0
+        if bw < max(10, int(width * 0.008)) or bw > max(120, int(width * 0.11)):
+            continue
+        if bh < max(150, int(height * 0.075)) or bh > int(height * 0.45):
+            continue
+        row_bins = {
+            int((item[1] - by0) / float(max(1, bh)) * 6.0)
+            for item in items
+        }
+        if len(row_bins) < 3:
+            continue
+        pixel_area = sum(item[4] for item in items)
+        density = pixel_area / float(max(1, bw * bh))
+        if density > 0.30:
+            continue
+        dominant_action_bar = any(
+            item[2] >= max(46, int(bw * 0.80))
+            and (item[3] / float(max(1, item[2]))) < 0.82
+            for item in items
+        )
+        if dominant_action_bar:
+            continue
+        pad_x = max(5, int(bw * 0.16))
+        pad_y = max(10, int(bh * 0.04))
+        candidate = _normalize_xywh(
+            [x + bx0 - pad_x, y + by0 - pad_y, bw + pad_x * 2, bh + pad_y * 2],
+            image_size,
+        )
+        if _side_caption_column_has_text_structure(luma_image, candidate, image_size):
+            candidates.append(candidate)
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    deduped: List[List[int]] = []
+    for candidate in candidates:
+        if any(_intersection_ratio_xywh(candidate, existing) >= 0.62 for existing in deduped):
+            continue
+        deduped.append(candidate)
+        if len(deduped) >= 4:
+            break
+    return deduped
 
 
 def _looks_like_vertical_side_caption_signal_bbox(bbox: Sequence[int], image_size: Tuple[int, int]) -> bool:
     if not bbox or len(bbox) < 4:
         return False
+    if _is_clipped_or_degenerate_bbox(bbox, image_size):
+        return False
     x, y, w, h = [int(v) for v in bbox[:4]]
     width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
-    if x < width * 0.72:
+    left_side = x <= width * 0.42 and x + w <= width * 0.52
+    right_side = x >= width * 0.72
+    if not (left_side or right_side):
         return False
-    if y < height * 0.18 or y > height * 0.70:
+    if y < height * 0.18 or y > height * 0.74:
         return False
-    if h < height * 0.12:
+    min_height_ratio = 0.07 if left_side else 0.12
+    if h < height * min_height_ratio:
         return False
-    if w < 1 or w > width * 0.24:
+    if w < 1 or w > width * 0.28:
         return False
     return True
+
+
+def _looks_like_clipped_right_side_caption_signal_item(
+    item: Mapping[str, Any],
+    bbox: Sequence[int],
+    image_size: Tuple[int, int],
+) -> bool:
+    if not bbox or len(bbox) < 4:
+        return False
+    class_name = str(item.get("class_name") or item.get("fused_container_type") or "")
+    if class_name not in {"text_free", "free_text", "text_bubble", "caption_or_background_candidate"}:
+        return False
+    x, y, w, h = _coerce_xywh(bbox)
+    width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    if x < width * 0.94 or w > max(3, int(width * 0.004)):
+        return False
+    if y < height * 0.16 or y > height * 0.76:
+        return False
+    return h >= height * 0.10
+
+
+def _side_caption_side_for_bbox(seed_bbox: Sequence[int], image_size: Tuple[int, int]) -> str:
+    x, _y, w, _h = _coerce_xywh(seed_bbox)
+    width = max(1, int(image_size[0]))
+    center = x + max(1, w) / 2.0
+    return "left" if center < width / 2.0 else "right"
 
 
 def _side_caption_search_bbox(seed_bbox: Sequence[int], image_size: Tuple[int, int]) -> List[int]:
     x, y, w, h = _coerce_xywh(seed_bbox)
     width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
-    x0 = max(int(width * 0.72), x - max(72, int(max(1, w) * 0.55)))
-    x1 = min(width - 1, max(x + max(1, w), int(width * 0.97)))
-    y0 = max(int(height * 0.20), y - max(180, int(max(1, h) * 1.35)))
-    y1 = min(int(height * 0.78), y + max(1, h) + max(90, int(max(1, h) * 0.28)))
+    side = _side_caption_side_for_bbox(seed_bbox, image_size)
+    if side == "left":
+        x0 = max(0, x - max(52, int(max(1, w) * 0.20)))
+        x1 = min(int(width * 0.50), x + max(1, w) + max(36, int(max(1, w) * 0.10)))
+        y0 = max(int(height * 0.20), y - max(220, int(max(1, h) * 1.20)))
+        y1 = min(int(height * 0.78), y + max(1, h) + max(92, int(max(1, h) * 0.42)))
+    else:
+        if x >= int(width * 0.94) and w <= max(3, int(width * 0.004)):
+            x0 = int(width * 0.72)
+            x1 = min(width - 1, int(width * 0.985))
+            y0 = max(int(height * 0.20), y + max(60, int(max(1, h) * 0.18)))
+            y1 = min(int(height * 0.78), y + max(1, h) + max(160, int(max(1, h) * 0.55)))
+        else:
+            x0 = max(int(width * 0.72), x - max(72, int(max(1, w) * 0.55)))
+            x1 = min(width - 1, max(x + max(1, w), int(width * 0.97)))
+            y0 = max(int(height * 0.20), y - max(180, int(max(1, h) * 1.35)))
+            y1 = min(int(height * 0.78), y + max(1, h) + max(90, int(max(1, h) * 0.28)))
     if x1 <= x0:
         x1 = min(width, x0 + max(80, int(width * 0.14)))
     if y1 <= y0:
         y1 = min(height, y0 + max(220, int(height * 0.25)))
     return _normalize_xywh([x0, y0, x1 - x0, y1 - y0], image_size)
+
+
+def _side_caption_seed_overlaps_protected(seed_bbox: Sequence[int], containers: Sequence[TextAreaContainer]) -> bool:
+    for container in containers:
+        if container.container_type != CONTAINER_SFX:
+            continue
+        if max(_intersection_ratio_xywh(seed_bbox, container.bbox), _inside_ratio_xywh(seed_bbox, container.bbox)) >= 0.45:
+            return True
+    return False
+
+
+def _trim_side_caption_search_bbox_against_protected(
+    search_bbox: Sequence[int],
+    containers: Sequence[TextAreaContainer],
+    image_size: Tuple[int, int],
+) -> List[int] | None:
+    x, y, w, h = _coerce_xywh(search_bbox)
+    if w <= 0 or h <= 0:
+        return None
+    y0 = y
+    y1 = y + h
+    for container in containers:
+        if container.container_type != CONTAINER_SFX:
+            continue
+        bx, by, bw, bh = _coerce_xywh(container.bbox)
+        if bw <= 0 or bh <= 0:
+            continue
+        overlap_x = max(0, min(x + w, bx + bw) - max(x, bx))
+        if overlap_x <= max(8, int(min(w, bw) * 0.15)):
+            continue
+        bottom = by + bh
+        if by < y1 and bottom > y0:
+            y0 = max(y0, bottom + max(8, int(bh * 0.035)))
+    if y1 - y0 < max(120, int(max(1, image_size[1]) * 0.06)):
+        return None
+    return _normalize_xywh([x, y0, w, y1 - y0], image_size)
 
 
 def _localize_side_caption_bbox(luma_image: Any, search_bbox: Sequence[int], image_size: Tuple[int, int]) -> List[int] | None:
@@ -3257,6 +5691,10 @@ def _fallback_assignment(reason: str) -> Dict[str, Any]:
         "text_area_must_not_mutate": True,
         "text_area_protection_reason": "compatibility_fallback_not_cleanup_authorized",
         "text_area_authorization_source_stage": "compatibility_fallback",
+        "text_area_authorization_basis": "compatibility_fallback_not_cleanup_authorized",
+        "text_area_authorization_explicit": False,
+        "text_area_authorization_field_origin": "compatibility_fallback",
+        "text_area_semantic_authorization_state": AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
         "text_area_ocr_eligible": True,
         "text_area_detection_source": DETECTION_COMPATIBILITY_FALLBACK,
         "text_area_fallback_reason": reason,
@@ -3304,6 +5742,59 @@ def _confidence_tier_from_fused(fused: Mapping[str, Any]) -> str:
     return confidence or "low"
 
 
+def _semantic_role_evidence_from_fused(fused: Mapping[str, Any]) -> Dict[str, Any]:
+    evidence = dict(fused.get("semantic_role_evidence") or {})
+    role_signals = set(_semantic_role_values(evidence, "role_signals"))
+    ogkalu_classes = set(_semantic_role_values(evidence, "ogkalu_class_names"))
+    fused_type = str(fused.get("fused_container_type") or "")
+    reasons = [str(item) for item in fused.get("reason_codes") or [] if str(item)]
+    if fused.get("linked_kitsumed_mask_ids"):
+        role_signals.add("speech_bubble_mask_evidence")
+    if "speech_bubble" in fused_type:
+        role_signals.add("speech_candidate")
+    if fused_type in {"caption_or_background_candidate", "free_text"}:
+        role_signals.add("caption_background_candidate")
+    if fused_type == "sfx_or_decorative_candidate":
+        role_signals.add("sfx_decorative_candidate")
+    for reason in reasons:
+        if "ogkalu_text_free" in reason:
+            ogkalu_classes.add("text_free")
+        if "ogkalu_text_bubble" in reason:
+            ogkalu_classes.add("text_bubble")
+        if "ogkalu_bubble" in reason:
+            ogkalu_classes.add("bubble")
+    evidence["role_signals"] = sorted(role_signals)
+    evidence["ogkalu_class_names"] = sorted(ogkalu_classes)
+    return evidence
+
+
+def _semantic_role_evidence_from_text_area_evidence(evidence: Mapping[str, Any]) -> Dict[str, Any]:
+    class_name = str(evidence.get("class_name") or "")
+    role_signals: List[str] = []
+    cleanup_candidate_states: List[str] = []
+    cleanup_authority_states: List[str] = []
+    if class_name in {"bubble", "text_bubble"}:
+        role_signals.append("text_container_candidate")
+        cleanup_candidate_states.append(AUTH_CLEANUP_TRANSLATE_SPEECH)
+    if class_name == "text_free":
+        role_signals.append("caption_background_candidate")
+        cleanup_candidate_states.append(AUTH_CLEANUP_TRANSLATE_BACKGROUND)
+    if evidence.get("linked_bubble_mask_ids"):
+        role_signals.append("speech_bubble_mask_evidence")
+        cleanup_candidate_states = [state for state in cleanup_candidate_states if state != AUTH_CLEANUP_TRANSLATE_SPEECH]
+        cleanup_authority_states = [AUTH_CLEANUP_TRANSLATE_SPEECH]
+    return {
+        "role_signals": sorted(set(role_signals)),
+        "ogkalu_class_names": [class_name] if class_name else [],
+        "cleanup_authority_states": sorted(set(cleanup_authority_states)),
+        "cleanup_candidate_states": sorted(set(cleanup_candidate_states)),
+        "protected_authority_states": [],
+        "protected_candidate_states": [],
+        "authority_evidence_kind": "typed_text_area_model_evidence",
+        "source": "bubble_detection_text_area_evidence",
+    }
+
+
 def _has_preserve_conflict(conflicts: Sequence[Any], reasons: Sequence[Any]) -> bool:
     text = " ".join(str(item).lower() for item in list(conflicts) + list(reasons))
     return any(token in text for token in ("sfx", "decorative", "preserve"))
@@ -3337,6 +5828,47 @@ def _looks_like_caption_background_bbox(bbox: Sequence[int], image_size: Tuple[i
     # Cover/title/logo art can be detected as text_free, but those tall,
     # page-edge columns are not safe caption/background OCR scopes.
     return top_band and narrow_text_column and caption_height and x < width * 0.96
+
+
+def _looks_like_side_narration_background_bbox(
+    *,
+    fused_type: str,
+    reasons: Sequence[Any],
+    bbox: Sequence[Any],
+    visual: Mapping[str, Any],
+    image_size: Tuple[int, int],
+    semantic_role_evidence: Mapping[str, Any],
+) -> bool:
+    if _is_clipped_or_degenerate_bbox(bbox, image_size):
+        return False
+    reason_text = " ".join(str(item).lower() for item in reasons)
+    if any(token in reason_text for token in ("sfx", "decorative", "preserve")):
+        return False
+    if fused_type not in {"ambiguous", "caption_or_background_candidate", "free_text"}:
+        return False
+    role_classes = set(_semantic_role_values(semantic_role_evidence, "ogkalu_class_names"))
+    if not ({"bubble", "text_bubble", "text_free"} & role_classes or "ogkalu_bubble" in reason_text or "ogkalu_text_bubble" in reason_text):
+        return False
+    bright = _optional_float(visual.get("bright_ratio"))
+    dark = _optional_float(visual.get("dark_ratio"))
+    dark_unlinked_context = (
+        fused_type == "ambiguous"
+        and any(token in reason_text for token in ("ogkalu_bubble_without_kitsumed_mask", "ogkalu_text_bubble_without_kitsumed_mask"))
+        and (dark is not None and dark >= 0.16 or bright is not None and bright < 0.62)
+    )
+    if dark_unlinked_context:
+        return False
+    x, y, w, h = _coerce_xywh(bbox)
+    width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    if w <= 0 or h <= 0:
+        return False
+    left_side = x <= width * 0.42 and (x + w) <= width * 0.48
+    right_side = x >= width * 0.56 and x + w <= width * 0.98
+    vertical_context = y >= height * 0.28 and h >= height * 0.07
+    text_block_size = w >= width * 0.08 and h >= height * 0.06
+    not_edge_stroke = not (w <= width * 0.06 and h >= w * 2.0)
+    area_ratio = float(visual.get("area_ratio") or 0.0)
+    return bool((left_side or right_side) and vertical_context and text_block_size and not_edge_stroke and area_ratio <= 0.08)
 
 
 def _load_luma_image(image_path: str | Path) -> Any:
@@ -3407,6 +5939,347 @@ def _looks_like_pre_ocr_sfx_or_decorative(
     if area_ratio < 0.003:
         return True
     return False
+
+
+def _looks_like_dark_unlinked_ogkalu_sfx_or_decorative(
+    *,
+    fused_type: str,
+    reasons: Sequence[Any],
+    bbox: Sequence[Any],
+    visual: Mapping[str, Any],
+    image_size: Tuple[int, int],
+    semantic_role_evidence: Mapping[str, Any],
+) -> bool:
+    if _is_clipped_or_degenerate_bbox(bbox, image_size):
+        return False
+    if fused_type != "ambiguous":
+        return False
+    reason_text = " ".join(str(item).lower() for item in reasons)
+    if not any(token in reason_text for token in ("ogkalu_bubble_without_kitsumed_mask", "ogkalu_text_bubble_without_kitsumed_mask")):
+        return False
+    role_signals = set(_semantic_role_values(semantic_role_evidence, "role_signals"))
+    if "speech_bubble_mask_evidence" in role_signals:
+        return False
+    role_classes = set(_semantic_role_values(semantic_role_evidence, "ogkalu_class_names"))
+    if not (role_classes & {"bubble", "text_bubble"}):
+        return False
+    x, y, w, h = _coerce_xywh(bbox)
+    width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    left_side = x <= width * 0.42 and (x + w) <= width * 0.48
+    right_side = x >= width * 0.56 and x + w <= width * 0.98
+    vertical_context = y >= height * 0.28 and h >= height * 0.07
+    text_block_size = w >= width * 0.08 and h >= height * 0.06
+    not_edge_stroke = not (w <= width * 0.06 and h >= w * 2.0)
+    if (left_side or right_side) and vertical_context and text_block_size and not_edge_stroke:
+        return False
+    bright = _optional_float(visual.get("bright_ratio"))
+    dark = _optional_float(visual.get("dark_ratio"))
+    area_ratio = float(visual.get("area_ratio") or 0.0)
+    if area_ratio <= 0.0 or area_ratio > 0.045:
+        return False
+    dark_art_context = dark is not None and dark >= 0.16
+    non_bright_context = bright is not None and bright < 0.62
+    return bool(dark_art_context or non_bright_context)
+
+
+def _looks_like_bright_unlinked_text_free_sfx_or_decorative(
+    *,
+    fused_type: str,
+    reasons: Sequence[Any],
+    bbox: Sequence[Any],
+    visual: Mapping[str, Any],
+    image_size: Tuple[int, int],
+    semantic_role_evidence: Mapping[str, Any],
+) -> bool:
+    if _is_clipped_or_degenerate_bbox(bbox, image_size):
+        return False
+    if fused_type != "free_text":
+        return False
+    reason_text = " ".join(str(item).lower() for item in reasons)
+    if not any(token in reason_text for token in ("ogkalu_text_free_without_kitsumed_mask", "text_free")):
+        return False
+    role_classes = set(_semantic_role_values(semantic_role_evidence, "ogkalu_class_names"))
+    if role_classes and role_classes != {"text_free"}:
+        return False
+    x, y, w, h = _coerce_xywh(bbox)
+    width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    if w <= 0 or h <= 0:
+        return False
+    # Bright lower-panel unlinked free-text boxes are often stylized SFX/action
+    # marks on artwork, not side narration. Keep this upstream and typed so
+    # CleanupMask remains a strict consumer.
+    lower_action_zone = y >= height * 0.45
+    side_or_body_text_scale = w >= width * 0.10 and h >= height * 0.08
+    not_page_edge_caption = x + w < width - max(2, int(width * 0.002))
+    bright = _optional_float(visual.get("bright_ratio"))
+    dark = _optional_float(visual.get("dark_ratio"))
+    bright_art_context = bright is not None and bright >= 0.68 and dark is not None and dark <= 0.12
+    return bool(lower_action_zone and side_or_body_text_scale and not_page_edge_caption and bright_art_context)
+
+
+def _text_free_caption_candidate_is_protected_sfx(
+    *,
+    fused_type: str,
+    reasons: Sequence[Any],
+    bbox: Sequence[Any],
+    visual: Mapping[str, Any],
+    image_size: Tuple[int, int],
+    luma_image: Any = None,
+) -> bool:
+    if fused_type != "free_text":
+        return False
+    if not _looks_like_caption_background_bbox(bbox, image_size):
+        return False
+    x, y, w, h = _coerce_xywh(bbox)
+    width, _height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    if w <= 0 or h <= 0:
+        return False
+    reason_text = " ".join(str(item).lower() for item in reasons)
+    if any(token in reason_text for token in ("sfx", "decorative", "preserve")):
+        return True
+    edge_attached = x + w >= width - max(2, int(width * 0.002))
+    very_narrow = w <= width * 0.075
+    tall_column = h >= w * 2.0
+    dark = _optional_float(visual.get("dark_ratio"))
+    bright = _optional_float(visual.get("bright_ratio"))
+    mixed_art_context = dark is not None and dark >= 0.20 and bright is not None and bright < 0.55
+    return bool(edge_attached and very_narrow and tall_column and mixed_art_context)
+
+
+def _text_free_caption_candidate_has_background_authority(
+    *,
+    fused_type: str,
+    reasons: Sequence[Any],
+    bbox: Sequence[Any],
+    visual: Mapping[str, Any],
+    image_size: Tuple[int, int],
+    luma_image: Any = None,
+) -> bool:
+    if fused_type not in {"free_text", "caption_or_background_candidate"}:
+        return False
+    if not _looks_like_caption_background_bbox(bbox, image_size):
+        return False
+    if _text_free_caption_candidate_is_protected_sfx(
+        fused_type=fused_type,
+        reasons=reasons,
+        bbox=bbox,
+        visual=visual,
+        image_size=image_size,
+        luma_image=luma_image,
+    ):
+        return False
+    x, y, w, h = _coerce_xywh(bbox)
+    width, _height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    if w <= 0 or h <= 0:
+        return False
+    # The upstream model has emitted a top-band text_free/caption box, but the
+    # final authority still needs a coherent localized text unit.
+    wide_enough_for_caption = w >= width * 0.070
+    not_page_edge_art = x + w < width - max(2, int(width * 0.002))
+    typed_text_free_model = "ogkalu_text_free" in " ".join(str(item).lower() for item in reasons)
+    if (
+        luma_image is not None
+        and typed_text_free_model
+        and not_page_edge_art
+        and y <= int(image_size[1]) * 0.24
+        and width * 0.030 <= w <= width * 0.095
+        and int(image_size[1]) * 0.035 <= h <= int(image_size[1]) * 0.095
+        and _has_compact_top_title_text(luma_image, bbox, image_size)
+    ):
+        return True
+    compact_top_text_free = (
+        typed_text_free_model
+        and not_page_edge_art
+        and y <= int(image_size[1]) * 0.08
+        and width * 0.030 <= w <= width * 0.095
+        and int(image_size[1]) * 0.030 <= h <= int(image_size[1]) * 0.075
+    )
+    if compact_top_text_free:
+        dark = _optional_float(visual.get("dark_ratio"))
+        bright = _optional_float(visual.get("bright_ratio"))
+        textured_text_column = dark is not None and dark >= 0.32 and bright is not None and bright >= 0.24
+        if textured_text_column:
+            return True
+    if luma_image is None:
+        dark = _optional_float(visual.get("dark_ratio"))
+        bright = _optional_float(visual.get("bright_ratio"))
+        background_contrast = dark is not None and dark >= 0.45 and bright is not None and bright <= 0.35
+        return bool(wide_enough_for_caption and not_page_edge_art and typed_text_free_model and background_contrast)
+    return bool(
+        wide_enough_for_caption
+        and not_page_edge_art
+        and _has_coherent_caption_text_column(luma_image, bbox, image_size)
+        and _top_band_right_column_has_background_context(luma_image, bbox, image_size)
+    )
+
+
+def _has_coherent_caption_text_column(
+    luma_image: Any,
+    bbox: Sequence[Any],
+    image_size: Tuple[int, int],
+) -> bool:
+    if luma_image is None:
+        return False
+    return bool(_top_band_character_column_bboxes(luma_image, bbox, image_size))
+
+
+def _expand_compact_top_text_free_background_bbox(
+    *,
+    luma_image: Any,
+    bbox: Sequence[Any],
+    reasons: Sequence[Any],
+    visual: Mapping[str, Any],
+    image_size: Tuple[int, int],
+) -> List[int]:
+    x, y, w, h = _coerce_xywh(bbox)
+    width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    typed_text_free_model = "ogkalu_text_free" in " ".join(str(item).lower() for item in reasons)
+    dark = _optional_float(visual.get("dark_ratio"))
+    bright = _optional_float(visual.get("bright_ratio"))
+    if (
+        luma_image is None
+        or not typed_text_free_model
+        or w <= 0
+        or h <= 0
+        or y > height * 0.08
+        or not (width * 0.030 <= w <= width * 0.095)
+        or not (height * 0.030 <= h <= height * 0.075)
+        or dark is None
+        or dark < 0.32
+        or bright is None
+        or bright < 0.24
+    ):
+        return _normalize_xywh(bbox, image_size)
+    search_pad_left = max(20, int(width * 0.030))
+    search_pad_right = max(150, int(width * 0.105))
+    search_pad_y = max(48, int(height * 0.025))
+    sx0 = max(0, x - search_pad_left)
+    sx1 = min(width, x + w + search_pad_right)
+    search = [
+        sx0,
+        max(0, y - search_pad_y),
+        sx1 - sx0,
+        min(height, y + h + search_pad_y) - max(0, y - search_pad_y),
+    ]
+    columns = _top_band_character_column_bboxes(luma_image, search, image_size)
+    selected: List[List[int]] = []
+    for column in columns:
+        cx, cy, cw, ch = _coerce_xywh(column)
+        if cw <= 0 or ch <= 0:
+            continue
+        vertical_overlap = _intersection_ratio_xywh([cx, cy, cw, ch], [0, y - search_pad_y, width, h + 2 * search_pad_y])
+        if vertical_overlap <= 0:
+            continue
+        if cx + cw < x - max(12, int(width * 0.012)) or cx > x + w + search_pad_right:
+            continue
+        selected.append([cx, cy, cw, ch])
+    if not selected:
+        return _normalize_xywh(bbox, image_size)
+    boxes = selected + [_normalize_xywh(bbox, image_size)]
+    x0 = min(item[0] for item in boxes)
+    y0 = min(item[1] for item in boxes)
+    x1 = max(item[0] + item[2] for item in boxes)
+    y1 = max(item[1] + item[3] for item in boxes)
+    return _normalize_xywh([x0, y0, x1 - x0, y1 - y0], image_size)
+
+
+def _has_compact_top_title_text(
+    luma_image: Any,
+    bbox: Sequence[Any],
+    image_size: Tuple[int, int],
+) -> bool:
+    if luma_image is None or np is None or cv2 is None:
+        return False
+    x, y, w, h = _coerce_xywh(bbox)
+    width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    if w <= 0 or h <= 0:
+        return False
+    if y > height * 0.24 or w > width * 0.095 or h > height * 0.095:
+        return False
+    try:
+        crop = luma_image.crop((max(0, x), max(0, y), min(width, x + w), min(height, y + h))).convert("L")
+        arr = np.asarray(crop)
+        mask = (arr <= 104).astype("uint8")
+        _count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, 8)
+    except Exception:
+        return False
+    char_like = 0
+    large_marks = 0
+    for label in range(1, int(stats.shape[0])):
+        cx, cy, cw, ch, area = [int(value) for value in stats[label][:5]]
+        del cx, cy
+        if area < 10:
+            continue
+        if area > 2200 or cw > max(56, w * 0.72) or ch > max(70, h * 0.92):
+            large_marks += 1
+            continue
+        density = area / float(max(1, cw * ch))
+        if 0.08 <= density <= 0.82 and 2 <= cw <= 48 and 4 <= ch <= 64:
+            char_like += 1
+    return char_like >= 4 and large_marks == 0
+
+
+def _top_band_right_column_has_background_context(
+    luma_image: Any,
+    bbox: Sequence[Any],
+    image_size: Tuple[int, int],
+) -> bool:
+    _x, _y, _w, h = _coerce_xywh(bbox)
+    _width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    if h < height * 0.16:
+        return False
+    stats = _container_visual_stats(luma_image, bbox, image_size)
+    bright = _optional_float(stats.get("bright_ratio"))
+    dark = _optional_float(stats.get("dark_ratio"))
+    if bright is None or dark is None:
+        return False
+    # Right-edge top-band action marks often form coherent-looking columns on
+    # bright panel backgrounds. Require darker caption/narration context before
+    # turning those right-band columns into cleanup authority.
+    return bool(bright <= 0.49 or dark >= 0.36)
+
+
+def _looks_like_standalone_ogkalu_speech_bubble(
+    *,
+    fused_type: str,
+    reasons: Sequence[Any],
+    bbox: Sequence[Any],
+    visual: Mapping[str, Any],
+    image_size: Tuple[int, int],
+    semantic_role_evidence: Mapping[str, Any],
+    clipped: bool,
+) -> bool:
+    if clipped:
+        return False
+    if fused_type not in {"ambiguous", "speech_bubble"}:
+        return False
+    role_classes = set(_semantic_role_values(semantic_role_evidence, "ogkalu_class_names"))
+    role_signals = set(_semantic_role_values(semantic_role_evidence, "role_signals"))
+    if "bubble" not in role_classes:
+        return False
+    if "speech_bubble_mask_evidence" in role_signals:
+        return False
+    reason_text = " ".join(str(item).lower() for item in reasons)
+    if any(token in reason_text for token in ("sfx", "decorative", "preserve", "text_free")):
+        return False
+    x, y, w, h = _coerce_xywh(bbox)
+    width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    if w <= 0 or h <= 0:
+        return False
+    if w < width * 0.08 or h < height * 0.06:
+        return False
+    if w > width * 0.36 or h > height * 0.30:
+        return False
+    area_ratio = float(visual.get("area_ratio") or 0.0)
+    dark = _optional_float(visual.get("dark_ratio"))
+    bright = _optional_float(visual.get("bright_ratio"))
+    if area_ratio > 0.08:
+        return False
+    if dark is not None and dark >= 0.15:
+        return False
+    if bright is not None and bright < 0.62:
+        return False
+    return True
 
 
 def _safe_unknown_ocr_fallback(

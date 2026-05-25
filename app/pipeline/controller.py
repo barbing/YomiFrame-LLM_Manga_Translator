@@ -122,10 +122,17 @@ def _cleanup_mask_region_records_with_protection(
         if container:
             for src, dst in (
                 ("cleanup_authorization", "cleanup_authorization"),
+                ("semantic_unit_id", "semantic_unit_id"),
+                ("semantic_kind", "semantic_kind"),
                 ("must_not_mutate", "must_not_mutate"),
                 ("protection_reason", "protection_reason"),
                 ("pre_ocr_authority", "pre_ocr_authority"),
                 ("source_stage", "source_stage"),
+                ("authorization_source_stage", "authorization_source_stage"),
+                ("authorization_basis", "authorization_basis"),
+                ("authorization_explicit", "authorization_explicit"),
+                ("authorization_field_origin", "authorization_field_origin"),
+                ("semantic_authorization_state", "semantic_authorization_state"),
                 ("parent_source_evidence", "parent_source_evidence"),
             ):
                 if src in container and dst not in record:
@@ -152,18 +159,37 @@ def _cleanup_mask_region_records_with_protection(
         protection_reason = str(
             source.get("protection_reason")
             or source.get("text_area_protection_reason")
-            or source.get("classification_reason")
-            or reason_hint
             or ""
         )
-        marker = " ".join((route_intent, container_type, cleanup_mode, cleanup_authorization, protection_reason, reason_hint)).lower()
-        if any(token in marker for token in ("preserve_sfx_decorative", "sfx", "decorative", "art", "non_text", "preserve")):
-            cleanup_mode = cleanup_mode or "preserve"
-            must_not_mutate = True
+        authorization_source_stage = (
+            source.get("authorization_source_stage")
+            or source.get("text_area_authorization_source_stage")
+            or source.get("source_stage")
+            or reason_hint
+            or "controller_cleanup_mask_authorization_handoff"
+        )
+        authorization_explicit_value = source.get("authorization_explicit")
+        if authorization_explicit_value is None:
+            authorization_explicit_value = source.get("text_area_authorization_explicit")
+        authorization_explicit = bool(authorization_explicit_value)
+        authorization_field_origin = str(
+            source.get("authorization_field_origin")
+            or source.get("text_area_authorization_field_origin")
+            or ""
+        )
+        if cleanup_authorization and authorization_explicit and not authorization_field_origin:
+            authorization_field_origin = "fresh_text_area_plan"
+        field_origins = dict(source.get("field_origins") or {})
+        if cleanup_authorization:
+            field_origins.setdefault("cleanup_authorization", authorization_field_origin or "unlabeled_source")
+        if protection_reason:
+            field_origins.setdefault("protection_reason", authorization_field_origin or "unlabeled_source")
         records.append(
             {
                 "region_id": record_id,
                 "container_id": source.get("container_id") or source.get("text_area_container_id") or record_id,
+                "semantic_unit_id": source.get("semantic_unit_id") or source.get("text_area_semantic_unit_id") or source.get("container_id") or source.get("text_area_container_id") or record_id,
+                "semantic_kind": source.get("semantic_kind") or source.get("text_area_semantic_kind") or source.get("semantic_class") or container_type,
                 "bbox": bbox,
                 "container_type": container_type,
                 "semantic_class": source.get("semantic_class") or container_type,
@@ -174,10 +200,15 @@ def _cleanup_mask_region_records_with_protection(
                 "pre_ocr_authority": bool(
                     source.get("pre_ocr_authority", source.get("text_area_pre_ocr_authority", reason_hint == "text_area_plan_pre_ocr"))
                 ),
-                "source_stage": source.get("source_stage")
-                or source.get("text_area_authorization_source_stage")
-                or reason_hint
-                or "controller_cleanup_mask_authorization_handoff",
+                "source_stage": authorization_source_stage,
+                "authorization_source_stage": authorization_source_stage,
+                "authorization_basis": source.get("authorization_basis") or source.get("text_area_authorization_basis") or "",
+                "authorization_explicit": authorization_explicit,
+                "authorization_field_origin": authorization_field_origin,
+                "semantic_authorization_state": source.get("semantic_authorization_state")
+                or source.get("text_area_semantic_authorization_state")
+                or cleanup_authorization,
+                "field_origins": field_origins,
                 "cleanup_mode": cleanup_mode,
                 "classification_reason": source.get("classification_reason") or reason_hint,
                 "protection_source": reason_hint or "cleanup_mask_region_records_with_protection",

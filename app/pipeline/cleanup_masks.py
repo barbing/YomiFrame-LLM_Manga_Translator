@@ -74,6 +74,8 @@ AUTH_REVIEW_COMPONENT_STATES = {
     "outside_cleanup_scope",
 }
 AUTH_AMBIGUOUS_COMPONENT_STATE = "ambiguous_component_owner"
+PROJECTION_READY_STATE = "projection_ready"
+MASK_READY_STATE = "mask_ready"
 
 
 def _cleanup_perf_contract_diag_enabled() -> bool:
@@ -702,6 +704,13 @@ def build_cleanup_masks(
                 clean_mask_failure_reason=effective.audit.get("clean_mask_failure_reason", ""),
                 cleanup_authorization=effective.audit.get("cleanup_authorization", ""),
                 authorization_source_stage=effective.audit.get("authorization_source_stage", ""),
+                semantic_authorization_state=effective.audit.get("semantic_authorization_state", ""),
+                projection_quality_state=effective.audit.get("projection_quality_state", ""),
+                projection_quality_reasons=effective.audit.get("projection_quality_reasons", []),
+                mask_readiness_state=effective.audit.get("mask_readiness_state", ""),
+                mask_readiness_failure_reason=effective.audit.get("mask_readiness_failure_reason", ""),
+                semantic_authority_owner=effective.audit.get("semantic_authority_owner", ""),
+                projection_owner=effective.audit.get("projection_owner", ""),
                 foreground_outside_allowed_pixels=effective.audit.get("foreground_outside_allowed_pixels"),
                 upstream_container_mismatch_pixels=effective.audit.get("upstream_container_mismatch_pixels"),
                 upstream_container_mismatch_ratio=effective.audit.get("upstream_container_mismatch_ratio"),
@@ -741,14 +750,13 @@ def build_cleanup_masks(
         except Exception as exc:
             errors.append(f"{type(exc).__name__}: {exc}")
 
-    unbound_contract_mask = _build_unbound_semantic_cleanup_contract_mask(
+    unbound_contract_record = _build_unbound_semantic_cleanup_contract_error_record(
         page_id=page_id,
         component_projection=component_projection,
         existing_masks=masks,
     )
-    if unbound_contract_mask is not None:
-        masks.append(unbound_contract_mask)
-        masks_by_job_id.setdefault(str(unbound_contract_mask.cleanup_job_id), []).append(unbound_contract_mask)
+    if unbound_contract_record is not None:
+        rejected_records.append(unbound_contract_record)
         errors.append("cleanup_job_binding_contract_error")
 
     for record in rejected_records:
@@ -1186,8 +1194,15 @@ def _build_component_projected_text_mask(
         mismatch_reason = "upstream_container_mismatch" if foreground_outside_allowed_pixels > 0 else ""
         if coverage_reason or owned_ratio_reason or unsafe_reason or mismatch_reason or ambiguous_ids or unowned_ids:
             status = "cleanup_mask_partial_owned_components"
-            failure_reason = mismatch_reason or coverage_reason or owned_ratio_reason or unsafe_reason or "cleanup_mask_partial_owned_components"
-            rejected = bool(mismatch_reason or coverage_reason or owned_ratio_reason or unsafe_reason)
+            failure_reason = (
+                mismatch_reason
+                or coverage_reason
+                or owned_ratio_reason
+                or unsafe_reason
+                or ("effective_mask_not_ready" if ambiguous_ids else "")
+                or "cleanup_mask_partial_owned_components"
+            )
+            rejected = bool(mismatch_reason or coverage_reason or owned_ratio_reason or unsafe_reason or ambiguous_ids)
 
     seed_pixels = int(np.count_nonzero(seed_foreground > 0)) if seed_foreground is not None else 0
     erase = None
@@ -1265,6 +1280,13 @@ def _build_component_projected_text_mask(
         "dense_contract_override_detected": False,
         "cleanup_authorization": projection.get("cleanup_authorization", ""),
         "authorization_source_stage": projection.get("authorization_source_stage", ""),
+        "semantic_authorization_state": projection.get("semantic_authorization_state", ""),
+        "projection_quality_state": projection.get("projection_quality_state", ""),
+        "projection_quality_reasons": projection.get("projection_quality_reasons", []),
+        "mask_readiness_state": projection.get("mask_readiness_state", ""),
+        "mask_readiness_failure_reason": projection.get("mask_readiness_failure_reason", ""),
+        "semantic_authority_owner": projection.get("semantic_authority_owner", ""),
+        "projection_owner": projection.get("projection_owner", ""),
         "foreground_outside_allowed_pixels": foreground_outside_allowed_pixels,
         "upstream_container_mismatch_pixels": foreground_outside_allowed_pixels,
         "upstream_container_mismatch_ratio": upstream_container_mismatch_ratio,
@@ -1638,7 +1660,15 @@ def _component_projection_from_authorization_map(
             or record.get("authorization_state")
             or "review_unknown_not_cleanup"
         )
+        projection_quality_state = str(record.get("projection_quality_state") or "")
+        mask_readiness_state = str(record.get("mask_readiness_state") or "")
         ownership_state = _authorization_state_to_ownership_state(authorization_state)
+        if authorization_state in AUTH_CLEANUP_COMPONENT_STATES and (
+            projection_quality_state != PROJECTION_READY_STATE
+            or mask_readiness_state != MASK_READY_STATE
+            or str(record.get("job_binding_state") or "") != "bound_unique"
+        ):
+            ownership_state = "projection_not_ready"
         cleanup_authorizations = []
         if authorization_state in AUTH_CLEANUP_COMPONENT_STATES:
             cleanup_authorizations.append(authorization_state)
@@ -1653,12 +1683,26 @@ def _component_projection_from_authorization_map(
                 "job_binding_state": str(record.get("job_binding_state") or ""),
                 "job_binding_failure_reason": str(record.get("job_binding_failure_reason") or ""),
                 "final_mask_authorization_state": authorization_state,
+                "projection_quality_state": projection_quality_state,
+                "projection_quality_reasons": [str(item) for item in record.get("projection_quality_reasons") or [] if str(item)],
+                "mask_readiness_state": mask_readiness_state,
+                "mask_readiness_failure_reason": str(record.get("mask_readiness_failure_reason") or ""),
+                "semantic_unit_ids": [str(item) for item in record.get("semantic_unit_ids") or [] if str(item)],
+                "semantic_unit_states": [str(item) for item in record.get("semantic_unit_states") or [] if str(item)],
+                "semantic_kind": str(record.get("semantic_kind") or ""),
+                "semantic_kinds": [str(item) for item in record.get("semantic_kinds") or [] if str(item)],
+                "source_evidence_ids": [str(item) for item in record.get("source_evidence_ids") or [] if str(item)],
+                "semantic_authority_owner": str(record.get("semantic_authority_owner") or ""),
+                "projection_owner": str(record.get("projection_owner") or ""),
                 "owner_cleanup_job_id": str(record.get("owner_cleanup_job_id") or ""),
                 "owner_region_ids": [str(item) for item in record.get("owning_region_ids") or [] if str(item)],
                 "scope_cleanup_job_ids": [str(item) for item in record.get("scope_cleanup_job_ids") or [] if str(item)],
                 "candidate_cleanup_job_ids": [str(item) for item in record.get("candidate_cleanup_job_ids") or [] if str(item)],
                 "cleanup_authorizations": cleanup_authorizations,
                 "authorization_source_stages": [str(record.get("source_stage") or "")] if record.get("source_stage") else [],
+                "explicit_cleanup_authority": bool(record.get("explicit_cleanup_authority")),
+                "explicit_protected_authority": bool(record.get("explicit_protected_authority")),
+                "explicit_authority_source": str(record.get("explicit_authority_source") or ""),
                 "protected_region_ids": [str(item) for item in record.get("protection_region_ids") or [] if str(item)],
                 "protected_reason": ",".join(str(item) for item in record.get("reason_codes") or [] if str(item)),
                 "bbox": bbox,
@@ -1940,40 +1984,12 @@ def _region_cleanup_authorization(region: Mapping[str, Any] | None) -> str:
     auth = str(
         region.get("cleanup_authorization")
         or region.get("text_area_cleanup_authorization")
+        or region.get("semantic_authorization_state")
+        or region.get("text_area_semantic_authorization_state")
         or ""
     )
-    if auth:
+    if auth in AUTH_CLEANUP_COMPONENT_STATES | AUTH_PROTECTED_COMPONENT_STATES | AUTH_REVIEW_COMPONENT_STATES | {AUTH_AMBIGUOUS_COMPONENT_STATE}:
         return auth
-    marker = " ".join(
-        str(region.get(key) or "")
-        for key in (
-            "region_id",
-            "container_id",
-            "text_area_container_id",
-            "route_intent",
-            "text_area_route_intent",
-            "container_type",
-            "text_area_container_type",
-            "semantic_class",
-            "cleanup_mode",
-            "fallback_reason",
-            "text_area_fallback_reason",
-            "classification_reason",
-            "protection_source",
-        )
-    ).lower()
-    if "det_side_caption" in marker or "deterministic_vertical_side_caption_search" in marker:
-        return "review_unknown_not_cleanup"
-    if any(token in marker for token in ("sfx", "decorative", "preserve_sfx")):
-        return "protect_sfx_decorative"
-    if any(token in marker for token in ("art", "non_text", "non-text")):
-        return "protect_art_or_non_text"
-    if "translate_speech" in marker:
-        return "cleanup_translate_speech"
-    if "translate_caption" in marker or "caption_background" in marker:
-        return "cleanup_translate_background"
-    if "review" in marker or "fallback" in marker:
-        return "review_unknown_not_cleanup"
     return ""
 
 
@@ -2172,7 +2188,10 @@ def _component_projection_for_job(
     owned = [
         item
         for item in component_projection.components
-        if item.get("ownership_state") == "cleanup_owned" and _component_authorized_for_job(item, job_id)
+        if item.get("ownership_state") == "cleanup_owned"
+        and str(item.get("projection_quality_state") or "") == PROJECTION_READY_STATE
+        and str(item.get("mask_readiness_state") or "") == MASK_READY_STATE
+        and _component_authorized_for_job(item, job_id)
     ]
     protected = [
         item
@@ -2183,6 +2202,7 @@ def _component_projection_for_job(
         item
         for item in component_projection.components
         if item.get("ownership_state") in {"ambiguous_multi_owner", AUTH_AMBIGUOUS_COMPONENT_STATE}
+        or (item.get("ownership_state") == "projection_not_ready" and _component_authorized_for_job(item, job_id))
     ]
     unowned = [
         item
@@ -2205,6 +2225,11 @@ def _component_projection_for_job(
             if str(stage)
         }
     )
+    relevant = owned + [
+        item
+        for item in ambiguous
+        if item.get("ownership_state") == "projection_not_ready" and _component_authorized_for_job(item, job_id)
+    ]
     protected_pixel_count = sum(_component_pixels_in_allowed(item, allowed) for item in protected)
     ambiguous_pixel_count = sum(_component_pixels_in_allowed(item, allowed) for item in ambiguous)
     return {
@@ -2218,15 +2243,41 @@ def _component_projection_for_job(
         "unresolved_reasons": _component_projection_unresolved_reasons(protected, ambiguous, unowned),
         "cleanup_authorization": ",".join(cleanup_authorizations),
         "authorization_source_stage": ",".join(source_stages),
+        "semantic_authorization_state": ",".join(
+            sorted({str(item.get("semantic_authorization_state") or "") for item in relevant if str(item.get("semantic_authorization_state") or "")})
+        ),
+        "projection_quality_state": ",".join(
+            sorted({str(item.get("projection_quality_state") or "") for item in relevant if str(item.get("projection_quality_state") or "")})
+        ),
+        "projection_quality_reasons": sorted(
+            {
+                str(reason)
+                for item in relevant
+                for reason in (item.get("projection_quality_reasons") or [])
+                if str(reason)
+            }
+        ),
+        "mask_readiness_state": ",".join(
+            sorted({str(item.get("mask_readiness_state") or "") for item in relevant if str(item.get("mask_readiness_state") or "")})
+        ),
+        "mask_readiness_failure_reason": ",".join(
+            sorted({str(item.get("mask_readiness_failure_reason") or "") for item in relevant if str(item.get("mask_readiness_failure_reason") or "")})
+        ),
+        "semantic_authority_owner": ",".join(
+            sorted({str(item.get("semantic_authority_owner") or "") for item in relevant if str(item.get("semantic_authority_owner") or "")})
+        ),
+        "projection_owner": ",".join(
+            sorted({str(item.get("projection_owner") or "") for item in relevant if str(item.get("projection_owner") or "")})
+        ),
     }
 
 
-def _build_unbound_semantic_cleanup_contract_mask(
+def _build_unbound_semantic_cleanup_contract_error_record(
     *,
     page_id: str,
     component_projection: _ComponentOwnershipProjection,
     existing_masks: Sequence[CleanupMask],
-) -> CleanupMask | None:
+) -> dict[str, Any] | None:
     if component_projection.labels is None:
         return None
     covered: set[str] = set()
@@ -2235,20 +2286,20 @@ def _build_unbound_semantic_cleanup_contract_mask(
     unbound = [
         item
         for item in component_projection.components
-        if item.get("ownership_state") == "cleanup_owned"
+        if str(item.get("semantic_authorization_state") or item.get("authorization_state") or "") in AUTH_CLEANUP_COMPONENT_STATES
         and str(item.get("component_id") or "") not in covered
         and str(item.get("job_binding_state") or "") in {"missing_cleanup_job"}
     ]
     if not unbound:
         return None
     component_ids = [str(item.get("component_id") or "") for item in unbound if str(item.get("component_id") or "")]
-    foreground = _component_mask_from_ids(component_projection, component_ids)
-    if foreground is None or int(np.count_nonzero(foreground > 0)) <= 0:
+    if not component_ids:
         return None
-    erase = foreground.copy()
-    foreground_pixels = int(np.count_nonzero(foreground > 0))
-    erase_pixels = int(np.count_nonzero(erase > 0))
-    bbox = _mask_bbox(foreground)
+    component_mask = _component_mask_from_ids(component_projection, component_ids)
+    if component_mask is None or int(np.count_nonzero(component_mask > 0)) <= 0:
+        return None
+    component_pixels = int(np.count_nonzero(component_mask > 0))
+    bbox = _mask_bbox(component_mask)
     cleanup_job_id = f"component_authorization_binding_contract_error_{_safe_id(page_id)}"
     source_stages = sorted(
         {
@@ -2258,124 +2309,53 @@ def _build_unbound_semantic_cleanup_contract_mask(
             if str(stage)
         }
     )
-    return CleanupMask(
-        cleanup_mask_id=f"cmask_{_safe_id(page_id)}_component_authorization_binding_contract_error",
-        cleanup_job_id=cleanup_job_id,
-        foreground_mask_source_id=None,
-        foreground_mask_source_ids=[],
-        consumed_source_glyph_mask_ids=[],
-        missing_source_glyph_mask_ids=[],
-        foreground_mask_bbox=bbox,
-        foreground_mask_pixels=foreground_pixels,
-        erase_mask_bbox=bbox,
-        erase_mask_pixels=erase_pixels,
-        allowed_area=bbox,
-        growth_ratio=1.0,
-        mask_source="cleanup_mask_from_text_foreground_segmentation",
-        mask_method="text_area_component_authorization_map_unbound_contract_error",
-        rejection_reason="cleanup_job_binding_contract_error",
-        mask_contract_exception_reason="cleanup_job_binding_contract_error",
-        artifact_risk="",
-        visual_scope="component_authorization_binding_contract_error",
-        protected=False,
-        protection_reason="",
-        effective_mask_status="cleanup_mask_ready_with_binding_contract_error",
-        effective_mask_failure_reason="cleanup_job_binding_contract_error",
-        seed_foreground_pixels=0,
-        completed_foreground_pixels=foreground_pixels,
-        component_count_before=len(component_projection.components),
-        component_count_after=len(component_ids),
-        largest_component_pixels_before=_largest_component_pixels(component_projection.components),
-        largest_component_pixels_after=_largest_component_pixels(unbound),
-        text_block_coverage_estimate=1.0,
-        bbox_fill_ratio_before=0.0,
-        bbox_fill_ratio_after=_mask_fill_ratio(foreground),
-        analysis_scope_bbox=bbox,
-        executable_erase_bbox=bbox,
-        mask_completion_method="text_area_component_authorization_map_unbound_contract_error",
-        polarity_mode="segmentation",
-        source_seed_mask_ids=[],
-        recovered_component_count=len(component_ids),
-        rejected_component_count=0,
-        rejected_component_reasons=[],
-        segmentation_mask_status="segmentation_mask_ready",
-        segmentation_mask_failure_reason="",
-        segmentation_provider="",
-        segmentation_mask_ref="",
-        segmentation_text_pixels=None,
-        segmentation_component_count=len(component_projection.components),
-        segmentation_binding_method="text_area_component_authorization_map_projection",
-        segmentation_block_associations=[],
-        ownership_binding_status="cleanup_job_binding_contract_error",
-        ownership_binding_method="text_area_component_authorization_map",
-        cleanup_owned_unit_bbox=bbox,
-        cleanup_owned_unit_mask_ref="",
-        protected_mask_ref="",
-        protected_overlap_pixels=0,
-        segmentation_pixels_before_binding=foreground_pixels,
-        segmentation_pixels_after_owner_clip=foreground_pixels,
-        segmentation_pixels_after_protection_subtract=foreground_pixels,
-        sourceglyph_overlap_pixels=0,
-        sourceglyph_overlap_ratio=0.0,
-        segmentation_outside_sourceglyph_pixels=0,
-        effective_coverage_ratio=1.0,
-        effective_coverage_status="effective_coverage_ready_with_binding_contract_error",
-        component_ownership_status="cleanup_mask_ready_with_binding_contract_error",
-        owned_component_ids=component_ids,
-        protected_component_ids=[],
-        ambiguous_component_ids=[],
-        unowned_component_ids=[],
-        component_projection_method="text_area_component_authorization_map",
-        owned_component_pixel_count=sum(int(item.get("pixel_count") or 0) for item in unbound),
-        protected_component_pixel_count=0,
-        ambiguous_component_pixel_count=0,
-        sourceglyph_overlap_component_ids=[],
-        sourceglyph_missing_component_ids=component_ids,
-        ownership_projection_failure_reason="cleanup_job_binding_contract_error",
-        effective_component_coverage_ratio=1.0,
-        owned_segmentation_pixels=sum(int(item.get("pixel_count") or 0) for item in unbound),
-        executable_foreground_pixels=foreground_pixels,
-        committed_cleanup_mask_pixels=None,
-        owned_segmentation_to_executable_ratio=1.0,
-        owned_segmentation_to_commit_ratio=None,
-        ready_but_sparse_violation=False,
-        sourceglyph_executable_influence_detected=False,
-        dense_contract_override_detected=False,
-        clean_mask_authority="text_area_component_authorization_map",
-        dense_or_local_fallback_used=False,
-        bbox_executable_foreground_detected=False,
-        page_level_executable_foreground_detected=False,
-        clean_mask_foreground_pixels=foreground_pixels,
-        clean_mask_erase_pixels=erase_pixels,
-        foreground_to_owned_segmentation_ratio=1.0,
-        erase_to_foreground_ratio=1.0,
-        protected_component_pixels_removed=0,
-        ambiguous_component_pixels=0,
-        unowned_component_pixels=0,
-        clean_mask_state="cleanup_mask_ready_with_binding_contract_error",
-        clean_mask_failure_reason="cleanup_job_binding_contract_error",
-        cleanup_authorization="cleanup_translate_binding_contract_error",
-        authorization_source_stage=",".join(source_stages),
-        foreground_outside_allowed_pixels=0,
-        upstream_container_mismatch_pixels=0,
-        upstream_container_mismatch_ratio=0.0,
-        green_to_foreground_component_coverage_ratio=1.0,
-        green_to_erase_component_coverage_ratio=1.0,
-        ctd_refined_segmentation_mask_ref="",
-        foreground_mask=foreground.copy(),
-        erase_mask=erase.copy(),
-    )
+    return {
+        "page_id": str(page_id),
+        "cleanup_job_id": cleanup_job_id,
+        "region_id": "",
+        "reason": "cleanup_job_binding_contract_error",
+        "component_ids": component_ids,
+        "component_bbox": bbox,
+        "component_pixels": component_pixels,
+        "component_count": len(component_ids),
+        "required_cleanup_job_binding": "bound_unique",
+        "actual_job_binding_states": sorted(
+            {str(item.get("job_binding_state") or "") for item in unbound if str(item.get("job_binding_state") or "")}
+        ),
+        "job_binding_failure_reasons": sorted(
+            {
+                str(item.get("job_binding_failure_reason") or "")
+                for item in unbound
+                if str(item.get("job_binding_failure_reason") or "")
+            }
+        ),
+        "owned_component_ids": component_ids,
+        "foreground_mask_pixels": 0,
+        "erase_mask_pixels": 0,
+        "executable_foreground_pixels": 0,
+        "clean_mask_foreground_pixels": 0,
+        "clean_mask_erase_pixels": 0,
+        "effective_mask_status": "cleanup_mask_rejected_binding_contract_error",
+        "clean_mask_state": "cleanup_mask_rejected_binding_contract_error",
+        "clean_mask_failure_reason": "cleanup_job_binding_contract_error",
+        "ownership_binding_status": "cleanup_job_binding_contract_error",
+        "ownership_binding_method": "text_area_component_authorization_map",
+        "component_ownership_status": "cleanup_mask_rejected_binding_contract_error",
+        "component_projection_method": "text_area_component_authorization_map",
+        "owned_component_pixel_count": sum(int(item.get("pixel_count") or 0) for item in unbound),
+        "owned_segmentation_pixels": sum(int(item.get("pixel_count") or 0) for item in unbound),
+        "authorization_source_stage": ",".join(source_stages),
+        "mask_contract_exception_reason": "cleanup_job_binding_contract_error",
+    }
 
 
 def _component_authorized_for_job(component: Mapping[str, Any], job_id: str) -> bool:
     if not job_id:
         return False
-    if str(component.get("owner_cleanup_job_id") or "") == job_id:
-        return True
-    for key in ("scope_cleanup_job_ids", "candidate_cleanup_job_ids"):
-        if job_id in {str(item) for item in component.get(key) or []}:
-            return True
-    return False
+    return (
+        str(component.get("owner_cleanup_job_id") or "") == job_id
+        and str(component.get("job_binding_state") or "") == "bound_unique"
+    )
 
 
 def _component_pixels_in_allowed(component: Mapping[str, Any], allowed: list[int]) -> int:
@@ -2403,6 +2383,8 @@ def _component_projection_unresolved_reasons(
     if protected:
         reasons.append("protected_component_overlap")
     if ambiguous:
+        if any(str(item.get("ownership_state") or "") == "projection_not_ready" for item in ambiguous):
+            reasons.append("effective_mask_not_ready")
         reasons.append("ambiguous_component_owner_components")
     if unowned:
         reasons.append("unowned_visible_text_components")
@@ -2507,29 +2489,6 @@ def _valid_or_xywh_bbox(value: Any) -> list[int] | None:
 def _region_protection_reason(region: Mapping[str, Any]) -> str:
     render = region.get("render") if isinstance(region.get("render"), Mapping) else {}
     flags = region.get("flags") if isinstance(region.get("flags"), Mapping) else {}
-    marker_parts: list[str] = []
-    for value in (
-        region.get("cleanup_authorization"),
-        region.get("text_area_cleanup_authorization"),
-        region.get("protection_reason"),
-        region.get("text_area_protection_reason"),
-        region.get("type"),
-        region.get("container_type"),
-        region.get("role"),
-        region.get("visual_role"),
-        region.get("semantic_class"),
-        region.get("route_intent"),
-        region.get("cleanup_mode"),
-        region.get("skip_reason"),
-        region.get("classification_reason"),
-        render.get("cleanup_mode") if isinstance(render, Mapping) else "",
-        render.get("classification_reason") if isinstance(render, Mapping) else "",
-    ):
-        marker_parts.append(str(value or ""))
-    for key, value in (flags or {}).items():
-        if value:
-            marker_parts.append(str(key))
-    text = " ".join(marker_parts).lower()
     if _truthy(region.get("must_not_mutate")) or _truthy(region.get("text_area_must_not_mutate")):
         auth = _region_cleanup_authorization(region)
         if auth == "protect_art_or_non_text":
@@ -2538,24 +2497,7 @@ def _region_protection_reason(region: Mapping[str, Any]) -> str:
             return "explicit_sfx_decorative_authorization"
         if auth in {"review_unknown_not_cleanup", "outside_cleanup_scope"}:
             return auth
-    if "cleanup_mode" in region and str(region.get("cleanup_mode") or "").lower() == "preserve":
-        return "explicit_cleanup_mode_preserve"
-    if isinstance(render, Mapping) and str(render.get("cleanup_mode") or "").lower() == "preserve":
-        return "explicit_render_cleanup_mode_preserve"
-    protected_markers = (
-        ("preserve_sfx_decorative", "preserve_sfx_decorative"),
-        ("sfx_decorative_art", "preserve_sfx_decorative"),
-        ("decorative_text", "decorative_text"),
-        ("decorative", "decorative_text"),
-        ("non_translation_art", "non_translation_art"),
-        ("art_only", "art_only"),
-        ("non_text", "non_text"),
-        ("sfx", "sfx"),
-        ("protected", "protected"),
-    )
-    for marker, reason in protected_markers:
-        if marker in text:
-            return reason
+    del render, flags
     return ""
 
 

@@ -253,6 +253,13 @@ class CleanupMask:
     clean_mask_failure_reason: str = ""
     cleanup_authorization: str = ""
     authorization_source_stage: str = ""
+    semantic_authorization_state: str = ""
+    projection_quality_state: str = ""
+    projection_quality_reasons: list[str] = field(default_factory=list)
+    mask_readiness_state: str = ""
+    mask_readiness_failure_reason: str = ""
+    semantic_authority_owner: str = ""
+    projection_owner: str = ""
     foreground_outside_allowed_pixels: int | None = None
     upstream_container_mismatch_pixels: int | None = None
     upstream_container_mismatch_ratio: float | None = None

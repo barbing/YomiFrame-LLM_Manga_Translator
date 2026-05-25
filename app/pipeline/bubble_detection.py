@@ -25,8 +25,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 
-BUBBLE_DETECTION_VERSION = "phase4b16_bubble_detection_service_v1"
-BUBBLE_DETECTION_CACHE_VERSION = "phase4b16_bubble_detection_evidence_cache_v1"
+BUBBLE_DETECTION_VERSION = "phase4b20_bubble_detection_semantic_mask_evidence_v1"
+BUBBLE_DETECTION_CACHE_VERSION = "phase4b20_bubble_detection_semantic_mask_evidence_cache_v1"
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = ROOT / "scripts"
@@ -307,6 +307,7 @@ def run_bubble_detection(request: BubbleDetectionInput | Mapping[str, Any]) -> B
         text_area_evidence = _serialize_ogkalu(page_id, ogkalu_raw, ogkalu_provider, ogkalu_latency, runtime, kitsumed_raw)
         region_links = runtime.fusion_module.link_regions(list(req.regions or []), kitsumed_raw, ogkalu_raw)
         fused_containers = runtime.fusion_module.build_fusion(page_id, kitsumed_raw, ogkalu_raw, region_links)
+        _annotate_fused_container_semantic_role_evidence(fused_containers, bubble_evidence, text_area_evidence, region_links)
         memberships = _build_memberships(fused_containers, region_links)
         decisions = _build_decisions(memberships, fused_containers)
         conflicts = _build_service_conflicts(fused_containers)
@@ -999,6 +1000,25 @@ def _serialize_kitsumed(
                 "evidence_type": "BubbleSegmentationEvidence",
                 "bbox": record["bbox_xyxy"],
                 "mask_bbox": record["mask_bbox_xyxy"],
+                "semantic_role_evidence": {
+                    "role_signals": ["speech_bubble_mask_evidence", "speech_candidate"],
+                    "source": "kitsumed_speech_bubble_mask",
+                    "model_evidence_ids": [record["model_evidence_id"]],
+                    "speech_mask_polygons": [
+                        {
+                            "evidence_id": record["model_evidence_id"],
+                            "bbox": record["mask_bbox_xyxy"] or record["bbox_xyxy"],
+                            "polygon": record["mask_polygon"],
+                            "confidence": record["confidence"],
+                        }
+                    ],
+                    "cleanup_authority_states": ["cleanup_translate_speech"],
+                    "cleanup_candidate_states": [],
+                    "protected_authority_states": [],
+                    "protected_candidate_states": [],
+                    "authority_evidence_kind": "typed_model_speech_bubble_mask",
+                    "confidence": record["confidence"],
+                },
                 "latency_mean_sec": record["latency_sec"],
             }
         )
@@ -1041,11 +1061,226 @@ def _serialize_ogkalu(
                 "source_model": record["model_name"],
                 "evidence_type": "TextBubbleDetectionEvidence",
                 "bbox": record["bbox_xyxy"],
+                "semantic_role_evidence": _semantic_role_evidence_for_ogkalu_record(record, linked_masks),
                 "latency_mean_sec": record["latency_sec"],
             }
         )
         records.append(record)
     return records
+
+
+def _semantic_role_evidence_for_ogkalu_record(record: Mapping[str, Any], linked_masks: Sequence[str]) -> Dict[str, Any]:
+    class_name = str(record.get("class_name") or "")
+    evidence_id = str(record.get("model_evidence_id") or "")
+    bbox = _float_list(record.get("bbox_xyxy") or record.get("bbox"))
+    bbox_record = {
+        "evidence_id": evidence_id,
+        "class_name": class_name,
+        "bbox": bbox,
+        "confidence": record.get("confidence"),
+    }
+    role_signals: List[str] = []
+    candidate_roles: List[str] = []
+    authority_roles: List[str] = []
+    if class_name in {"bubble", "text_bubble"}:
+        role_signals.append("text_container_candidate")
+        candidate_roles.append("speech")
+    if class_name == "text_bubble":
+        role_signals.append("speech_or_narration_text_candidate")
+    if class_name == "text_free":
+        role_signals.append("caption_background_candidate")
+        candidate_roles.append("background_narration")
+    if class_name in {"sfx", "decorative", "sfx_or_decorative", "sfx_or_decorative_candidate"}:
+        role_signals.append("sfx_decorative_candidate")
+        candidate_roles.append("sfx_decorative")
+    if class_name in {"art", "non_text", "non-text"}:
+        role_signals.append("art_non_text_candidate")
+        candidate_roles.append("art_or_non_text")
+    if linked_masks:
+        role_signals.append("speech_bubble_mask_support")
+    else:
+        role_signals.append("no_speech_bubble_mask_link")
+    cleanup_authority_states: List[str] = []
+    cleanup_candidate_states: List[str] = []
+    protected_authority_states: List[str] = []
+    protected_candidate_states: List[str] = []
+    if class_name in {"bubble", "text_bubble"} and linked_masks:
+        cleanup_authority_states.append("cleanup_translate_speech")
+        authority_roles.append("speech")
+    elif class_name == "bubble":
+        cleanup_candidate_states.append("cleanup_translate_speech")
+    elif class_name == "text_bubble":
+        cleanup_candidate_states.append("cleanup_translate_speech")
+    elif class_name == "text_free":
+        cleanup_candidate_states.append("cleanup_translate_background")
+    elif class_name in {"sfx", "decorative", "sfx_or_decorative", "sfx_or_decorative_candidate"}:
+        protected_candidate_states.append("protect_sfx_decorative")
+    elif class_name in {"art", "non_text", "non-text"}:
+        protected_candidate_states.append("protect_art_or_non_text")
+    return {
+        "role_signals": sorted(set(role_signals)),
+        "source": "ogkalu_text_area_detection",
+        "evidence_source_list": ["ogkalu_text_area_detection"],
+        "candidate_roles": sorted(set(candidate_roles)),
+        "authority_roles": sorted(set(authority_roles)),
+        "model_evidence_ids": [evidence_id],
+        "source_model_ids": [evidence_id],
+        "model_evidence_bboxes": [bbox_record] if bbox else [],
+        "text_unit_evidence_bboxes": [bbox_record] if bbox and class_name in {"text_bubble", "text_free", "sfx", "decorative", "sfx_or_decorative", "sfx_or_decorative_candidate"} else [],
+        "ogkalu_class_names": [class_name] if class_name else [],
+        "linked_kitsumed_mask_ids": [str(item) for item in linked_masks if str(item)],
+        "cleanup_authority_states": sorted(set(cleanup_authority_states)),
+        "cleanup_candidate_states": sorted(set(cleanup_candidate_states)),
+        "protected_authority_states": sorted(set(protected_authority_states)),
+        "protected_candidate_states": sorted(set(protected_candidate_states)),
+        "authority_evidence_kind": "typed_ogkalu_model_role_evidence",
+        "confidence": record.get("confidence"),
+    }
+
+
+def _annotate_fused_container_semantic_role_evidence(
+    fused_containers: Sequence[Dict[str, Any]],
+    bubble_evidence: Sequence[Mapping[str, Any]],
+    text_area_evidence: Sequence[Mapping[str, Any]],
+    region_links: Sequence[Mapping[str, Any]],
+) -> None:
+    bubble_by_id = {str(item.get("model_evidence_id") or item.get("evidence_id") or ""): item for item in bubble_evidence}
+    text_by_id = {str(item.get("model_evidence_id") or item.get("evidence_id") or ""): item for item in text_area_evidence}
+    links_by_region = {str(item.get("region_id") or ""): item for item in region_links}
+    for container in fused_containers:
+        role_signals: set[str] = set()
+        ogkalu_classes: set[str] = set()
+        model_ids: list[str] = []
+        evidence_source_list: set[str] = set()
+        candidate_roles: set[str] = set()
+        authority_roles: set[str] = set()
+        conflict_evidence: set[str] = set()
+        current_region_roles: set[str] = set()
+        cleanup_authority_states: set[str] = set()
+        cleanup_candidate_states: set[str] = set()
+        protected_authority_states: set[str] = set()
+        protected_candidate_states: set[str] = set()
+        model_evidence_bboxes: list[Dict[str, Any]] = []
+        text_unit_evidence_bboxes: list[Dict[str, Any]] = []
+        speech_mask_polygons: list[Dict[str, Any]] = []
+        seen_bbox_keys: set[tuple[str, str]] = set()
+        seen_polygon_keys: set[str] = set()
+
+        def add_role_bboxes(role: Mapping[str, Any]) -> None:
+            for field_name, target in (
+                ("model_evidence_bboxes", model_evidence_bboxes),
+                ("text_unit_evidence_bboxes", text_unit_evidence_bboxes),
+            ):
+                for entry in role.get(field_name) or []:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    evidence_id = str(entry.get("evidence_id") or "")
+                    class_name = str(entry.get("class_name") or "")
+                    key = (field_name, evidence_id or repr(entry.get("bbox")))
+                    if key in seen_bbox_keys:
+                        continue
+                    seen_bbox_keys.add(key)
+                    target.append(
+                        {
+                            "evidence_id": evidence_id,
+                            "class_name": class_name,
+                            "bbox": _float_list(entry.get("bbox")),
+                            "confidence": entry.get("confidence"),
+                        }
+                    )
+            for entry in role.get("speech_mask_polygons") or []:
+                if not isinstance(entry, Mapping):
+                    continue
+                evidence_id = str(entry.get("evidence_id") or "")
+                key = evidence_id or repr(entry.get("polygon"))
+                if not key or key in seen_polygon_keys:
+                    continue
+                seen_polygon_keys.add(key)
+                speech_mask_polygons.append(
+                    {
+                        "evidence_id": evidence_id,
+                        "bbox": _float_list(entry.get("bbox")),
+                        "polygon": entry.get("polygon") or [],
+                        "confidence": entry.get("confidence"),
+                    }
+                )
+
+        for evidence_id in [str(item) for item in container.get("linked_kitsumed_mask_ids") or [] if str(item)]:
+            model_ids.append(evidence_id)
+            evidence = bubble_by_id.get(evidence_id, {})
+            role = evidence.get("semantic_role_evidence") if isinstance(evidence.get("semantic_role_evidence"), Mapping) else {}
+            add_role_bboxes(role)
+            role_signals.update(str(item) for item in (role.get("role_signals") or []) if str(item))
+            evidence_source_list.update(str(item) for item in (role.get("evidence_source_list") or []) if str(item))
+            candidate_roles.update(str(item) for item in (role.get("candidate_roles") or []) if str(item))
+            authority_roles.update(str(item) for item in (role.get("authority_roles") or []) if str(item))
+            cleanup_authority_states.update(str(item) for item in (role.get("cleanup_authority_states") or []) if str(item))
+            cleanup_candidate_states.update(str(item) for item in (role.get("cleanup_candidate_states") or []) if str(item))
+            protected_authority_states.update(str(item) for item in (role.get("protected_authority_states") or []) if str(item))
+            protected_candidate_states.update(str(item) for item in (role.get("protected_candidate_states") or []) if str(item))
+        for evidence_id in [str(item) for item in container.get("linked_ogkalu_detection_ids") or [] if str(item)]:
+            model_ids.append(evidence_id)
+            evidence = text_by_id.get(evidence_id, {})
+            role = evidence.get("semantic_role_evidence") if isinstance(evidence.get("semantic_role_evidence"), Mapping) else {}
+            add_role_bboxes(role)
+            role_signals.update(str(item) for item in (role.get("role_signals") or []) if str(item))
+            evidence_source_list.update(str(item) for item in (role.get("evidence_source_list") or []) if str(item))
+            candidate_roles.update(str(item) for item in (role.get("candidate_roles") or []) if str(item))
+            authority_roles.update(str(item) for item in (role.get("authority_roles") or []) if str(item))
+            ogkalu_classes.update(str(item) for item in (role.get("ogkalu_class_names") or []) if str(item))
+            cleanup_authority_states.update(str(item) for item in (role.get("cleanup_authority_states") or []) if str(item))
+            cleanup_candidate_states.update(str(item) for item in (role.get("cleanup_candidate_states") or []) if str(item))
+            protected_authority_states.update(str(item) for item in (role.get("protected_authority_states") or []) if str(item))
+            protected_candidate_states.update(str(item) for item in (role.get("protected_candidate_states") or []) if str(item))
+        for region_id in [str(item) for item in container.get("affected_current_region_ids") or [] if str(item)]:
+            link = links_by_region.get(region_id, {})
+            if link.get("is_decorative_or_sfx"):
+                current_region_roles.add("sfx_decorative_preserve")
+                authority_roles.add("sfx_decorative")
+                conflict_evidence.add(f"current_sfx_decorative_region:{region_id}")
+                protected_authority_states.add("protect_sfx_decorative")
+            if link.get("is_caption_or_background"):
+                current_region_roles.add("caption_background")
+                authority_roles.add("background_narration")
+                cleanup_authority_states.add("cleanup_translate_background")
+            if link.get("is_speech"):
+                current_region_roles.add("speech")
+                authority_roles.add("speech")
+                cleanup_authority_states.add("cleanup_translate_speech")
+        fused_type = str(container.get("fused_container_type") or "")
+        if fused_type == "speech_bubble":
+            role_signals.add("speech_candidate")
+            candidate_roles.add("speech")
+        elif fused_type == "caption_or_background_candidate":
+            role_signals.add("caption_background_candidate")
+            candidate_roles.add("background_narration")
+        elif fused_type == "sfx_or_decorative_candidate":
+            role_signals.add("sfx_decorative_candidate")
+            candidate_roles.add("sfx_decorative")
+            protected_candidate_states.add("protect_sfx_decorative")
+        elif fused_type == "free_text":
+            role_signals.add("free_text_candidate")
+            candidate_roles.add("background_narration")
+        container["semantic_role_evidence"] = {
+            "source": "bubble_detection_fused_container",
+            "evidence_source_list": sorted(evidence_source_list or {"bubble_detection_fused_container"}),
+            "candidate_roles": sorted(candidate_roles),
+            "authority_roles": sorted(authority_roles),
+            "role_signals": sorted(role_signals),
+            "ogkalu_class_names": sorted(ogkalu_classes),
+            "current_region_roles": sorted(current_region_roles),
+            "conflict_evidence": sorted(conflict_evidence),
+            "source_model_ids": sorted(set(model_ids)),
+            "model_evidence_bboxes": model_evidence_bboxes,
+            "text_unit_evidence_bboxes": text_unit_evidence_bboxes,
+            "speech_mask_polygons": speech_mask_polygons,
+            "cleanup_authority_states": sorted(cleanup_authority_states),
+            "cleanup_candidate_states": sorted(cleanup_candidate_states),
+            "protected_authority_states": sorted(protected_authority_states),
+            "protected_candidate_states": sorted(protected_candidate_states),
+            "authority_evidence_kind": "typed_fused_bubble_detection_role_evidence",
+            "confidence": container.get("confidence"),
+        }
 
 
 def _linked_kitsumed_mask_ids(
