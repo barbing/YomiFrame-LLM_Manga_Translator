@@ -2390,6 +2390,37 @@ _TEXT_AREA_TRANSLATABLE_AUTHORIZATION_STATES = {
     "cleanup_translate_background",
     "cleanup_translate_caption",
 }
+_TEXT_AREA_ASSIGNMENT_FIELD_KEYS = (
+    "text_area_container_id",
+    "text_area_semantic_unit_id",
+    "text_area_semantic_kind",
+    "text_area_container_type",
+    "text_area_route_intent",
+    "text_area_cleanup_authorization",
+    "text_area_must_not_mutate",
+    "text_area_protection_reason",
+    "text_area_authorization_source_stage",
+    "text_area_authorization_basis",
+    "text_area_authorization_explicit",
+    "text_area_authorization_field_origin",
+    "text_area_semantic_authorization_state",
+    "text_area_ctd_scope_eligible",
+    "text_area_comic_text_detector_scope_eligible",
+    "text_area_ocr_eligible",
+    "text_area_translation_eligible",
+    "text_area_render_eligible",
+    "text_area_cleanup_executable",
+    "text_area_detection_source",
+    "text_area_fallback_reason",
+    "text_area_confidence_tier",
+    "text_area_container_bbox",
+    "text_area_reason_codes",
+    "text_area_conflict_flags",
+    "text_area_pre_ocr_authority",
+    "text_area_enriched_from_region",
+    "text_area_ocr_eligibility_reason",
+    "text_area_overlap_ratio",
+)
 _OCR_TRANSLATION_READY_STATE = "recognized_for_translation"
 _OCR_LOW_CONFIDENCE_WARNING_STATE = "recognized_low_confidence_warning"
 _OCR_TRANSLATION_QUEUED_STATES = {
@@ -2837,12 +2868,14 @@ def _should_restore_text_area_speech_assignment(
         return False
     if str(assignment.get("text_area_route_intent") or "").strip() != "translate_speech":
         return False
-    if assignment.get("text_area_ocr_eligible") is False:
+    if not _is_text_area_translatable_assignment(assignment):
         return False
-    if str(assignment.get("text_area_confidence_tier") or "").strip() not in {
-        "strong_model_container",
-        "mask_primary_container",
-    }:
+    state = str(
+        assignment.get("text_area_semantic_authorization_state")
+        or assignment.get("text_area_cleanup_authorization")
+        or ""
+    ).strip()
+    if state != "cleanup_translate_speech":
         return False
     if any(str(flag).strip() for flag in assignment.get("text_area_conflict_flags") or []):
         return False
@@ -2862,19 +2895,7 @@ def _should_restore_text_area_speech_assignment(
 
 
 def _region_text_area_assignment(region: dict) -> dict:
-    return {
-        key: region.get(key)
-        for key in (
-            "text_area_container_id",
-            "text_area_container_type",
-            "text_area_route_intent",
-            "text_area_ocr_eligible",
-            "text_area_confidence_tier",
-            "text_area_container_bbox",
-            "text_area_reason_codes",
-            "text_area_conflict_flags",
-        )
-    }
+    return {key: region.get(key) for key in _TEXT_AREA_ASSIGNMENT_FIELD_KEYS}
 
 
 def _restore_text_area_speech_fragments_after_assignment(
@@ -2889,15 +2910,32 @@ def _restore_text_area_speech_fragments_after_assignment(
                 continue
             candidate_assignments[rid] = {
                 "text_area_container_id": candidate.get("text_area_container_id"),
+                "text_area_semantic_unit_id": candidate.get("semantic_unit_id") or candidate.get("text_area_container_id"),
+                "text_area_semantic_kind": candidate.get("semantic_kind") or "",
                 "text_area_container_type": candidate.get("container_type"),
                 "text_area_route_intent": candidate.get("route_intent"),
-                "text_area_ocr_eligible": True,
+                "text_area_cleanup_authorization": candidate.get("cleanup_authorization") or "",
+                "text_area_must_not_mutate": bool(candidate.get("must_not_mutate", False)),
+                "text_area_protection_reason": candidate.get("protection_reason") or "",
+                "text_area_authorization_source_stage": candidate.get("authorization_source_stage") or candidate.get("source_stage") or "",
+                "text_area_authorization_basis": candidate.get("authorization_basis") or "",
+                "text_area_authorization_explicit": bool(candidate.get("authorization_explicit", False)),
+                "text_area_authorization_field_origin": candidate.get("authorization_field_origin") or "",
+                "text_area_semantic_authorization_state": candidate.get("semantic_authorization_state") or "",
+                "text_area_ctd_scope_eligible": bool(candidate.get("ctd_scope_eligible", False)),
+                "text_area_comic_text_detector_scope_eligible": bool(candidate.get("ctd_scope_eligible", False)),
+                "text_area_ocr_eligible": bool(candidate.get("ocr_eligible", True)),
+                "text_area_translation_eligible": bool(candidate.get("translation_eligible", False)),
+                "text_area_render_eligible": bool(candidate.get("render_eligible", False)),
+                "text_area_cleanup_executable": bool(candidate.get("cleanup_executable", False)),
                 "text_area_confidence_tier": candidate.get("text_area_confidence_tier")
                 or candidate.get("confidence_tier")
                 or "strong_model_container",
                 "text_area_container_bbox": candidate.get("text_area_container_bbox") or [],
                 "text_area_reason_codes": candidate.get("reason_codes") or [],
                 "text_area_conflict_flags": candidate.get("conflict_flags") or [],
+                "text_area_pre_ocr_authority": bool(candidate.get("text_area_pre_ocr_authority", True)),
+                "text_area_enriched_from_region": bool(candidate.get("text_area_enriched_from_region", False)),
                 "text_area_scoped_candidate_speech": True,
             }
     restored: list[str] = []
@@ -2921,12 +2959,11 @@ def _restore_text_area_speech_fragments_after_assignment(
                     region[key] = value
         candidate_allows_restore = bool(
             candidate_assignment
-            and str(candidate_assignment.get("text_area_container_type") or "") == "speech_bubble"
-            and str(candidate_assignment.get("text_area_route_intent") or "") == "translate_speech"
-            and not any(str(flag).strip() for flag in candidate_assignment.get("text_area_conflict_flags") or [])
-            and _has_meaningful_japanese_fragment(str(region.get("ocr_text") or ""))
-            and "sfx" not in " ".join(str(v) for v in candidate_assignment.get("text_area_reason_codes") or []).lower()
-            and "decorative" not in " ".join(str(v) for v in candidate_assignment.get("text_area_reason_codes") or []).lower()
+            and _should_restore_text_area_speech_assignment(
+                candidate_assignment,
+                region,
+                str(region.get("ocr_text") or ""),
+            )
         )
         if not candidate_allows_restore and not _should_restore_text_area_speech_assignment(
             assignment,

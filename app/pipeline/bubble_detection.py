@@ -17,6 +17,7 @@ import ast
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import sys
 import time
@@ -1124,7 +1125,6 @@ def _serialize_ogkalu(
             fallback_used=fallback_used,
         ).to_dict()
         edge_flags = _ogkalu_page_edge_flags(record["bbox_xyxy"], image_size)
-        record_with_edge_flags = {**record, **edge_flags}
         record.update(
             {
                 "evidence_id": record["model_evidence_id"],
@@ -1133,11 +1133,15 @@ def _serialize_ogkalu(
                 "evidence_type": "TextBubbleDetectionEvidence",
                 "bbox": record["bbox_xyxy"],
                 **edge_flags,
-                "semantic_role_evidence": _semantic_role_evidence_for_ogkalu_record(record_with_edge_flags, linked_masks),
+                "semantic_role_evidence": {},
                 "latency_mean_sec": record["latency_sec"],
             }
         )
         records.append(record)
+    _annotate_ogkalu_neighboring_speech_context(records, image_size)
+    for record in records:
+        linked_masks = [str(item) for item in record.get("linked_bubble_mask_ids") or [] if str(item)]
+        record["semantic_role_evidence"] = _semantic_role_evidence_for_ogkalu_record(record, linked_masks)
     return records
 
 
@@ -1173,6 +1177,75 @@ def _ogkalu_page_edge_flags(bbox_xyxy: Sequence[Any], image_size: Tuple[int, int
         "page_edge_contact_flags": flags,
         "clipped_by_page_bounds": bool(clipped),
     }
+
+
+def _ogkalu_speech_context_class(record: Mapping[str, Any]) -> bool:
+    return str(record.get("class_name") or "") in {"bubble", "text_bubble"}
+
+
+def _ogkalu_bbox_xyxy(record: Mapping[str, Any]) -> List[float]:
+    values = _float_list(record.get("bbox_xyxy") or record.get("bbox"))
+    if len(values) < 4:
+        return []
+    x0, y0, x1, y1 = values[:4]
+    if x1 <= x0 or y1 <= y0:
+        return []
+    return [float(x0), float(y0), float(x1), float(y1)]
+
+
+def _ogkalu_speech_context_neighbor(
+    record: Mapping[str, Any],
+    other: Mapping[str, Any],
+    image_size: Tuple[int, int] | None,
+) -> bool:
+    if record is other:
+        return False
+    if not _ogkalu_speech_context_class(other):
+        return False
+    if float(other.get("confidence") or 0.0) < 0.50:
+        return False
+    bbox = _ogkalu_bbox_xyxy(record)
+    other_bbox = _ogkalu_bbox_xyxy(other)
+    if not bbox or not other_bbox:
+        return False
+    width = max(1.0, float((image_size or (1, 1))[0]))
+    height = max(1.0, float((image_size or (1, 1))[1]))
+    x0, y0, x1, y1 = bbox
+    ox0, oy0, ox1, oy1 = other_bbox
+    vertical_overlap = max(0.0, min(y1, oy1) - max(y0, oy0)) / max(1.0, min(y1 - y0, oy1 - oy0))
+    horizontal_overlap = max(0.0, min(x1, ox1) - max(x0, ox0)) / max(1.0, min(x1 - x0, ox1 - ox0))
+    horizontal_gap = max(0.0, max(x0, ox0) - min(x1, ox1))
+    vertical_gap = max(0.0, max(y0, oy0) - min(y1, oy1))
+    cx, cy = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+    ocx, ocy = (ox0 + ox1) * 0.5, (oy0 + oy1) * 0.5
+    center_distance = math.hypot(cx - ocx, cy - ocy)
+    near_side_neighbor = vertical_overlap >= 0.18 and horizontal_gap <= max(80.0, width * 0.22)
+    near_stacked_neighbor = horizontal_overlap >= 0.18 and vertical_gap <= max(80.0, height * 0.10)
+    near_center_neighbor = center_distance <= max(120.0, min(width, height) * 0.28)
+    return bool(near_side_neighbor or near_stacked_neighbor or near_center_neighbor)
+
+
+def _annotate_ogkalu_neighboring_speech_context(
+    records: Sequence[Dict[str, Any]],
+    image_size: Tuple[int, int] | None,
+) -> None:
+    speech_records = [
+        record
+        for record in records
+        if _ogkalu_speech_context_class(record) and float(record.get("confidence") or 0.0) >= 0.50
+    ]
+    if len(speech_records) < 2:
+        return
+    for record in speech_records:
+        neighbor_ids = [
+            str(other.get("model_evidence_id") or other.get("evidence_id") or "")
+            for other in speech_records
+            if _ogkalu_speech_context_neighbor(record, other, image_size)
+        ]
+        neighbor_ids = sorted({item for item in neighbor_ids if item})
+        if not neighbor_ids:
+            continue
+        record["neighboring_speech_context_ids"] = neighbor_ids
 
 
 def _semantic_role_evidence_for_ogkalu_record(record: Mapping[str, Any], linked_masks: Sequence[str]) -> Dict[str, Any]:

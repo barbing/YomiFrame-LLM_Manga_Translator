@@ -380,6 +380,10 @@ class ScopedDetectionCandidate:
     authorization_explicit: bool = False
     authorization_field_origin: str = ""
     semantic_authorization_state: str = ""
+    ctd_scope_eligible: bool = False
+    translation_eligible: bool = False
+    render_eligible: bool = False
+    cleanup_executable: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)
@@ -396,6 +400,8 @@ class ScopedOcrCandidate:
     route_intent: str
     crop_source: str
     fallback_reason: Optional[str]
+    ocr_eligible: bool
+    ctd_scope_eligible: bool
     ocr_text: str
     ocr_confidence: float
     accepted: bool
@@ -413,6 +419,9 @@ class ScopedOcrCandidate:
     authorization_explicit: bool = False
     authorization_field_origin: str = ""
     semantic_authorization_state: str = ""
+    translation_eligible: bool = False
+    render_eligible: bool = False
+    cleanup_executable: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)
@@ -1012,34 +1021,9 @@ def _component_auth_polygon_mask(polygon: Any, mask_shape: tuple[int, int]) -> A
 
 
 def _component_auth_infer_authorization(source: Mapping[str, Any]) -> str:
-    marker = " ".join(
-        str(source.get(key) or "")
-        for key in (
-            "cleanup_authorization",
-            "text_area_cleanup_authorization",
-            "route_intent",
-            "text_area_route_intent",
-            "container_type",
-            "semantic_class",
-            "cleanup_mode",
-            "classification_reason",
-            "protection_reason",
-            "text_area_protection_reason",
-            "fallback_reason",
-        )
-    ).lower()
-    if any(token in marker for token in ("non_text", "non-text", "art_only", "non_translation_art")):
-        return AUTH_PROTECT_ART_OR_NON_TEXT
-    if any(token in marker for token in ("sfx", "decorative", "preserve_sfx_decorative")):
-        return AUTH_PROTECT_SFX_DECORATIVE
-    if "translate_speech" in marker or "speech_bubble" in marker:
-        return AUTH_CLEANUP_TRANSLATE_SPEECH
-    if "caption" in marker and "background" not in marker:
-        return AUTH_CLEANUP_TRANSLATE_CAPTION
-    if "translate_caption" in marker or "background" in marker:
-        return AUTH_CLEANUP_TRANSLATE_BACKGROUND
-    if "outside" in marker:
-        return AUTH_OUTSIDE_CLEANUP_SCOPE
+    """Legacy marker inference is fenced off from executable authority paths."""
+
+    del source
     return AUTH_REVIEW_UNKNOWN_NOT_CLEANUP
 
 
@@ -2745,6 +2729,12 @@ def build_scoped_detection_candidates(
             authorization_explicit=bool(assignment.get("text_area_authorization_explicit", False)),
             authorization_field_origin=assignment.get("text_area_authorization_field_origin") or "",
             semantic_authorization_state=assignment.get("text_area_semantic_authorization_state") or "",
+            ctd_scope_eligible=bool(
+                assignment.get("text_area_ctd_scope_eligible", assignment.get("text_area_comic_text_detector_scope_eligible", False))
+            ),
+            translation_eligible=bool(assignment.get("text_area_translation_eligible", False)),
+            render_eligible=bool(assignment.get("text_area_render_eligible", False)),
+            cleanup_executable=bool(assignment.get("text_area_cleanup_executable", False)),
         )
         candidates.append(candidate.to_dict())
     return candidates
@@ -2760,6 +2750,9 @@ def build_scoped_ocr_candidate(
     ocr_confidence: float,
     accepted: bool,
 ) -> Dict[str, Any]:
+    ctd_scope_eligible = bool(
+        assignment.get("text_area_ctd_scope_eligible", assignment.get("text_area_comic_text_detector_scope_eligible", False))
+    )
     return ScopedOcrCandidate(
         ocr_candidate_id=f"ocr_{region_id}",
         page_id=page_id,
@@ -2770,6 +2763,8 @@ def build_scoped_ocr_candidate(
         route_intent=assignment.get("text_area_route_intent") or ROUTE_REVIEW_FALLBACK,
         crop_source=assignment.get("text_area_detection_source") or DETECTION_COMPATIBILITY_FALLBACK,
         fallback_reason=assignment.get("text_area_fallback_reason"),
+        ocr_eligible=bool(assignment.get("text_area_ocr_eligible", False)),
+        ctd_scope_eligible=ctd_scope_eligible,
         ocr_text=ocr_text,
         ocr_confidence=float(ocr_confidence or 0.0),
         accepted=bool(accepted),
@@ -2786,6 +2781,9 @@ def build_scoped_ocr_candidate(
         authorization_explicit=bool(assignment.get("text_area_authorization_explicit", False)),
         authorization_field_origin=assignment.get("text_area_authorization_field_origin") or "",
         semantic_authorization_state=assignment.get("text_area_semantic_authorization_state") or "",
+        translation_eligible=bool(assignment.get("text_area_translation_eligible", False)),
+        render_eligible=bool(assignment.get("text_area_render_eligible", False)),
+        cleanup_executable=bool(assignment.get("text_area_cleanup_executable", False)),
     ).to_dict()
 
 
@@ -6232,6 +6230,8 @@ def _blocked_full_page_review_container(page_id: str, image_size: Tuple[int, int
 def _fallback_assignment(reason: str) -> Dict[str, Any]:
     return {
         "text_area_container_id": None,
+        "text_area_semantic_unit_id": None,
+        "text_area_semantic_kind": SEMANTIC_KIND_UNKNOWN,
         "text_area_container_type": CONTAINER_UNKNOWN,
         "text_area_route_intent": ROUTE_REVIEW_FALLBACK,
         "text_area_cleanup_authorization": AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
@@ -6242,7 +6242,12 @@ def _fallback_assignment(reason: str) -> Dict[str, Any]:
         "text_area_authorization_explicit": False,
         "text_area_authorization_field_origin": "compatibility_fallback",
         "text_area_semantic_authorization_state": AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+        "text_area_ctd_scope_eligible": False,
+        "text_area_comic_text_detector_scope_eligible": False,
         "text_area_ocr_eligible": True,
+        "text_area_translation_eligible": False,
+        "text_area_render_eligible": False,
+        "text_area_cleanup_executable": False,
         "text_area_detection_source": DETECTION_COMPATIBILITY_FALLBACK,
         "text_area_fallback_reason": reason,
         "text_area_confidence_tier": "compatibility_fallback",
