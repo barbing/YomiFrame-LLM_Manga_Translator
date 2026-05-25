@@ -105,6 +105,30 @@ REPLAY_AUTHORIZATION_FIELD_ORIGINS = {
     "fixture",
 }
 
+SEMANTIC_EVIDENCE_PROVIDER_VERSION = "semantic_evidence_provider_v1"
+PROVIDER_KITSUMED_SPEECH_MASK = "kitsumed_speech_mask_evidence"
+PROVIDER_OGKALU_TEXT_BUBBLE = "ogkalu_text_bubble_evidence"
+PROVIDER_OGKALU_TEXT_FREE_BACKGROUND = "ogkalu_text_free_background_evidence"
+PROVIDER_OGKALU_SFX_DECORATIVE = "ogkalu_sfx_decorative_evidence"
+PROVIDER_CURRENT_REGION_SEMANTIC = "current_region_semantic_evidence"
+PROVIDER_TEXTAREA_DETERMINISTIC_TOP_BAND = "textarea_deterministic_top_band_background_evidence"
+PROVIDER_TEXTAREA_DETERMINISTIC_SIDE_NARRATION = "textarea_deterministic_side_narration_evidence"
+PROVIDER_TEXTAREA_DETERMINISTIC_LARGE_SFX = "textarea_deterministic_large_sfx_evidence"
+
+APPROVED_SEMANTIC_EVIDENCE_PROVIDERS = {
+    PROVIDER_KITSUMED_SPEECH_MASK,
+    PROVIDER_OGKALU_TEXT_BUBBLE,
+    PROVIDER_OGKALU_TEXT_FREE_BACKGROUND,
+    PROVIDER_OGKALU_SFX_DECORATIVE,
+    PROVIDER_CURRENT_REGION_SEMANTIC,
+    PROVIDER_TEXTAREA_DETERMINISTIC_TOP_BAND,
+    PROVIDER_TEXTAREA_DETERMINISTIC_SIDE_NARRATION,
+    PROVIDER_TEXTAREA_DETERMINISTIC_LARGE_SFX,
+}
+
+SEMANTIC_TARGET_SFX_DECORATIVE = "sfx_decorative"
+SEMANTIC_TARGET_REVIEW_UNKNOWN = "review_unknown"
+
 DETECTION_SCOPED = "scoped"
 DETECTION_COMPATIBILITY_FALLBACK = "compatibility_fallback"
 DETECTION_BLOCKED = "blocked_by_text_area_plan"
@@ -271,6 +295,9 @@ class TextAreaSemanticAuthorizationRecord:
     evidence_reason_codes: List[str] = field(default_factory=list)
     conflict_flags: List[str] = field(default_factory=list)
     semantic_role_evidence: Dict[str, Any] = field(default_factory=dict)
+    semantic_evidence_providers: List[str] = field(default_factory=list)
+    semantic_evidence_ids: List[str] = field(default_factory=list)
+    semantic_evidence_trace: List[Dict[str, Any]] = field(default_factory=list)
     must_not_mutate: bool = False
     review_required: bool = False
     ocr_eligible: bool = False
@@ -479,6 +506,9 @@ class TextAreaComponentAuthorizationRecord:
     semantic_kind: str = ""
     semantic_kinds: List[str] = field(default_factory=list)
     source_evidence_ids: List[str] = field(default_factory=list)
+    semantic_evidence_providers: List[str] = field(default_factory=list)
+    semantic_evidence_ids: List[str] = field(default_factory=list)
+    semantic_evidence_trace: List[Dict[str, Any]] = field(default_factory=list)
     semantic_authority_owner: str = "TextAreaPlan/BubbleDetection"
     projection_owner: str = "TextForegroundSegmentationMask/TextAreaPlan projection"
     projection_quality_state: str = PROJECTION_NO_SEMANTIC_AUTHORITY
@@ -863,6 +893,32 @@ def _component_auth_scope(
     explicit_cleanup_authority = _component_auth_family(auth) == "cleanup" and bool(explicit_authority_source)
     explicit_protected_authority = _component_auth_family(auth) == "protected" and bool(explicit_authority_source)
     family = _component_auth_family(auth)
+    role_evidence = source.get("semantic_role_evidence") if isinstance(source.get("semantic_role_evidence"), Mapping) else {}
+    semantic_evidence_trace = list(source.get("semantic_evidence_trace") or []) if isinstance(source.get("semantic_evidence_trace"), Sequence) and not isinstance(source.get("semantic_evidence_trace"), (str, bytes)) else []
+    if role_evidence:
+        semantic_evidence_trace.extend(_semantic_evidence_records(role_evidence))
+    normalized_trace: List[Dict[str, Any]] = []
+    seen_trace: set[tuple[str, str]] = set()
+    for record in semantic_evidence_trace:
+        if not isinstance(record, Mapping):
+            continue
+        provider = str(record.get("provider") or "")
+        evidence_id = str(record.get("evidence_id") or "")
+        if not provider:
+            continue
+        key = (provider, evidence_id)
+        if key in seen_trace:
+            continue
+        seen_trace.add(key)
+        normalized_trace.append(dict(record))
+    semantic_evidence_providers = sorted(
+        set(_component_auth_list(source.get("semantic_evidence_providers") or []))
+        | {str(record.get("provider") or "") for record in normalized_trace if str(record.get("provider") or "")}
+    )
+    semantic_evidence_ids = sorted(
+        set(_component_auth_list(source.get("semantic_evidence_ids") or []))
+        | {str(record.get("evidence_id") or "") for record in normalized_trace if str(record.get("evidence_id") or "")}
+    )
     return {
         "source_kind": source_kind,
         "bbox": bbox,
@@ -897,6 +953,10 @@ def _component_auth_scope(
             or source.get("text_area_semantic_authorization_state")
             or auth
         ),
+        "semantic_role_evidence": dict(role_evidence or {}),
+        "semantic_evidence_providers": semantic_evidence_providers,
+        "semantic_evidence_ids": semantic_evidence_ids,
+        "semantic_evidence_trace": normalized_trace,
     }
 
 
@@ -1384,6 +1444,29 @@ def _component_auth_record(
     )
     semantic_kinds = sorted({str(item.get("semantic_kind") or "") for item in semantic_units if str(item.get("semantic_kind") or "")})
     source_evidence_ids = _component_auth_merged_values(semantic_units, "source_evidence_ids")
+    semantic_evidence_trace: List[Dict[str, Any]] = []
+    seen_evidence_trace: set[tuple[str, str]] = set()
+    for item in semantic_units:
+        for record in item.get("semantic_evidence_trace") or []:
+            if not isinstance(record, Mapping):
+                continue
+            provider = str(record.get("provider") or "")
+            evidence_id = str(record.get("evidence_id") or "")
+            if not provider:
+                continue
+            key = (provider, evidence_id)
+            if key in seen_evidence_trace:
+                continue
+            seen_evidence_trace.add(key)
+            semantic_evidence_trace.append(dict(record))
+    semantic_evidence_providers = sorted(
+        set(_component_auth_merged_values(semantic_units, "semantic_evidence_providers"))
+        | {str(record.get("provider") or "") for record in semantic_evidence_trace if str(record.get("provider") or "")}
+    )
+    semantic_evidence_ids = sorted(
+        set(_component_auth_merged_values(semantic_units, "semantic_evidence_ids"))
+        | {str(record.get("evidence_id") or "") for record in semantic_evidence_trace if str(record.get("evidence_id") or "")}
+    )
     projection_overlap_pixels = int(projection_candidate.get("overlap_pixels") or 0) if projection_candidate else 0
     projection_overlap_ratio = round(float(projection_candidate.get("overlap_ratio") or 0.0), 4) if projection_candidate else 0.0
     selected_context = selected or projection_candidate
@@ -1442,6 +1525,9 @@ def _component_auth_record(
         semantic_kind=str(selected_context.get("semantic_kind") or "") if selected_context else "",
         semantic_kinds=semantic_kinds,
         source_evidence_ids=source_evidence_ids,
+        semantic_evidence_providers=semantic_evidence_providers,
+        semantic_evidence_ids=semantic_evidence_ids,
+        semantic_evidence_trace=semantic_evidence_trace,
         semantic_authority_owner="TextAreaPlan/BubbleDetection",
         projection_owner="TextForegroundSegmentationMask/TextAreaPlan projection",
         projection_quality_state=projection_quality_state,
@@ -2930,6 +3016,192 @@ def _semantic_role_has_state(role_evidence: Mapping[str, Any], key: str, state: 
     return state in set(_semantic_role_state_values(role_evidence, key))
 
 
+def _semantic_evidence_records(role_evidence: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    records = role_evidence.get("semantic_evidence_records") if isinstance(role_evidence, Mapping) else None
+    if not isinstance(records, Sequence) or isinstance(records, (str, bytes)):
+        return []
+    output: List[Dict[str, Any]] = []
+    for record in records:
+        if isinstance(record, Mapping):
+            normalized = dict(record)
+            provider = str(normalized.get("provider") or "")
+            if provider:
+                output.append(normalized)
+    return output
+
+
+def _semantic_target_for_authority_state(state: str) -> str:
+    if state == AUTH_CLEANUP_TRANSLATE_SPEECH:
+        return SEMANTIC_KIND_SPEECH
+    if state == AUTH_CLEANUP_TRANSLATE_BACKGROUND:
+        return SEMANTIC_KIND_BACKGROUND_NARRATION
+    if state == AUTH_CLEANUP_TRANSLATE_CAPTION:
+        return SEMANTIC_KIND_CAPTION
+    if state == AUTH_PROTECT_ART_OR_NON_TEXT:
+        return SEMANTIC_KIND_ART_OR_NON_TEXT
+    if state == AUTH_PROTECT_SFX_DECORATIVE:
+        return SEMANTIC_TARGET_SFX_DECORATIVE
+    return SEMANTIC_TARGET_REVIEW_UNKNOWN
+
+
+def _semantic_evidence_provider_for_kind(
+    evidence_kind: str,
+    role_evidence: Mapping[str, Any],
+    state: str,
+) -> str:
+    text = " ".join(
+        [
+            evidence_kind,
+            str(role_evidence.get("source") or ""),
+            " ".join(_semantic_role_values(role_evidence, "role_signals")),
+            " ".join(_semantic_role_values(role_evidence, "ogkalu_class_names")),
+            " ".join(_semantic_role_values(role_evidence, "current_region_roles")),
+            " ".join(_semantic_role_values(role_evidence, "evidence_source_list")),
+        ]
+    ).lower()
+    if "deterministic_side" in text or "side_narration" in text or "vertical_side" in text:
+        return PROVIDER_TEXTAREA_DETERMINISTIC_SIDE_NARRATION
+    if "deterministic_top" in text or "top_band" in text or "top_caption" in text:
+        return PROVIDER_TEXTAREA_DETERMINISTIC_TOP_BAND
+    if "deterministic_large_sfx" in text or "large_sfx" in text:
+        return PROVIDER_TEXTAREA_DETERMINISTIC_LARGE_SFX
+    if "current_region" in text or "current_" in evidence_kind:
+        return PROVIDER_CURRENT_REGION_SEMANTIC
+    if "kitsumed" in text or "speech_bubble_mask" in text or "speech_mask" in text:
+        return PROVIDER_KITSUMED_SPEECH_MASK
+    if state == AUTH_PROTECT_SFX_DECORATIVE or any(token in text for token in ("sfx", "decorative")):
+        return PROVIDER_OGKALU_SFX_DECORATIVE
+    if state in {AUTH_CLEANUP_TRANSLATE_BACKGROUND, AUTH_CLEANUP_TRANSLATE_CAPTION} or "text_free" in text:
+        return PROVIDER_OGKALU_TEXT_FREE_BACKGROUND
+    if state == AUTH_CLEANUP_TRANSLATE_SPEECH or any(token in text for token in ("text_bubble", "bubble")):
+        return PROVIDER_OGKALU_TEXT_BUBBLE
+    return PROVIDER_CURRENT_REGION_SEMANTIC
+
+
+def _semantic_provider_created_by(provider: str) -> str:
+    if provider.startswith("textarea_deterministic"):
+        return "deterministic-textarea-provider"
+    if provider == PROVIDER_CURRENT_REGION_SEMANTIC:
+        return "fused-model"
+    return "model"
+
+
+def _semantic_evidence_id(
+    provider: str,
+    state: str,
+    evidence_kind: str,
+    role_evidence: Mapping[str, Any],
+) -> str:
+    ids = (
+        _semantic_role_values(role_evidence, "model_evidence_ids")
+        or _semantic_role_values(role_evidence, "source_model_ids")
+        or _semantic_role_values(role_evidence, "source_container_ids")
+    )
+    suffix = ids[0] if ids else evidence_kind or state
+    safe_suffix = "_".join(str(suffix).replace("\\", "_").replace("/", "_").split())
+    return f"{provider}:{state}:{safe_suffix}"
+
+
+def _semantic_evidence_record(
+    *,
+    provider: str,
+    state: str,
+    evidence_kind: str,
+    role_evidence: Mapping[str, Any],
+    page_id: str = "",
+    bbox: Sequence[Any] | None = None,
+    source_container_ids: Sequence[Any] | None = None,
+    reason_codes: Sequence[Any] | None = None,
+    basis: str = "",
+    confidence_tier: str = "",
+    requires_review: bool = False,
+) -> Dict[str, Any]:
+    source_model_ids = (
+        _semantic_role_values(role_evidence, "source_model_ids")
+        or _semantic_role_values(role_evidence, "model_evidence_ids")
+    )
+    source_ids = [str(item) for item in source_container_ids or [] if str(item)]
+    reasons = [str(item) for item in reason_codes or [] if str(item)]
+    reasons.extend(item for item in _semantic_role_values(role_evidence, "typed_authority_reason_codes") if item not in reasons)
+    if evidence_kind and evidence_kind not in reasons:
+        reasons.append(evidence_kind)
+    record = {
+        "evidence_id": _semantic_evidence_id(provider, state, evidence_kind, role_evidence),
+        "provider": provider,
+        "provider_version": SEMANTIC_EVIDENCE_PROVIDER_VERSION,
+        "semantic_target": _semantic_target_for_authority_state(state),
+        "authority_state": state,
+        "bbox": [int(item) for item in bbox] if bbox is not None and len(list(bbox)) >= 4 else [],
+        "source_model_ids": source_model_ids,
+        "source_container_ids": source_ids,
+        "basis": basis or evidence_kind,
+        "confidence_tier": confidence_tier or str(role_evidence.get("confidence") or ""),
+        "reason_codes": sorted(set(reasons)),
+        "negative_evidence": [],
+        "requires_review": bool(requires_review),
+        "created_by": _semantic_provider_created_by(provider),
+        "page_id": str(page_id or ""),
+    }
+    return record
+
+
+def _semantic_role_evidence_with_provider_records(
+    role_evidence: Mapping[str, Any],
+    *,
+    page_id: str = "",
+    bbox: Sequence[Any] | None = None,
+    container_id: str = "",
+    reason_codes: Sequence[Any] | None = None,
+    basis: str = "",
+    confidence_tier: str = "",
+    requires_review: bool = False,
+) -> Dict[str, Any]:
+    evidence = dict(role_evidence or {})
+    records = _semantic_evidence_records(evidence)
+    seen = {
+        (
+            str(record.get("provider") or ""),
+            str(record.get("authority_state") or ""),
+            str(record.get("evidence_id") or ""),
+        )
+        for record in records
+    }
+    authority_pairs = [
+        ("cleanup_authority_states", state)
+        for state in _semantic_role_state_values(evidence, "cleanup_authority_states")
+    ] + [
+        ("protected_authority_states", state)
+        for state in _semantic_role_state_values(evidence, "protected_authority_states")
+    ]
+    evidence_kind = str(evidence.get("authority_evidence_kind") or "")
+    for _key, state in authority_pairs:
+        provider = _semantic_evidence_provider_for_kind(evidence_kind, evidence, state)
+        record = _semantic_evidence_record(
+            provider=provider,
+            state=state,
+            evidence_kind=evidence_kind,
+            role_evidence=evidence,
+            page_id=page_id,
+            bbox=bbox,
+            source_container_ids=[container_id] if container_id else [],
+            reason_codes=reason_codes,
+            basis=basis,
+            confidence_tier=confidence_tier,
+            requires_review=requires_review,
+        )
+        key = (
+            str(record.get("provider") or ""),
+            str(record.get("authority_state") or ""),
+            str(record.get("evidence_id") or ""),
+        )
+        if key not in seen:
+            seen.add(key)
+            records.append(record)
+    if records:
+        evidence["semantic_evidence_records"] = records
+    return evidence
+
+
 def _semantic_role_evidence_with_state(
     role_evidence: Mapping[str, Any],
     key: str,
@@ -2945,7 +3217,7 @@ def _semantic_role_evidence_with_state(
     typed_reasons = set(_semantic_role_values(evidence, "typed_authority_reason_codes"))
     typed_reasons.add(evidence_kind)
     evidence["typed_authority_reason_codes"] = sorted(typed_reasons)
-    return evidence
+    return _semantic_role_evidence_with_provider_records(evidence)
 
 
 def _container_marker_text(
@@ -3288,6 +3560,16 @@ def _cleanup_authorization_for_container(container: Mapping[str, Any] | TextArea
 
 def _apply_cleanup_authorization(container: TextAreaContainer) -> None:
     adjudication = _adjudicate_text_area_semantic_authorization(container)
+    container.semantic_role_evidence = _semantic_role_evidence_with_provider_records(
+        container.semantic_role_evidence,
+        page_id=str(container.page_id or ""),
+        bbox=container.bbox,
+        container_id=str(container.container_id or ""),
+        reason_codes=list(container.evidence_reason_codes or []) + list(adjudication.reason_codes or []),
+        basis=adjudication.authorization_basis or "",
+        confidence_tier=str(container.confidence_tier or ""),
+        requires_review=bool(container.human_review_required),
+    )
     container.cleanup_authorization = adjudication.cleanup_authorization
     container.must_not_mutate = adjudication.must_not_mutate
     container.protection_reason = adjudication.protection_reason
@@ -3542,12 +3824,28 @@ def _semantic_unit_from_container(
     for reason in extra_reason_codes or []:
         if str(reason) and str(reason) not in reason_codes:
             reason_codes.append(str(reason))
-    role_evidence = dict(container.semantic_role_evidence or {})
+    role_evidence = _semantic_role_evidence_with_provider_records(
+        container.semantic_role_evidence or {},
+        page_id=str(container.page_id or ""),
+        bbox=list(bbox or container.bbox or []),
+        container_id=str(container.container_id or ""),
+        reason_codes=reason_codes,
+        basis=str(container.authorization_basis or ""),
+        confidence_tier=str(container.confidence_tier or "low"),
+        requires_review=bool(container.human_review_required),
+    )
+    semantic_records = _semantic_evidence_records(role_evidence)
     evidence_sources = []
     for key in ("source", "authority_evidence_kind"):
         value = str(role_evidence.get(key) or "")
         if value and value not in evidence_sources:
             evidence_sources.append(value)
+    for record in semantic_records:
+        provider = str(record.get("provider") or "")
+        if provider and provider not in evidence_sources:
+            evidence_sources.append(provider)
+    semantic_evidence_ids = sorted({str(record.get("evidence_id") or "") for record in semantic_records if str(record.get("evidence_id") or "")})
+    semantic_evidence_providers = sorted({str(record.get("provider") or "") for record in semantic_records if str(record.get("provider") or "")})
     return TextAreaSemanticAuthorizationRecord(
         semantic_unit_id=semantic_unit_id,
         page_id=str(container.page_id or ""),
@@ -3567,6 +3865,9 @@ def _semantic_unit_from_container(
         evidence_reason_codes=reason_codes,
         conflict_flags=[str(item) for item in container.conflict_flags or [] if str(item)],
         semantic_role_evidence=role_evidence,
+        semantic_evidence_providers=semantic_evidence_providers,
+        semantic_evidence_ids=semantic_evidence_ids,
+        semantic_evidence_trace=semantic_records,
         must_not_mutate=bool(container.must_not_mutate),
         review_required=bool(container.human_review_required or _component_auth_family(auth) in {"review", "outside", "ambiguous"}),
         ocr_eligible=bool(container.ocr_eligible),

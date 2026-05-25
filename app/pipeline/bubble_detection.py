@@ -44,6 +44,19 @@ KITSUMED_NMS_IOU_THRESHOLD = 0.50
 KITSUMED_MASK_THRESHOLD = 0.50
 OGKALU_CONFIDENCE_THRESHOLD = 0.50
 
+SEMANTIC_EVIDENCE_PROVIDER_VERSION = "semantic_evidence_provider_v1"
+PROVIDER_KITSUMED_SPEECH_MASK = "kitsumed_speech_mask_evidence"
+PROVIDER_OGKALU_TEXT_BUBBLE = "ogkalu_text_bubble_evidence"
+PROVIDER_OGKALU_TEXT_FREE_BACKGROUND = "ogkalu_text_free_background_evidence"
+PROVIDER_OGKALU_SFX_DECORATIVE = "ogkalu_sfx_decorative_evidence"
+PROVIDER_CURRENT_REGION_SEMANTIC = "current_region_semantic_evidence"
+
+AUTH_CLEANUP_TRANSLATE_SPEECH = "cleanup_translate_speech"
+AUTH_CLEANUP_TRANSLATE_BACKGROUND = "cleanup_translate_background"
+AUTH_PROTECT_SFX_DECORATIVE = "protect_sfx_decorative"
+AUTH_PROTECT_ART_OR_NON_TEXT = "protect_art_or_non_text"
+AUTH_REVIEW_UNKNOWN_NOT_CLEANUP = "review_unknown_not_cleanup"
+
 
 @dataclass
 class BubbleDetectionInput:
@@ -1017,6 +1030,19 @@ def _serialize_kitsumed(
                     "protected_authority_states": [],
                     "protected_candidate_states": [],
                     "authority_evidence_kind": "typed_model_speech_bubble_mask",
+                    "semantic_evidence_records": [
+                        _semantic_evidence_record(
+                            evidence_id=f"{PROVIDER_KITSUMED_SPEECH_MASK}:{record['model_evidence_id']}",
+                            provider=PROVIDER_KITSUMED_SPEECH_MASK,
+                            semantic_target="speech",
+                            authority_state=AUTH_CLEANUP_TRANSLATE_SPEECH,
+                            bbox=record["mask_bbox_xyxy"] or record["bbox_xyxy"],
+                            source_model_ids=[record["model_evidence_id"]],
+                            confidence=record["confidence"],
+                            reason_codes=["typed_model_speech_bubble_mask"],
+                            page_id=page_id,
+                        )
+                    ],
                     "confidence": record["confidence"],
                 },
                 "latency_mean_sec": record["latency_sec"],
@@ -1024,6 +1050,38 @@ def _serialize_kitsumed(
         )
         records.append(record)
     return records
+
+
+def _semantic_evidence_record(
+    *,
+    evidence_id: str,
+    provider: str,
+    semantic_target: str,
+    authority_state: str,
+    bbox: Sequence[Any] | None,
+    source_model_ids: Sequence[str],
+    confidence: Any = None,
+    reason_codes: Sequence[str] | None = None,
+    created_by: str = "model",
+    page_id: str = "",
+) -> Dict[str, Any]:
+    return {
+        "evidence_id": evidence_id,
+        "provider": provider,
+        "provider_version": SEMANTIC_EVIDENCE_PROVIDER_VERSION,
+        "semantic_target": semantic_target,
+        "authority_state": authority_state,
+        "bbox": _float_list(bbox or []),
+        "source_model_ids": [str(item) for item in source_model_ids if str(item)],
+        "source_container_ids": [],
+        "basis": ",".join(str(item) for item in reason_codes or [] if str(item)),
+        "confidence_tier": str(confidence or ""),
+        "reason_codes": sorted({str(item) for item in reason_codes or [] if str(item)}),
+        "negative_evidence": [],
+        "requires_review": authority_state == AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+        "created_by": created_by,
+        "page_id": str(page_id or ""),
+    }
 
 
 def _serialize_ogkalu(
@@ -1117,6 +1175,49 @@ def _semantic_role_evidence_for_ogkalu_record(record: Mapping[str, Any], linked_
         protected_candidate_states.append("protect_sfx_decorative")
     elif class_name in {"art", "non_text", "non-text"}:
         protected_candidate_states.append("protect_art_or_non_text")
+    semantic_evidence_records: List[Dict[str, Any]] = []
+    if class_name in {"bubble", "text_bubble"}:
+        semantic_evidence_records.append(
+            _semantic_evidence_record(
+                evidence_id=f"{PROVIDER_OGKALU_TEXT_BUBBLE}:{evidence_id}",
+                provider=PROVIDER_OGKALU_TEXT_BUBBLE,
+                semantic_target="speech",
+                authority_state=cleanup_authority_states[0] if cleanup_authority_states else AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+                bbox=bbox,
+                source_model_ids=[evidence_id],
+                confidence=record.get("confidence"),
+                reason_codes=["typed_ogkalu_text_bubble_evidence"],
+                page_id=str(record.get("page") or ""),
+            )
+        )
+    elif class_name == "text_free":
+        semantic_evidence_records.append(
+            _semantic_evidence_record(
+                evidence_id=f"{PROVIDER_OGKALU_TEXT_FREE_BACKGROUND}:{evidence_id}",
+                provider=PROVIDER_OGKALU_TEXT_FREE_BACKGROUND,
+                semantic_target="background_narration",
+                authority_state=AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+                bbox=bbox,
+                source_model_ids=[evidence_id],
+                confidence=record.get("confidence"),
+                reason_codes=["typed_ogkalu_text_free_background_evidence"],
+                page_id=str(record.get("page") or ""),
+            )
+        )
+    elif class_name in {"sfx", "decorative", "sfx_or_decorative", "sfx_or_decorative_candidate"}:
+        semantic_evidence_records.append(
+            _semantic_evidence_record(
+                evidence_id=f"{PROVIDER_OGKALU_SFX_DECORATIVE}:{evidence_id}",
+                provider=PROVIDER_OGKALU_SFX_DECORATIVE,
+                semantic_target="sfx_decorative",
+                authority_state=AUTH_PROTECT_SFX_DECORATIVE,
+                bbox=bbox,
+                source_model_ids=[evidence_id],
+                confidence=record.get("confidence"),
+                reason_codes=["typed_ogkalu_sfx_decorative_evidence"],
+                page_id=str(record.get("page") or ""),
+            )
+        )
     return {
         "role_signals": sorted(set(role_signals)),
         "source": "ogkalu_text_area_detection",
@@ -1134,6 +1235,7 @@ def _semantic_role_evidence_for_ogkalu_record(record: Mapping[str, Any], linked_
         "protected_authority_states": sorted(set(protected_authority_states)),
         "protected_candidate_states": sorted(set(protected_candidate_states)),
         "authority_evidence_kind": "typed_ogkalu_model_role_evidence",
+        "semantic_evidence_records": semantic_evidence_records,
         "confidence": record.get("confidence"),
     }
 
@@ -1163,8 +1265,10 @@ def _annotate_fused_container_semantic_role_evidence(
         model_evidence_bboxes: list[Dict[str, Any]] = []
         text_unit_evidence_bboxes: list[Dict[str, Any]] = []
         speech_mask_polygons: list[Dict[str, Any]] = []
+        semantic_evidence_records: list[Dict[str, Any]] = []
         seen_bbox_keys: set[tuple[str, str]] = set()
         seen_polygon_keys: set[str] = set()
+        seen_record_keys: set[tuple[str, str]] = set()
 
         def add_role_bboxes(role: Mapping[str, Any]) -> None:
             for field_name, target in (
@@ -1204,6 +1308,18 @@ def _annotate_fused_container_semantic_role_evidence(
                         "confidence": entry.get("confidence"),
                     }
                 )
+            for entry in role.get("semantic_evidence_records") or []:
+                if not isinstance(entry, Mapping):
+                    continue
+                provider = str(entry.get("provider") or "")
+                record_id = str(entry.get("evidence_id") or "")
+                if not provider:
+                    continue
+                key = (provider, record_id)
+                if key in seen_record_keys:
+                    continue
+                seen_record_keys.add(key)
+                semantic_evidence_records.append(dict(entry))
 
         for evidence_id in [str(item) for item in container.get("linked_kitsumed_mask_ids") or [] if str(item)]:
             model_ids.append(evidence_id)
@@ -1239,14 +1355,56 @@ def _annotate_fused_container_semantic_role_evidence(
                 authority_roles.add("sfx_decorative")
                 conflict_evidence.add(f"current_sfx_decorative_region:{region_id}")
                 protected_authority_states.add("protect_sfx_decorative")
+                semantic_evidence_records.append(
+                    _semantic_evidence_record(
+                        evidence_id=f"{PROVIDER_CURRENT_REGION_SEMANTIC}:{region_id}:protect_sfx_decorative",
+                        provider=PROVIDER_CURRENT_REGION_SEMANTIC,
+                        semantic_target="sfx_decorative",
+                        authority_state=AUTH_PROTECT_SFX_DECORATIVE,
+                        bbox=link.get("bbox") or [],
+                        source_model_ids=[region_id],
+                        confidence=link.get("confidence"),
+                        reason_codes=["current_region_sfx_decorative_evidence"],
+                        created_by="fused-model",
+                        page_id=str(container.get("page") or ""),
+                    )
+                )
             if link.get("is_caption_or_background"):
                 current_region_roles.add("caption_background")
                 authority_roles.add("background_narration")
                 cleanup_authority_states.add("cleanup_translate_background")
+                semantic_evidence_records.append(
+                    _semantic_evidence_record(
+                        evidence_id=f"{PROVIDER_CURRENT_REGION_SEMANTIC}:{region_id}:cleanup_translate_background",
+                        provider=PROVIDER_CURRENT_REGION_SEMANTIC,
+                        semantic_target="background_narration",
+                        authority_state=AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+                        bbox=link.get("bbox") or [],
+                        source_model_ids=[region_id],
+                        confidence=link.get("confidence"),
+                        reason_codes=["current_region_background_evidence"],
+                        created_by="fused-model",
+                        page_id=str(container.get("page") or ""),
+                    )
+                )
             if link.get("is_speech"):
                 current_region_roles.add("speech")
                 authority_roles.add("speech")
                 cleanup_authority_states.add("cleanup_translate_speech")
+                semantic_evidence_records.append(
+                    _semantic_evidence_record(
+                        evidence_id=f"{PROVIDER_CURRENT_REGION_SEMANTIC}:{region_id}:cleanup_translate_speech",
+                        provider=PROVIDER_CURRENT_REGION_SEMANTIC,
+                        semantic_target="speech",
+                        authority_state=AUTH_CLEANUP_TRANSLATE_SPEECH,
+                        bbox=link.get("bbox") or [],
+                        source_model_ids=[region_id],
+                        confidence=link.get("confidence"),
+                        reason_codes=["current_region_speech_evidence"],
+                        created_by="fused-model",
+                        page_id=str(container.get("page") or ""),
+                    )
+                )
         fused_type = str(container.get("fused_container_type") or "")
         if fused_type == "speech_bubble":
             role_signals.add("speech_candidate")
@@ -1279,6 +1437,7 @@ def _annotate_fused_container_semantic_role_evidence(
             "protected_authority_states": sorted(protected_authority_states),
             "protected_candidate_states": sorted(protected_candidate_states),
             "authority_evidence_kind": "typed_fused_bubble_detection_role_evidence",
+            "semantic_evidence_records": semantic_evidence_records,
             "confidence": container.get("confidence"),
         }
 
