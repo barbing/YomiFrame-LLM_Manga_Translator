@@ -129,6 +129,22 @@ APPROVED_SEMANTIC_EVIDENCE_PROVIDERS = {
 SEMANTIC_TARGET_SFX_DECORATIVE = "sfx_decorative"
 SEMANTIC_TARGET_REVIEW_UNKNOWN = "review_unknown"
 
+WEAK_BACKGROUND_AUTHORITY_REASON_TOKENS = (
+    "typed_deterministic_side_narration_background_authority",
+    "typed_side_narration_background_authority",
+    "typed_deterministic_top_band_background_authority",
+    "typed_text_free_background_model_authority",
+    "deterministic_side_narration_background_authority",
+    "side_narration_background_authority",
+)
+
+WEAK_SIDE_BACKGROUND_AUTHORITY_REASON_TOKENS = (
+    "typed_deterministic_side_narration_background_authority",
+    "typed_side_narration_background_authority",
+    "deterministic_side_narration_background_authority",
+    "side_narration_background_authority",
+)
+
 DETECTION_SCOPED = "scoped"
 DETECTION_COMPATIBILITY_FALLBACK = "compatibility_fallback"
 DETECTION_BLOCKED = "blocked_by_text_area_plan"
@@ -5327,13 +5343,7 @@ def _demote_weak_background_authority_overlapping_protected(
         if not cleanup_states.issubset({AUTH_CLEANUP_TRANSLATE_BACKGROUND, AUTH_CLEANUP_TRANSLATE_CAPTION}):
             continue
         typed_reasons = {str(item) for item in _semantic_role_values(role_evidence, "typed_authority_reason_codes")}
-        weak_background_tokens = (
-            "typed_deterministic_side_narration_background_authority",
-            "typed_side_narration_background_authority",
-            "typed_deterministic_top_band_background_authority",
-            "typed_text_free_background_model_authority",
-        )
-        if not any(any(token in reason for token in weak_background_tokens) for reason in typed_reasons):
+        if not any(any(token in reason for token in WEAK_BACKGROUND_AUTHORITY_REASON_TOKENS) for reason in typed_reasons):
             continue
         bbox = _normalize_xywh(container.bbox, image_size)
         if not bbox:
@@ -5388,7 +5398,7 @@ def _deterministic_large_sfx_component_bboxes(
                 and container.route_intent == ROUTE_TRANSLATE_SPEECH
             )
         )
-        if has_cleanup_authority:
+        if has_cleanup_authority and not _is_weak_side_background_cleanup_authority_container(container):
             cleanup_boxes.append(xyxy)
         elif container.container_type == CONTAINER_SFX or container.route_intent == ROUTE_PRESERVE_SFX:
             protected_boxes.append(xyxy)
@@ -5429,6 +5439,23 @@ def _deterministic_large_sfx_component_bboxes(
             continue
         deduped.append(candidate)
     return deduped
+
+
+def _is_weak_side_background_cleanup_authority_container(container: TextAreaContainer) -> bool:
+    role_evidence = _container_semantic_role_evidence(container)
+    cleanup_states = set(_semantic_role_state_values(role_evidence, "cleanup_authority_states"))
+    if not cleanup_states or not cleanup_states.issubset({AUTH_CLEANUP_TRANSLATE_BACKGROUND, AUTH_CLEANUP_TRANSLATE_CAPTION}):
+        return False
+    evidence_text = " ".join(
+        [
+            str(container.confidence_tier or ""),
+            " ".join(str(item) for item in container.evidence_reason_codes or []),
+            " ".join(_semantic_role_values(role_evidence, "typed_authority_reason_codes")),
+            " ".join(_semantic_role_values(role_evidence, "role_signals")),
+            str(role_evidence.get("authority_evidence_kind") or ""),
+        ]
+    ).lower()
+    return any(token in evidence_text for token in WEAK_SIDE_BACKGROUND_AUTHORITY_REASON_TOKENS)
 
 
 def _max_inside_ratio_xyxy(bbox: Sequence[int], boxes: Sequence[Sequence[int]]) -> float:
