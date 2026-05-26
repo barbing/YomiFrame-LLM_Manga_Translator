@@ -1,180 +1,140 @@
 # YomiFrame
 
-YomiFrame is a Windows desktop app for local manga translation. It detects text, OCRs Japanese dialogue, translates it with local models, removes the original text, and renders readable translated text back into the page.
+YomiFrame is a Windows desktop app for local manga translation. The current pipeline is modular: upstream text-area planning decides what visible text means, pixel detectors supply text foreground, and cleanup, OCR, translation, and rendering consume explicit contracts instead of inferring semantics locally.
 
 ![Screenshot](assets/screenshot.png)
 
 ## What It Does
-- Windows GUI built with PySide6
-- Batch translation from folder to folder
-- `ComicTextDetector` as the primary detector, with `PaddleOCR` fallback only when needed
-- OCR with `MangaOCR` and `PaddleOCR`
-- Translation with local `Ollama` or local `GGUF` models
-- Auto-Glossary / Name Memory for consistent proper nouns and aliases
-- Optional `Build Glossary Before Translation` mode for stronger volume-wide consistency
-- Experimental Deep Discovery for difficult extraction cases
-- Automatic first-launch pre-downloader for fixed runtime model assets
-- Optional AI inpainting support
-- Project JSON output plus `style_guide.json`
 
-## Current Workflow
-For normal use:
+- Provides a Windows GUI for selecting manga folders, source language, target language, and local models.
+- Uses a BubbleDetection/TextAreaPlan stage to identify speech, narration, background/title text, SFX/decorative text, and non-text artifacts before cleanup.
+- Combines Kitsumed-style speech-bubble evidence with Ogkalu text-area labels to improve coverage where a single bubble model is insufficient.
+- Uses ComicTextDetector/TextForegroundSegmentation as a scoped text-pixel provider, not as the owner of speech/background/SFX semantics.
+- Runs OCR on TextAreaPlan-eligible regions, including review-only OCR conservation paths where translation, cleanup, and render remain blocked.
+- Translates with local Ollama-compatible LLMs and optional glossary/name-memory context.
+- Removes source glyphs through the cleanup module: SourceGlyphMask, CleanupJob, CleanupMask, CleanupPlan, cleanup backend, CleanupResult, and CleanupProof.
+- Renders translated text back into the intended speech, narration, caption, or background areas.
 
-1. Choose the input folder and export folder.
-2. Select source and target languages.
-3. Keep `Auto-Glossary (Name Memory)` enabled.
-4. Enable `Build Glossary Before Translation` for chapter or volume runs.
-5. Leave `Experimental Deep Discovery` off unless default discovery is insufficient.
-6. Start translation.
+## Current Architecture
 
-Recommended default for Japanese -> Simplified Chinese:
-- Detector: `ComicTextDetector`
-- OCR: `MangaOCR`
-- Translator: `GGUF` with Sakura, or `Ollama` if that is your local setup
-- Auto-Glossary: `On`
-- Build Glossary Before Translation: `On` for full volumes
-- Experimental Deep Discovery: `Off`
-
-## Auto-Glossary / Name Memory
-The glossary system is no longer just a flat term list. It now builds character/name memory from OCR text and uses that memory during translation.
-
-Highlights:
-- prefers canonical kanji names when available
-- handles common kana aliases and nickname variants more reliably
-- keeps exported `style_guide.json` cleaner and less prone to poisoned entries
-- improves cross-page consistency for names, places, and references
-
-Important limitation:
-- if a chapter contains only kana aliases and never contains a canonical reference, the app cannot reliably reconstruct the original kanji form on its own
-- if the user already has a `style_guide.json` from previous sessions, that guide can still provide the missing canonical mapping
-
-## Pre-Downloader
-On startup, the app checks for required fixed runtime assets and offers to download missing ones in one batch before translation starts.
-
-Covered assets:
-- `ComicTextDetector`
-- `PaddleOCR`
-- `MangaOCR`
-- Japanese NER model
-
-Optional asset:
-- `Big-LAMA` for default AI inpainting
-
-Resolution order:
-1. Existing system cache / environment cache
-2. Project-local `models/` fallback
-
-This keeps developer environments efficient while still supporting new users who need project-local downloads.
-
-## Models
-Local models are not committed to the repository.
-
-Typical layout:
+The default architecture is a specialized module chain rather than a monolithic detect/OCR/erase/render pass:
 
 ```text
-models/
-  comic-text-detector/
-  manga-ocr/
-  paddleocr/
-  lama/
-  sakura/
-  qwen/
+BubbleDetection typed model evidence
+  -> TextAreaPlan semantic authorization
+  -> scoped CTD/TextForegroundSegmentation projection
+  -> component authorization map
+  -> OCR and translation eligibility
+  -> SourceGlyphMask and CleanupJob
+  -> CleanupMask and CleanupPlan
+  -> cleanup backend / inpainting
+  -> CleanupResult and CleanupProof
+  -> renderer final composition
 ```
 
-### GGUF
-- Place `.gguf` files under `models/`
-- The app scans `models/**.gguf`
-- Example:
-  - `models/sakura/sakura-14b-qwen3-v1.5-q6k.gguf`
+The key rule is ownership separation. BubbleDetection and TextAreaPlan own semantic authority. CTD supplies text pixels. CleanupMask is a strict consumer of upstream authorization and must not reclassify speech, background text, SFX, art, or unknown components from local geometry alone.
 
-### Ollama
-- Install Ollama separately
-- Ensure the Ollama server is running
-- Use the model dropdown in the UI
+## Module Responsibilities
 
-## Installation
-Environment target:
-- Windows 10/11
-- Python 3.10
-- Conda environment recommended
+- `app/pipeline/bubble_detection.py`: runs the bubble/text-area model ensemble, normalizes raw model labels, stamps evidence strength, edge/clipping context, neighbor context, and semantic contract identity.
+- `app/pipeline/text_area_plan.py`: adjudicates upstream evidence into typed text units and standardized downstream fields such as OCR eligibility, translation eligibility, render eligibility, cleanup executability, authorization state, basis, and origin.
+- `app/pipeline/controller.py`: orchestrates the stage chain and preserves the TextAreaPlan authorization contract when regions are rehydrated or routed.
+- `app/detect/` and CTD integrations: provide scoped text foreground and component pixels for authorized text areas.
+- `app/ocr/`: reads approved text regions without deciding whether a component is semantic text.
+- `app/translate/` and `app/nlp/`: translate eligible OCR text and maintain glossary/name-memory context.
+- `app/pipeline/source_glyph_mask.py` and cleanup modules: build provenance-aware cleanup jobs and masks from upstream authorization and foreground projection.
+- `app/render/`: composes translated text with cleanup results and must not silently drop translated content.
 
-Install:
+## Semantic Authorization
 
-```powershell
-pip install -r requirements.txt
+Text areas should reach downstream modules with explicit state instead of ambiguous route intent. The important states are:
+
+- `cleanup_translate_speech`: normal dialogue or bubble text eligible for OCR, translation, cleanup, and render.
+- `cleanup_translate_background`: title, sign, narration, or background text eligible for cleanup/translation when general constraints pass.
+- `cleanup_translate_caption`: caption-style text eligible for normal downstream handling.
+- `protect_sfx_decorative`: SFX or decorative lettering that should be protected from normal translation cleanup unless a future feature explicitly handles it.
+- `protect_art_or_non_text`: artwork, panel structure, or non-text marks that must not become executable cleanup.
+- `review_unknown_not_cleanup`: uncertain material that remains visible for review but is not executable cleanup authority.
+- `outside_cleanup_scope`: material outside the current cleanup/translation scope.
+
+Downstream stages should require explicit TextAreaPlan fields for OCR, translation, cleanup, and rendering. OCR eligibility can exist for review/conservation, but translation, cleanup, and render authority require a cleanup-translatable semantic state. Candidate-only evidence, stale cache artifacts, geometry, overlap, and route intent are not semantic authority by themselves.
+
+## Cleanup and Inpainting
+
+The cleanup module starts from accepted upstream semantic units and scoped foreground projection. Its job is to erase approved source glyph pixels while preserving SFX, decorative text, art, and unknown material.
+
+The cleanup chain is intentionally explicit:
+
+```text
+SourceGlyphMask
+  -> CleanupJob
+  -> CleanupMask
+  -> CleanupPlan
+  -> CleanupBackend
+  -> CleanupResult
+  -> CleanupProof
 ```
 
-Notes:
-- `requirements.txt` keeps CPU-safe defaults where possible
-- use `torch 2.6+` with current `transformers` releases; older Torch versions can fail when MangaOCR loads its legacy `.bin` checkpoint
-- AI inpainting is optional because current `simple-lama-inpainting` packaging still conflicts with `Pillow>=10`
-- to enable `ai` inpainting mode, install:
+Mask-only validation can prove semantic authorization and cleanup-mask readiness. It does not by itself prove cleanup runtime, inpainting quality, rendering quality, Gate 1/2/3, Phase 6, or full translation readiness.
 
-```powershell
-```
+## Recommended Local Setup
 
-- for GPU acceleration on Windows, install the correct CUDA-enabled `torch`, `paddlepaddle-gpu`, and GPU-capable `llama-cpp-python` build in your own environment as needed
+- Platform: Windows.
+- Python: use the existing conda environment for this repo, normally `manga-llm`.
+- Local LLM: Ollama-compatible model for translation, for example `qwen2.5:14b`.
+- Dataset for validation: `Test Manga` unless a task names another dataset.
 
-## Run
-From the repo root:
+Start the app from the repository root:
 
 ```powershell
 python -m app.main
 ```
 
-## Output
-Each run can generate:
-- translated images in the export folder
-- `project.json`
-- `style_guide.json` when Auto-Glossary is enabled
-
-`project.json` stores regions, OCR text, translations, and render settings so results can be reviewed and re-applied later.
-
-## Documentation
-- overview and architecture: [docs/README.md](docs/README.md)
-- technical notes: [TECHNICAL.md](TECHNICAL.md)
-- guarded validation workflow: [SAFE_FULL_RUN.md](SAFE_FULL_RUN.md)
-
-## Performance
-Reference validation on the current local test volume:
-- full volume run completed within the target budget
-- recent validated run averaged about `15-16s/page` on GPU
-- target remains `6 pages under 2 minutes`
-
-Actual speed depends on:
-- detector choice
-- OCR engine
-- translator backend
-- GPU availability
-- page density
-
-## Troubleshooting
-### MangaOCR fails to load
-The app will try the normal path first, then worker-process fallback, then `PaddleOCR` if needed.
-
-### ComicTextDetector fails
-`ComicTextDetector` is the intended default detector. `PaddleOCR` detector fallback exists only as an emergency path.
-
-### Ollama warning
-Start Ollama with:
+Quick syntax check:
 
 ```powershell
-ollama serve
+python -m py_compile app/pipeline/bubble_detection.py app/pipeline/text_area_plan.py app/pipeline/controller.py
 ```
 
-Or switch to GGUF.
+## Models and Assets
 
-### Missing models on first run
-Allow the startup pre-downloader to fetch the required runtime assets.
+The app uses repository-local assets, caches, and downloaded models where possible:
 
-### GPU not used for GGUF
-Install a CUDA-capable `llama-cpp-python` build and verify your model/backend configuration.
+- Bubble/text-area models for Kitsumed and Ogkalu evidence.
+- ComicTextDetector/TextForegroundSegmentation for scoped text-pixel projection.
+- OCR models such as MangaOCR/PaddleOCR depending on the active path.
+- Optional Japanese NER/glossary resources.
+- Optional cleanup/inpainting backend assets such as Big-LAMA.
 
-## Repository Notes
-- `Test Manga/` is local test data and is not tracked
-- `models/` is local and not tracked
-- runtime behavior is documented in [TECHNICAL.md](TECHNICAL.md)
-- packaging notes are in [BUILD_EXE.md](BUILD_EXE.md)
+Avoid downloading new tools or changing the environment unless the task explicitly requires it.
+
+## Output
+
+Typical runs write translated images and project artifacts under `output/`, including:
+
+- translated page images
+- project JSON with regions and translations
+- style guide and glossary artifacts when enabled
+- debug overlays, masks, and validation artifacts when the selected workflow produces them
+
+Validation artifacts are evidence, not acceptance by themselves. Full-page visual inspection remains required for cleanup, rendering, and translation-quality decisions.
+
+## Documentation
+
+- `TECHNICAL.md`: detailed architecture and contract notes.
+- `docs/architecture.md`: project architecture authority.
+- `docs/modules.md`: module ownership and interfaces.
+- `docs/current-issues-and-roadmap.md`: active roadmap and unresolved work.
+- `docs/testing-and-validation.md`: validation rules and visual-review requirements.
+
+## Development Rules
+
+- Keep changes small and targeted.
+- Do not route known SFX/decorative/art areas through normal OCR, translation, or cleanup paths unless the roadmap or user explicitly asks for that behavior.
+- Do not treat reviewer counters, JSON summaries, or contact-sheet prose as proof of visual correctness.
+- For mask decisions, inspect raw original pages, CTD/refined segmentation, authorization overlays, projection-quality overlays, protected/unknown overlays, foreground union, and erase union.
+- For translation-affecting code changes, validate real output images and not only logs or metadata.
 
 ## License
-This project integrates third-party components under their own licenses. See `app/third_party/` for details.
+
+Apache-2.0. See `LICENSE`.

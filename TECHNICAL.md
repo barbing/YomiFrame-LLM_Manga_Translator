@@ -1,314 +1,240 @@
-# YomiFrame - Technical Notes (v1.2.0)
+# YomiFrame Technical Notes
 
-## Overview
-YomiFrame is a Windows desktop application for local manga translation. The pipeline detects text regions, OCRs Japanese text, translates it with a local backend, removes the original text, and renders translated text back into the page.
+This document describes the current specialized modular pipeline. It replaces the older monolithic description where detection, OCR, cleanup, and rendering were treated as one broad flow.
 
-The current system is built around four principles:
-- `ComicTextDetector` is the primary detector
-- local inference should remain fast enough for volume translation
-- proper nouns need cross-page memory, not only per-page prompt hints
-- startup should pre-download fixed runtime assets before the first real translation run
+## Architecture Principles
 
-Outputs:
-- translated images
-- `project.json`
-- `style_guide.json` when Auto-Glossary is enabled
+YomiFrame separates semantic authority from pixel evidence and from downstream execution:
 
-## High-Level Architecture
-- UI: `PySide6`
-- Pipeline orchestration: `app/pipeline/controller.py`
-- Pre-scan and glossary building: `app/pipeline/prescan.py`
-- Detection: `app/detect/*`
-- OCR: `app/ocr/*`
-- Translation: `app/translate/*`
-- Rendering and text cleanup: `app/render/renderer.py`
-- NLP / name extraction / alias graph: `app/nlp/*`
-- Model download and resolution: `app/models/*`
+- BubbleDetection/TextAreaPlan own semantic authority.
+- BubbleDetection normalizes model evidence from the bubble/text-area ensemble.
+- TextAreaPlan adjudicates that evidence into typed semantic text units and standardized downstream eligibility fields.
+- ComicTextDetector/TextForegroundSegmentation supplies text pixels inside scoped regions.
+- CleanupMask consumes upstream authorization and foreground projection; it does not infer speech, background, SFX, art, or review semantics from local component geometry.
+- OCR, translation, cleanup, and rendering require explicit TextAreaPlan fields instead of accepting route intent alone. OCR may be allowed for review/conservation while translation, cleanup, and rendering remain blocked.
 
-## Main Runtime Flow
-The main runtime flow lives in [controller.py](app/pipeline/controller.py).
+The target default chain is:
 
-Per page:
-1. Load image.
-2. Detect text regions.
-3. OCR text regions.
-4. Classify/filter regions.
-5. Apply glossary and context-aware translation.
-6. Remove original text.
-7. Render translated text.
-8. Save page output and update `project.json`.
-
-The pipeline also emits UI-facing status messages, progress, ETA, and per-page timing.
-
-## Detection
-Primary detector:
-- `ComicTextDetector`
-
-Fallback detector:
-- `PaddleTextDetector`
-
-Design intent:
-- `ComicTextDetector` should be the normal path
-- `PaddleTextDetector` exists only as an emergency fallback when CTD is unavailable or crashes
-
-Recent validation work focused on keeping the CTD path stable and avoiding silent degradation into Paddle-only behavior.
-
-## OCR
-Primary OCR path:
-- `MangaOCR`
-
-Fallback and rescue path:
-- `PaddleOCR`
-
-Runtime behavior:
-- the app first tries in-process `MangaOCR`
-- if that fails, it can use a worker-process fallback
-- if MangaOCR is unavailable, it falls back to `PaddleOCR`
-- for certain weak or wide OCR cases, Paddle can be used as a targeted rescue comparison instead of replacing MangaOCR globally
-
-Relevant files:
-- [manga_ocr_engine.py](app/ocr/manga_ocr_engine.py)
-- [manga_ocr_worker.py](app/ocr/manga_ocr_worker.py)
-- [manga_ocr_subprocess.py](app/ocr/manga_ocr_subprocess.py)
-- [paddle_ocr_recognizer.py](app/ocr/paddle_ocr_recognizer.py)
-
-## Translation Backends
-Supported translation backends:
-- `Ollama`
-- `GGUF` via `llama-cpp-python`
-
-Important product assumption:
-- Sakura is treated as a translation model first, not a general extraction model
-
-That means the noun-consistency system is designed to do most discovery with OCR + MeCab + graph logic first, then use the translation model for translation tasks rather than full extraction.
-
-Relevant files:
-- [ollama_client.py](app/translate/ollama_client.py)
-- [gguf_client.py](app/translate/gguf_client.py)
-- [prompts.py](app/translate/prompts.py)
-
-## Auto-Glossary / Name Memory
-The current glossary system is no longer just “consistent terms.” It is a lightweight name-memory layer.
-
-Core components:
-- [mecab_extractor.py](app/nlp/mecab_extractor.py)
-- [character_graph.py](app/nlp/character_graph.py)
-- [prescan.py](app/pipeline/prescan.py)
-
-Current behavior:
-- extracts likely names and aliases from OCR text
-- groups aliases into canonical character/entity nodes
-- prefers kanji canonical names when available
-- handles many kana nickname variants more conservatively and more consistently
-- exports cleaner `style_guide.json` entries
-
-Examples of the kinds of relationships it now handles better:
-- full name -> shortened surname
-- given-name call forms
-- honorific variants
-- kana nicknames like `まゆ`, `まゆっち`, `まゆまゆ`
-
-Known limitation:
-- if the corpus never contains a canonical reference and only contains kana aliases, the system cannot reliably reconstruct the original kanji name from kana alone
-- if a prior `style_guide.json` exists, it can supply that missing mapping
-
-## Pre-Scan
-`Build Glossary Before Translation` is the recommended quality mode for chapters and volumes.
-
-Purpose:
-- scan OCR text before page translation
-- build glossary/name memory up front
-- reduce early-page inconsistency
-
-Design constraint:
-- the default local workflow still needs to stay fast
-- heavier extraction paths remain optional
-
-The current implementation keeps pre-scan lightweight by default and avoids loading a second heavy extraction model unless explicitly requested.
-
-## Experimental Deep Discovery
-Deep Discovery remains in the codebase, but it is now treated as experimental.
-
-Intended role:
-- difficult edge cases
-- developer investigation
-- optional higher-cost discovery path
-
-It is not the main noun-consistency strategy anymore.
-
-UI status:
-- user-facing wording now marks it as optional and slower
-- standard workflow should keep it off
-
-## Rendering
-Rendering is handled in [renderer.py](app/render/renderer.py).
-
-Main responsibilities:
-- remove original text
-- preserve readable bubble structure where possible
-- handle dark captions and narration differently from standard speech bubbles
-- avoid translating meaningless background/SFX fragments when they should remain original
-- fit translated text into narrow or vertical regions without obvious overflow
-
-Recent quality work focused on:
-- reducing destructive cleanup
-- suppressing junk overlays from bad OCR fragments
-- improving dark-caption handling
-- improving narrow vertical bubble fitting
-
-The renderer still depends heavily on good upstream region grouping and OCR quality. If segmentation is poor, render-time fixes can only help partially.
-
-## Region Semantics
-The pipeline distinguishes different kinds of regions because they should not all be treated like ordinary speech bubbles.
-
-Important classes:
-- speech bubbles
-- dark captions / narration boxes
-- meaningful background text
-- SFX / ignorable decorative fragments
-
-This distinction is critical for both translation quality and image quality.
-
-## Project JSON
-Each page is saved with region-level structured data. Typical fields include:
-
-```json
-{
-  "region_id": "r000",
-  "bbox": [x, y, w, h],
-  "polygon": [[[x, y], [x2, y2]]],
-  "type": "speech_bubble|background_text",
-  "ocr_text": "...",
-  "translation": "...",
-  "confidence": {
-    "det": 1.0,
-    "ocr": 1.0,
-    "trans": 1.0
-  },
-  "render": {
-    "font": "Microsoft YaHei",
-    "font_size": 0,
-    "line_height": 1.2,
-    "align": "center"
-  },
-  "flags": {
-    "ignore": false,
-    "bg_text": false,
-    "needs_review": false
-  }
-}
+```text
+BubbleDetection typed evidence
+  -> TextAreaPlan semantic units
+  -> scoped CTD/TextForegroundSegmentation projection
+  -> component authorization map
+  -> OCR and translation routing
+  -> SourceGlyphMask
+  -> CleanupJob
+  -> CleanupMask
+  -> CleanupPlan
+  -> CleanupBackend
+  -> CleanupResult
+  -> CleanupProof
+  -> renderer final composition
 ```
 
-The JSON is designed for:
-- review and re-render workflows
-- manual correction
-- later consistency checks
+## Stage Ownership
 
-## Startup Pre-Downloader
-The app checks for fixed runtime dependencies shortly after startup and offers to batch-download missing assets.
+### UI and Controller
 
-Current assets covered:
-- `ComicTextDetector`
-- `PaddleOCR`
-- `MangaOCR`
-- `Big-LAMA`
-- Japanese NER model
+The desktop UI gathers user selections and calls the pipeline controller. The controller orchestrates module execution and preserves the TextAreaPlan contract when regions are serialized, rehydrated, filtered, or routed.
 
-Startup entry:
-- [main_window.py](app/ui/main_window.py)
+The controller should not turn route intent into translation authority. A region is translatable only when TextAreaPlan has explicitly marked OCR, translation, cleanup, and render eligibility as appropriate for a cleanup-translatable semantic state. Review-only OCR conservation does not create translation or cleanup authority.
 
-Download manager:
-- [downloader.py](app/models/downloader.py)
+### BubbleDetection
 
-Shared model resolution:
-- [resolution.py](app/models/resolution.py)
+`app/pipeline/bubble_detection.py` is the upstream model-evidence provider. It combines speech-bubble and text-area evidence from the available bubble detection models, including Kitsumed-style speech-bubble output and Ogkalu labels such as `bubble`, `text_bubble`, and `text_free`.
 
-Resolution order:
-1. system cache / environment cache
-2. project-local `models/`
+BubbleDetection is responsible for:
 
-This behavior is intentional:
-- developers often already have model caches in their Python environment
-- new users still get a portable project-local fallback
+- preserving raw model labels
+- normalizing candidate kind
+- stamping evidence strength
+- recording source evidence IDs
+- auditing edge and clipping context
+- computing neighboring speech context
+- exposing first-class reason codes for speech and free-text evidence
+- including semantic contract identity in runtime and cache metadata
 
-Recent hardening work aligned startup checks with runtime model resolution so a model marked “installed” at launch should not later trigger a surprise lazy download during translation.
+BubbleDetection does not by itself authorize cleanup. It supplies typed evidence to TextAreaPlan.
 
-## Model Resolution
-Model resolution is now centralized instead of duplicated across loaders.
+### TextAreaPlan
 
-Why this matters:
-- startup checks and runtime loaders must agree
-- otherwise the app can report “ready” and still fail or redownload later
+`app/pipeline/text_area_plan.py` is the semantic authority layer. It converts evidence into typed text units before CTD/component projection.
 
-Shared resolver responsibilities:
-- MangaOCR system/local lookup
-- NER system/local lookup
-- Paddle detector and recognizer lookup
+TextAreaPlan is responsible for:
 
-Relevant file:
-- [resolution.py](app/models/resolution.py)
+- speech-bubble text authorization
+- background/title/narration text authorization
+- caption authorization
+- SFX/decorative protection
+- art/non-text protection
+- review/unknown quarantine
+- deterministic eligibility fields for OCR, translation, cleanup, and rendering
+- explicit authorization state, basis, and origin
 
-## UI
-Main UI file:
-- [main_window.py](app/ui/main_window.py)
+TextAreaPlan must distinguish a candidate or review state from executable semantic authority. A high-confidence single-model result may be promoted only through documented constraints, such as Ogkalu speech evidence with page-edge/clipping support, neighboring speech context, and no protected conflict.
 
-Important Home glossary controls:
-- `Auto-Glossary (Name Memory)`
-- `Build Glossary Before Translation`
-- `Experimental Deep Discovery (Optional, slower)`
+### Text Pixel Projection
 
-Current UI behavior:
-- Auto-Glossary is the master switch
-- if it is off, pre-scan and deep discovery are disabled
-- wording now reflects the actual architecture rather than the older glossary design
+ComicTextDetector/TextForegroundSegmentation provides text-pixel evidence within TextAreaPlan scopes. It may refine component boundaries and foreground pixels, but it must not become the semantic owner of speech, background, SFX, or review classifications.
 
-## Performance
-Current target:
-- `6 pages under 2 minutes` on the reference PC
+The projection output feeds component authorization and cleanup masks. Projection quality may affect executability, but projection readiness should not recolor semantic state.
 
-Validated recent behavior:
-- full-volume GPU run around `15-16s/page`
-- recent full-volume validation remained within the user’s runtime budget
+### OCR
 
-The main cost drivers are:
-- detector runtime
-- OCR runtime
-- translation backend/runtime configuration
-- page density
-- inpainting/render complexity
+OCR consumes TextAreaPlan-eligible regions and projected text areas. Some compatibility or review-conservation regions may be OCR-eligible while still blocked from translation, cleanup, and rendering. Known SFX/decorative/art regions should not enter the normal translation path unless a future feature explicitly defines SFX translation support.
 
-## Error Handling and Fallbacks
-The app is designed to surface errors clearly in the UI and avoid silent failures.
+OCR errors should be diagnosed separately from semantic authorization errors. If visible text was never authorized upstream, OCR cannot fix the missed region.
 
-Examples:
-- missing MangaOCR dependencies -> readable error and fallback path
-- missing detector assets -> user-visible model guidance
-- startup model checks -> pre-download prompt before translation begins
+### Translation and NLP
 
-The goal is graceful fallback where reasonable, but not silent quality regression.
+Translation consumes OCR text from eligible semantic units. The NLP layer handles glossary, name memory, style guidance, and consistency. It should not promote review/unknown regions into translation merely because text was detected.
 
-## Local Data and Repository Conventions
-Not tracked in Git:
-- `models/`
-- `output/`
-- `Test Manga/`
+### Cleanup
 
-Tracked code of interest:
-- `app/`
-- `README.md`
-- `TECHNICAL.md`
-- `requirements.txt`
+Cleanup begins only after upstream semantic authorization and projection have produced approved source-glyph pixels.
 
-## Running
-From repo root:
+The cleanup chain is:
+
+```text
+SourceGlyphMask
+  -> CleanupJob
+  -> CleanupMask
+  -> CleanupPlan
+  -> CleanupBackend
+  -> CleanupResult
+  -> CleanupProof
+```
+
+`CleanupMask` is a strict consumer. It should only erase components that upstream authorization made executable. Unknown, protected SFX/decorative, art, and non-text components must remain non-executable.
+
+### Rendering
+
+Rendering composes translated text after cleanup. It must preserve the full translated text or produce explicit evidence when text cannot fit. It should not silently drop characters, overflow unreadably, or reinterpret semantic scope.
+
+## Semantic Authorization Contract
+
+Downstream modules receive standardized fields rather than reading historical confidence-tier names or marker strings. The contract includes:
+
+- CTD scope
+- OCR eligibility
+- translation eligibility
+- render eligibility
+- cleanup executability
+- explicit authorization state
+- authorization basis
+- origin/provider metadata
+
+Important semantic states include:
+
+- `cleanup_translate_speech`
+- `cleanup_translate_background`
+- `cleanup_translate_caption`
+- `protect_sfx_decorative`
+- `protect_art_or_non_text`
+- `review_unknown_not_cleanup`
+- `outside_cleanup_scope`
+- `ambiguous_component_owner`
+
+The required invariant is that executable downstream work must come from explicit TextAreaPlan authority. Candidate-only signals, stale artifacts, SourceGlyph/projection artifacts, page geometry, bbox overlap, and cleanup jobs do not create semantic authority.
+
+## BubbleDetection Cache Contract
+
+BubbleDetection cache entries must include the semantic evidence contract identity. Cache validation should reject payloads produced by an older semantic contract, even when model file paths and generic detector settings match.
+
+This prevents stale evidence from a previous contract from being reused after changes to:
+
+- semantic evidence schema
+- neighboring speech context computation
+- normalized Ogkalu/Kitsumed evidence interpretation
+- authority-related provider behavior
+
+The current cache contract is versioned in `app/pipeline/bubble_detection.py`. Cache invalidation is part of the semantic contract, not only detector performance.
+
+## Validation Policy
+
+Validation level depends on the changed module.
+
+For BubbleDetection/TextAreaPlan/CTD/CleanupMask authorization changes:
+
+- use a fresh mask-only run when explicitly approved
+- inspect raw visual artifacts page by page
+- compare original page, refined segmentation, semantic-unit/component authorization overlays, projection-quality overlay, protected/unknown overlay, clean foreground union, and clean erase union
+- do not use contact-sheet prose, summary JSON, counters, or reports as proof
+
+For cleanup runtime or inpainting changes:
+
+- validate CleanupPlan, CleanupBackend, CleanupResult, and CleanupProof
+- inspect inpainted output against original and masks
+- confirm protected material is preserved and approved source text is erased
+
+For OCR, translation, or rendering changes:
+
+- run a real translation validation cycle when feasible
+- inspect project JSON, OCR text, translated text, rendered output, overlays, and full pages
+- check that rendered text contains the full `translated_text`
+
+Mask-only validation cannot by itself prove Gate 1/2/3, Phase 6, cleanup runtime, inpainting quality, rendering quality, or full translation readiness.
+
+## Current Cleanup/Inpainting Phase Boundary
+
+The next formal cleanup/inpainting work should start from the accepted upstream semantic baseline. The cleanup phase should validate runtime execution, proof artifacts, inpainting quality, and final render composition.
+
+It should not reopen BubbleDetection/TextAreaPlan ownership unless raw visual evidence shows that an upstream semantic unit or component authorization is still wrong.
+
+## Auto-Glossary and Name Memory
+
+The glossary system supports chapter-level translation consistency for names, titles, organizations, places, nicknames, and forms of address. It consumes OCR and translation context after region authorization has already happened.
+
+Glossary enforcement must not mask upstream OCR or detection failures. If a name is missing because the text region was never authorized or OCR failed, the issue belongs upstream of glossary enforcement.
+
+## Models and Environment
+
+The project is Windows-first and should use the existing conda environment, normally `manga-llm`.
+
+Local assets and caches are preferred over environment changes. Heavy new dependencies or mandatory extra models should not be added unless the roadmap or user explicitly authorizes them.
+
+Main model families used by the pipeline include:
+
+- bubble/text-area detection models for BubbleDetection evidence
+- ComicTextDetector/TextForegroundSegmentation for text-pixel projection
+- OCR models for approved regions
+- local LLMs through Ollama-compatible translation paths
+- optional cleanup/inpainting backend models
+- optional NLP resources for glossary and name memory
+
+## Performance Expectations
+
+The default workflow must remain practical for local use. Translation-quality improvements should not make average processing time exceed roughly 30 seconds per page unless the user explicitly approves a slower path.
+
+Performance-sensitive work should report:
+
+- total runtime
+- page count
+- average time per page
+- bottleneck stage when identifiable
+
+## Development Guidelines
+
+- Identify the owning stage before editing code.
+- Do not fix semantic authorization defects inside CleanupMask.
+- Do not fix OCR failures by changing translation prompts.
+- Do not fix rendering overflow by changing OCR or semantic routing.
+- Do not route SFX/decorative/art areas through normal OCR, translation, cleanup, or render paths unless explicitly required.
+- Keep compatibility paths visible and temporary; do not let them become hidden alternate authority.
+- Prefer deterministic contracts and explicit fallback states over ad hoc heuristics.
+
+## Recommended Lightweight Checks
+
+Syntax checks for edited Python modules:
 
 ```powershell
-python -m app.main
+python -m py_compile app/pipeline/bubble_detection.py app/pipeline/text_area_plan.py app/pipeline/controller.py
 ```
 
-## Verification
-Typical validation steps:
-- quick syntax check with `python -m py_compile`
-- startup smoke run
-- focused 6-page timing run
-- full-volume quality run when translation/rendering behavior changes materially
+Contract-focused unit tests, when relevant:
+
+```powershell
+python -m unittest app.tests.test_semantic_authority_contract
+```
+
+Full validation requires the task-specific visual or translation workflow described above.
