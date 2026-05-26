@@ -1,6 +1,6 @@
 # YomiFrame Technical Notes
 
-This document describes the current specialized modular pipeline. It replaces the older monolithic description where detection, OCR, cleanup, and rendering were treated as one broad flow.
+This document describes the technical contracts behind the current specialized modular pipeline. The README is the broad project overview; this file owns implementation-level responsibilities, authorization fields, cache contracts, validation mechanics, and stage-boundary rules.
 
 ## Architecture Principles
 
@@ -173,11 +173,11 @@ For OCR, translation, or rendering changes:
 - inspect project JSON, OCR text, translated text, rendered output, overlays, and full pages
 - check that rendered text contains the full `translated_text`
 
-Mask-only validation cannot by itself prove Gate 1/2/3, Phase 6, cleanup runtime, inpainting quality, rendering quality, or full translation readiness.
+Mask-only validation cannot by itself prove end-to-end cleanup runtime, inpainting quality, rendering quality, or full translation readiness.
 
-## Current Cleanup/Inpainting Phase Boundary
+## Cleanup/Inpainting Readiness Boundary
 
-The next formal cleanup/inpainting work should start from the accepted upstream semantic baseline. The cleanup phase should validate runtime execution, proof artifacts, inpainting quality, and final render composition.
+Cleanup and inpainting validation should start only after upstream semantic authorization and text-pixel projection are accepted. Cleanup validation then needs to prove runtime execution, proof artifacts, inpainting quality, and final render composition.
 
 It should not reopen BubbleDetection/TextAreaPlan ownership unless raw visual evidence shows that an upstream semantic unit or component authorization is still wrong.
 
@@ -189,7 +189,7 @@ Glossary enforcement must not mask upstream OCR or detection failures. If a name
 
 ## Models and Environment
 
-The project is Windows-first and should use the existing conda environment, normally `manga-llm`.
+The project is Windows-first. For public setup, use Python 3.10 and install `requirements.txt` in an isolated virtual environment. Conda is also acceptable when users need GPU-specific Torch, PaddlePaddle, or llama-cpp-python builds.
 
 Local assets and caches are preferred over environment changes. Heavy new dependencies or mandatory extra models should not be added unless the roadmap or user explicitly authorizes them.
 

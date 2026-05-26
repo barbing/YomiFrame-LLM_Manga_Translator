@@ -1,140 +1,309 @@
 # YomiFrame
 
-YomiFrame is a Windows desktop app for local manga translation. The current pipeline is modular: upstream text-area planning decides what visible text means, pixel detectors supply text foreground, and cleanup, OCR, translation, and rendering consume explicit contracts instead of inferring semantics locally.
+YomiFrame is a Windows desktop application for local manga and comic translation. It combines page analysis, OCR, glossary memory, local LLM translation, source-text cleanup, and final text rendering into one local-first workflow.
 
 ![Screenshot](assets/screenshot.png)
 
-## What It Does
+## What YomiFrame Does
 
-- Provides a Windows GUI for selecting manga folders, source language, target language, and local models.
-- Uses a BubbleDetection/TextAreaPlan stage to identify speech, narration, background/title text, SFX/decorative text, and non-text artifacts before cleanup.
-- Combines Kitsumed-style speech-bubble evidence with Ogkalu text-area labels to improve coverage where a single bubble model is insufficient.
-- Uses ComicTextDetector/TextForegroundSegmentation as a scoped text-pixel provider, not as the owner of speech/background/SFX semantics.
-- Runs OCR on TextAreaPlan-eligible regions, including review-only OCR conservation paths where translation, cleanup, and render remain blocked.
-- Translates with local Ollama-compatible LLMs and optional glossary/name-memory context.
-- Removes source glyphs through the cleanup module: SourceGlyphMask, CleanupJob, CleanupMask, CleanupPlan, cleanup backend, CleanupResult, and CleanupProof.
-- Renders translated text back into the intended speech, narration, caption, or background areas.
+YomiFrame helps turn source-language manga pages into translated page images while preserving the visual structure of the original page.
 
-## Current Architecture
+It is designed to handle:
 
-The default architecture is a specialized module chain rather than a monolithic detect/OCR/erase/render pass:
+- speech bubbles
+- narration boxes
+- captions and background signs
+- title or cover text when appropriate
+- SFX and decorative lettering that should usually be preserved
+- chapter-level name and terminology consistency
+- local cleanup/inpainting of translated text areas
+- final text placement back into the page
 
-```text
-BubbleDetection typed model evidence
-  -> TextAreaPlan semantic authorization
-  -> scoped CTD/TextForegroundSegmentation projection
-  -> component authorization map
-  -> OCR and translation eligibility
-  -> SourceGlyphMask and CleanupJob
-  -> CleanupMask and CleanupPlan
-  -> cleanup backend / inpainting
-  -> CleanupResult and CleanupProof
-  -> renderer final composition
+The project is aimed at practical local use. It favors deterministic routing, explicit fallbacks, and reviewable output over opaque cloud-only processing.
+
+## Quick Start
+
+YomiFrame currently targets Windows. The commands below use a standard Python virtual environment so the project is not tied to any developer-specific machine setup.
+
+### Requirements
+
+- Windows 10 or newer
+- Python 3.10 recommended; newer Python versions may require dependency adjustments
+- Git
+- Enough disk space for OCR, detection, translation, and optional inpainting models
+- Optional NVIDIA GPU for faster OCR, detection, translation, and inpainting
+
+### Install From Source
+
+```powershell
+git clone https://github.com/barbing/YomiFrame-LLM_Manga_Translator.git
+cd YomiFrame-LLM_Manga_Translator
+
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-The key rule is ownership separation. BubbleDetection and TextAreaPlan own semantic authority. CTD supplies text pixels. CleanupMask is a strict consumer of upstream authorization and must not reclassify speech, background text, SFX, art, or unknown components from local geometry alone.
+The default dependency set is CPU-safe where possible. GPU users may need to install CUDA-enabled builds of PyTorch, PaddlePaddle, and llama-cpp-python that match their local CUDA version.
 
-## Module Responsibilities
+If installation fails on Windows, first try the CPU defaults from `requirements.txt`. After the app runs, replace Torch, PaddlePaddle, or llama-cpp-python with GPU-specific builds that match the machine's CUDA toolkit and drivers.
 
-- `app/pipeline/bubble_detection.py`: runs the bubble/text-area model ensemble, normalizes raw model labels, stamps evidence strength, edge/clipping context, neighbor context, and semantic contract identity.
-- `app/pipeline/text_area_plan.py`: adjudicates upstream evidence into typed text units and standardized downstream fields such as OCR eligibility, translation eligibility, render eligibility, cleanup executability, authorization state, basis, and origin.
-- `app/pipeline/controller.py`: orchestrates the stage chain and preserves the TextAreaPlan authorization contract when regions are rehydrated or routed.
-- `app/detect/` and CTD integrations: provide scoped text foreground and component pixels for authorized text areas.
-- `app/ocr/`: reads approved text regions without deciding whether a component is semantic text.
-- `app/translate/` and `app/nlp/`: translate eligible OCR text and maintain glossary/name-memory context.
-- `app/pipeline/source_glyph_mask.py` and cleanup modules: build provenance-aware cleanup jobs and masks from upstream authorization and foreground projection.
-- `app/render/`: composes translated text with cleanup results and must not silently drop translated content.
-
-## Semantic Authorization
-
-Text areas should reach downstream modules with explicit state instead of ambiguous route intent. The important states are:
-
-- `cleanup_translate_speech`: normal dialogue or bubble text eligible for OCR, translation, cleanup, and render.
-- `cleanup_translate_background`: title, sign, narration, or background text eligible for cleanup/translation when general constraints pass.
-- `cleanup_translate_caption`: caption-style text eligible for normal downstream handling.
-- `protect_sfx_decorative`: SFX or decorative lettering that should be protected from normal translation cleanup unless a future feature explicitly handles it.
-- `protect_art_or_non_text`: artwork, panel structure, or non-text marks that must not become executable cleanup.
-- `review_unknown_not_cleanup`: uncertain material that remains visible for review but is not executable cleanup authority.
-- `outside_cleanup_scope`: material outside the current cleanup/translation scope.
-
-Downstream stages should require explicit TextAreaPlan fields for OCR, translation, cleanup, and rendering. OCR eligibility can exist for review/conservation, but translation, cleanup, and render authority require a cleanup-translatable semantic state. Candidate-only evidence, stale cache artifacts, geometry, overlap, and route intent are not semantic authority by themselves.
-
-## Cleanup and Inpainting
-
-The cleanup module starts from accepted upstream semantic units and scoped foreground projection. Its job is to erase approved source glyph pixels while preserving SFX, decorative text, art, and unknown material.
-
-The cleanup chain is intentionally explicit:
-
-```text
-SourceGlyphMask
-  -> CleanupJob
-  -> CleanupMask
-  -> CleanupPlan
-  -> CleanupBackend
-  -> CleanupResult
-  -> CleanupProof
-```
-
-Mask-only validation can prove semantic authorization and cleanup-mask readiness. It does not by itself prove cleanup runtime, inpainting quality, rendering quality, Gate 1/2/3, Phase 6, or full translation readiness.
-
-## Recommended Local Setup
-
-- Platform: Windows.
-- Python: use the existing conda environment for this repo, normally `manga-llm`.
-- Local LLM: Ollama-compatible model for translation, for example `qwen2.5:14b`.
-- Dataset for validation: `Test Manga` unless a task names another dataset.
-
-Start the app from the repository root:
+### Run The App
 
 ```powershell
 python -m app.main
 ```
 
-Quick syntax check:
+On first launch, the app checks for fixed runtime assets such as OCR and detection models. If required assets are missing, use the built-in download prompt or place the models under the local `models` folder.
 
-```powershell
-python -m py_compile app/pipeline/bubble_detection.py app/pipeline/text_area_plan.py app/pipeline/controller.py
+### Translation Model Setup
+
+YomiFrame supports local translation backends.
+
+For GGUF models:
+
+1. Create a `models` folder if it does not already exist.
+2. Put one or more `.gguf` model files anywhere under that folder.
+3. Start the app and select the model from the GGUF model list.
+
+Example layout:
+
+```text
+models/
+  qwen/
+    model.gguf
+  sakura/
+    model.gguf
 ```
 
-## Models and Assets
+For Ollama:
 
-The app uses repository-local assets, caches, and downloaded models where possible:
+1. Install and start Ollama separately.
+2. Pull a translation-capable model.
+3. Start YomiFrame and select the Ollama backend/model in the UI.
 
-- Bubble/text-area models for Kitsumed and Ogkalu evidence.
-- ComicTextDetector/TextForegroundSegmentation for scoped text-pixel projection.
-- OCR models such as MangaOCR/PaddleOCR depending on the active path.
-- Optional Japanese NER/glossary resources.
-- Optional cleanup/inpainting backend assets such as Big-LAMA.
+### Build A Windows App Folder
 
-Avoid downloading new tools or changing the environment unless the task explicitly requires it.
+To package the app with PyInstaller:
 
-## Output
+```powershell
+pip install pyinstaller
+pyinstaller manga_translator.spec
+```
 
-Typical runs write translated images and project artifacts under `output/`, including:
+The packaged app is written to:
+
+```text
+dist/YomiFrame/
+```
+
+Run:
+
+```text
+dist/YomiFrame/YomiFrame.exe
+```
+
+Large model files are not bundled into the executable folder automatically. For an offline package, copy the prepared `models` folder into `dist/YomiFrame/` and make sure any required Hugging Face, OCR, or inpainting caches are already available on the target machine.
+
+## Current Architecture
+
+YomiFrame now uses a specialized modular architecture rather than a single monolithic detection/OCR/rendering pass.
+
+The current conceptual pipeline is:
+
+```text
+Page import
+  -> optional prescan and glossary memory
+  -> bubble and text-area planning
+  -> scoped text detection
+  -> OCR
+  -> text-block ownership and grouping
+  -> semantic routing
+  -> glossary-aware translation
+  -> source-text cleanup and inpainting
+  -> font selection and text fitting
+  -> final page rendering
+  -> project/output persistence
+```
+
+Each stage has a distinct responsibility. The text-area planning stage decides what kind of visible text is present. The text detector and segmentation stages supply text geometry and pixels. OCR reads text. Translation consumes approved OCR text. Cleanup removes only authorized source text. Rendering places the translated text into the final page.
+
+This separation is important because manga pages contain many things that look like text but should not all be translated or erased. SFX, decorative lettering, artwork, and uncertain regions must not be treated the same way as normal dialogue or narration.
+
+## Main Subsystems
+
+### Desktop Workflow
+
+The desktop app provides the normal user workflow:
+
+- choose input and output folders
+- choose source and target languages
+- choose local translation settings
+- run translation jobs
+- monitor progress
+- review pages and regions
+- edit glossary/style-guide information when needed
+
+### Model and Asset Management
+
+YomiFrame uses local model assets and local caches where possible. Startup checks are intended to make fixed runtime assets available before translation begins, avoiding surprise downloads during active processing.
+
+The main asset families are:
+
+- bubble/text-area detection models
+- text detection and segmentation models
+- OCR models
+- optional inpainting models
+- optional NLP resources
+- user-selected local translation models
+
+Translation models are treated separately from fixed runtime assets. For example, a GGUF translation model or an Ollama model is a user-selected translation backend, while OCR and detection models are pipeline assets.
+
+### Prescan and Name Memory
+
+For chapter or volume translation, YomiFrame can prescan pages before translation. The prescan builds lightweight name and terminology memory so that repeated names, aliases, titles, and forms of address are translated more consistently.
+
+This is not just a flat glossary. The name-memory layer is intended to connect canonical names with aliases, nicknames, honorific forms, and recurring terms across a chapter.
+
+### Bubble and Text-Area Planning
+
+Manga pages contain speech bubbles, narration, background labels, titles, SFX, decorative lettering, and art marks. YomiFrame uses a dedicated planning stage to classify these visual text areas before downstream cleanup and translation.
+
+The planner is responsible for separating:
+
+- dialogue that should be translated
+- narration or caption text that should be translated
+- background or title text that should be translated when appropriate
+- SFX/decorative text that should usually be preserved
+- art or non-text that must not be erased
+- uncertain material that should remain review-only
+
+This is the central difference between the current architecture and the older monolithic pipeline. Downstream modules should consume the planner’s decision rather than inventing their own semantic classification.
+
+### Scoped Text Detection and OCR
+
+After text-area planning, text detection runs inside approved or review-eligible scopes. This keeps the detector focused on areas where text is expected and helps avoid routing decorative or non-text regions through normal translation.
+
+OCR then reads the source text from accepted text instances. OCR quality remains a major upstream dependency: if OCR misses, fragments, or corrupts text, translation and rendering quality will suffer.
+
+### Text Ownership and Grouping
+
+Manga text is often split into multiple detector fragments even when it visually belongs to one utterance. YomiFrame groups related text fragments into logical text blocks so one visual text area can be translated and rendered coherently.
+
+This helps prevent:
+
+- duplicate translations
+- tiny fragment translations
+- missing child text
+- separate renderings inside one bubble
+- mistranslation caused by losing surrounding context
+
+### Translation
+
+YomiFrame is built around local translation. The current recommended path is a local GGUF backend, with Ollama available as an alternate local backend.
+
+Translation uses:
+
+- OCR text
+- source and target language settings
+- region context
+- glossary/name-memory context
+- semantic eligibility from the planning stage
+
+The translation stage should not translate protected SFX, art, unknown review regions, or ungrounded text just because OCR text exists.
+
+### Cleanup and Inpainting
+
+Cleanup removes source text only where the pipeline has authorized that source text for translation and cleanup. It should preserve artwork, SFX, decorative lettering, and uncertain regions.
+
+The cleanup subsystem uses:
+
+- source-glyph evidence
+- text-pixel segmentation
+- cleanup-job records
+- foreground and erase masks
+- cleanup planning
+- inpainting or fill backends
+- proof/audit evidence
+
+The cleanup module is a consumer of upstream decisions. It should not decide on its own whether a region is dialogue, narration, SFX, decorative text, or art.
+
+### Rendering
+
+Rendering places translated text back into the cleaned page. It handles font selection, wrapping, fitting, layout orientation, and final composition.
+
+The renderer must preserve the complete translated text. If text cannot fit cleanly, that should be visible as a review or layout issue rather than silently dropping content.
+
+## Recommended Local Workflow
+
+For normal use:
+
+1. Prepare input pages in a folder.
+2. Start YomiFrame.
+3. Choose input and output folders.
+4. Select source and target languages.
+5. Use the local translation backend and OCR settings appropriate for the machine.
+6. Enable glossary/name memory for chapter or volume work.
+7. Run translation.
+8. Review output pages, especially dialogue completeness, source-text cleanup, and rendered text fit.
+
+For development validation, use a real page set rather than only checking logs or metadata. Visual correctness must be judged from the actual images.
+
+## Runtime Expectations
+
+YomiFrame is intended for local Windows use. The default workflow should remain practical on a local machine and should not require a cloud service.
+
+General expectations:
+
+- local model assets should be reused where possible
+- fallbacks should be explicit and visible
+- translation quality should not come at the cost of unbounded runtime
+- average processing time should stay within practical local limits
+- heavy optional paths should remain optional unless explicitly promoted
+
+## Outputs
+
+A typical run writes:
 
 - translated page images
-- project JSON with regions and translations
-- style guide and glossary artifacts when enabled
-- debug overlays, masks, and validation artifacts when the selected workflow produces them
+- project state for later review or rerendering
+- glossary/style-guide state when enabled
+- debug or validation artifacts when the selected workflow produces them
 
-Validation artifacts are evidence, not acceptance by themselves. Full-page visual inspection remains required for cleanup, rendering, and translation-quality decisions.
+Project state is important because it records page regions, OCR text, translations, render metadata, and review information. It is the bridge between translation, review, rerendering, and diagnostics.
 
-## Documentation
+## Validation Philosophy
 
-- `TECHNICAL.md`: detailed architecture and contract notes.
-- `docs/architecture.md`: project architecture authority.
-- `docs/modules.md`: module ownership and interfaces.
-- `docs/current-issues-and-roadmap.md`: active roadmap and unresolved work.
-- `docs/testing-and-validation.md`: validation rules and visual-review requirements.
+YomiFrame is a visual translation tool, so final quality cannot be proven by counters alone.
 
-## Development Rules
+Automated summaries, JSON reports, reviewer metrics, and contact sheets are useful for finding candidates, but acceptance requires direct visual review of the relevant source and output images.
 
-- Keep changes small and targeted.
-- Do not route known SFX/decorative/art areas through normal OCR, translation, or cleanup paths unless the roadmap or user explicitly asks for that behavior.
-- Do not treat reviewer counters, JSON summaries, or contact-sheet prose as proof of visual correctness.
-- For mask decisions, inspect raw original pages, CTD/refined segmentation, authorization overlays, projection-quality overlays, protected/unknown overlays, foreground union, and erase union.
-- For translation-affecting code changes, validate real output images and not only logs or metadata.
+Important validation questions include:
+
+- Was all normal dialogue translated?
+- Was narration or meaningful background text handled correctly?
+- Were SFX/decorative/art regions preserved when they should be?
+- Was source text actually removed where translated text was rendered?
+- Did cleanup damage bubble borders or artwork?
+- Does the rendered text include the full translation?
+- Is the page readable as a manga page, not just technically processed?
+
+## Development Principles
+
+- Keep module ownership clear.
+- Prefer deterministic contracts over hidden heuristic fallbacks.
+- Preserve SFX, decorative text, and artwork unless a feature explicitly handles them.
+- Diagnose the owning stage before editing code.
+- Treat OCR, translation, cleanup, and rendering as separate failure domains.
+- Validate visual changes with images, not only metadata.
+- Keep the default workflow practical for local use.
+
+## Technical Details
+
+Detailed implementation notes, module boundaries, authorization contracts, cache behavior, and validation mechanics are maintained in `TECHNICAL.md`.
 
 ## License
 
-Apache-2.0. See `LICENSE`.
+GPL-3.0. See `LICENSE`.
