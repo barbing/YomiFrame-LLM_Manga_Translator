@@ -2437,9 +2437,11 @@ _OCR_BLOCKER_STATES = {
 def _is_text_area_translatable_assignment(assignment: dict | None) -> bool:
     if not isinstance(assignment, dict):
         return False
-    if assignment.get("text_area_ocr_eligible") is False:
+    if assignment.get("text_area_ocr_eligible") is not True:
         return False
-    if assignment.get("text_area_translation_eligible") is False:
+    if assignment.get("text_area_translation_eligible") is not True:
+        return False
+    if assignment.get("text_area_cleanup_executable") is not True:
         return False
     route = str(assignment.get("text_area_route_intent") or "").strip()
     if route not in _TEXT_AREA_TRANSLATABLE_ROUTES:

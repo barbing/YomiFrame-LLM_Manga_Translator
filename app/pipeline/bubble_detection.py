@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 
-BUBBLE_DETECTION_VERSION = "phase4b20_bubble_detection_semantic_mask_evidence_v1"
-BUBBLE_DETECTION_CACHE_VERSION = "phase4b20_bubble_detection_semantic_mask_evidence_cache_v1"
+BUBBLE_DETECTION_VERSION = "phase4b21_bubble_detection_semantic_authority_contract_v2"
+BUBBLE_DETECTION_CACHE_VERSION = "phase4b21_bubble_detection_semantic_authority_cache_v2"
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = ROOT / "scripts"
@@ -45,7 +45,9 @@ KITSUMED_NMS_IOU_THRESHOLD = 0.50
 KITSUMED_MASK_THRESHOLD = 0.50
 OGKALU_CONFIDENCE_THRESHOLD = 0.50
 
-SEMANTIC_EVIDENCE_PROVIDER_VERSION = "semantic_evidence_provider_v1"
+SEMANTIC_EVIDENCE_PROVIDER_VERSION = "semantic_evidence_provider_v2"
+SEMANTIC_EVIDENCE_CONTRACT_VERSION = "semantic_authority_contract_v2"
+OGKALU_NEIGHBORING_SPEECH_CONTEXT_VERSION = "ogkalu_neighboring_speech_context_v1"
 OGKALU_STRONG_SINGLE_MODEL_CONFIDENCE = 0.85
 PROVIDER_KITSUMED_SPEECH_MASK = "kitsumed_speech_mask_evidence"
 PROVIDER_OGKALU_TEXT_BUBBLE = "ogkalu_text_bubble_evidence"
@@ -58,6 +60,21 @@ AUTH_CLEANUP_TRANSLATE_BACKGROUND = "cleanup_translate_background"
 AUTH_PROTECT_SFX_DECORATIVE = "protect_sfx_decorative"
 AUTH_PROTECT_ART_OR_NON_TEXT = "protect_art_or_non_text"
 AUTH_REVIEW_UNKNOWN_NOT_CLEANUP = "review_unknown_not_cleanup"
+
+
+def _semantic_contract_identity() -> Dict[str, Any]:
+    return {
+        "semantic_evidence_contract_version": SEMANTIC_EVIDENCE_CONTRACT_VERSION,
+        "semantic_evidence_provider_version": SEMANTIC_EVIDENCE_PROVIDER_VERSION,
+        "ogkalu_neighboring_speech_context_version": OGKALU_NEIGHBORING_SPEECH_CONTEXT_VERSION,
+        "semantic_evidence_providers": [
+            PROVIDER_KITSUMED_SPEECH_MASK,
+            PROVIDER_OGKALU_TEXT_BUBBLE,
+            PROVIDER_OGKALU_TEXT_FREE_BACKGROUND,
+            PROVIDER_OGKALU_SFX_DECORATIVE,
+            PROVIDER_CURRENT_REGION_SEMANTIC,
+        ],
+    }
 
 
 @dataclass
@@ -357,6 +374,7 @@ def run_bubble_detection(request: BubbleDetectionInput | Mapping[str, Any]) -> B
             },
             "mode": req.mode,
             "requested_models": list(req.requested_models),
+            "semantic_contract": _semantic_contract_identity(),
             "thresholds": {
                 "kitsumed_confidence": KITSUMED_CONFIDENCE_THRESHOLD,
                 "kitsumed_nms_iou": KITSUMED_NMS_IOU_THRESHOLD,
@@ -587,6 +605,7 @@ def _empty_result(
         "providers_used": {"kitsumed": [], "ogkalu": []},
         "provider_fallback_used": True,
         "latency_sec": {"kitsumed": {}, "ogkalu": {}},
+        "semantic_contract": _semantic_contract_identity(),
         "counts": {},
     }
     return BubbleDetectionResult(
@@ -657,6 +676,7 @@ def _build_cache_state(
             "ogkalu_config_path": str(OGKALU_CONFIG.resolve()),
             "ogkalu_config_sha256": _sha256_file(OGKALU_CONFIG) if OGKALU_CONFIG.exists() else None,
         },
+        "semantic_contract": _semantic_contract_identity(),
         "requested_models": list(req.requested_models),
         "regions_signature": _regions_signature(req.regions),
     }
@@ -763,6 +783,11 @@ def _validate_cache_payload(payload: Mapping[str, Any], cache_state: Mapping[str
         raise ValueError("model_hash_mismatch")
     if result.get("providers_used") != expected_identity.get("providers_used"):
         raise ValueError("providers_used_mismatch")
+    runtime = result.get("runtime")
+    if not isinstance(runtime, Mapping):
+        raise ValueError("runtime_missing")
+    if runtime.get("semantic_contract") != expected_identity.get("semantic_contract"):
+        raise ValueError("semantic_contract_version_mismatch")
 
 
 def _result_from_payload(payload: Mapping[str, Any]) -> BubbleDetectionResult:
