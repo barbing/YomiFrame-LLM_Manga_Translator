@@ -896,6 +896,7 @@ class PipelineWorker(QtCore.QThread):
                         image_size=source_image_size,
                         source_image_path=source_path,
                         render_eligibility=render_eligibility_contract_result,
+                        inpaint_mode=self._settings.inpaint_mode,
                     )
                     _page014_timeout_checkpoint(
                         "cleanup_plan_build",
@@ -924,6 +925,7 @@ class PipelineWorker(QtCore.QThread):
                             source_image=runtime_source_image.copy(),
                             job_candidates=cleanup_job_contract_result.jobs,
                             mask_contracts=cleanup_mask_contract_result,
+                            plan_contracts=cleanup_plan_contract_result,
                             render_eligibility=render_eligibility_contract_result,
                             use_gpu=self._settings.use_gpu,
                             model_id=self._settings.inpaint_model_id,

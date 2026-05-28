@@ -325,6 +325,23 @@ class CleanupResult:
     mask_stats: dict[str, Any] = field(default_factory=dict)
     backend_name: str = ""
     backend_parameters: dict[str, Any] = field(default_factory=dict)
+    backend_kind: str = ""
+    backend_method: str = ""
+    requested_model_id: str = ""
+    actual_model_name: str = ""
+    actual_model_path: str = ""
+    model_invocation_attempted: bool = False
+    model_invocation_succeeded: bool = False
+    input_image_hash: str = ""
+    input_mask_hash: str = ""
+    raw_backend_output_hash: str = ""
+    final_clipped_output_hash: str = ""
+    fallback_reason: str = ""
+    backend_input_mask_ref: str | None = None
+    model_input_image_ref: str | None = None
+    model_input_mask_ref: str | None = None
+    raw_backend_output_ref: str | None = None
+    final_clipped_output_ref: str | None = None
     runtime_ms: float | None = None
     fallback_status: str = ""
     errors: list[str] = field(default_factory=list)

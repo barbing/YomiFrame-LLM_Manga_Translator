@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
@@ -89,6 +90,12 @@ LEGACY_CLEANUP_VISUAL_SCOPE_MAP = {
 }
 ARTIFACT_RISK_PARTITION_REQUIRED_REASON = "artifact_risk_partition_required"
 MAX_PARTITION_COMPONENTS = 32
+CANONICAL_COMPONENT_PROJECTION_METHOD = "text_area_component_authorization_map"
+LEGACY_COMPONENT_PROJECTION_METHOD = "segmentation_component_ownership_projection"
+COMPONENT_PROJECTION_METHODS = {
+    CANONICAL_COMPONENT_PROJECTION_METHOD,
+    LEGACY_COMPONENT_PROJECTION_METHOD,
+}
 
 
 def _page014_timeout_diag_enabled() -> bool:
@@ -178,6 +185,7 @@ class CleanupPlanBuildResult:
     version: str
     plans: list[CleanupPlan] = field(default_factory=list)
     plans_by_job_id: dict[str, list[CleanupPlan]] = field(default_factory=dict)
+    plans_by_cleanup_mask_id: dict[str, list[CleanupPlan]] = field(default_factory=dict)
     backend_inventory: dict[str, Any] = field(default_factory=dict)
     rejected_records: list[dict[str, Any]] = field(default_factory=list)
     protected_records: list[dict[str, Any]] = field(default_factory=list)
@@ -194,6 +202,10 @@ class CleanupPlanBuildResult:
                 str(job_id): [_json_safe(plan) for plan in plans]
                 for job_id, plans in self.plans_by_job_id.items()
             },
+            "plans_by_cleanup_mask_id": {
+                str(mask_id): [_json_safe(plan) for plan in plans]
+                for mask_id, plans in self.plans_by_cleanup_mask_id.items()
+            },
             "backend_inventory": _json_safe(self.backend_inventory),
             "rejected_records": _json_safe(self.rejected_records),
             "protected_records": _json_safe(self.protected_records),
@@ -202,6 +214,7 @@ class CleanupPlanBuildResult:
             "summary": {
                 "pilot_class": CleanupClass.CAPTION_FLAT_BACKGROUND.value,
                 "plan_count": len(self.plans),
+                "planned_cleanup_mask_count": len(self.plans_by_cleanup_mask_id),
                 "rejected_record_count": len(self.rejected_records),
                 "protected_record_count": len(self.protected_records),
                 "skipped_record_count": len(self.skipped_records),
@@ -343,6 +356,7 @@ class CleanupUpstreamCommitResult:
     commit_mask_ref: str = ""
     commit_records: list[dict[str, Any]] = field(default_factory=list)
     blocked_records: list[dict[str, Any]] = field(default_factory=list)
+    root_transaction_records: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -368,10 +382,26 @@ class CleanupUpstreamCommitResult:
             "cleanup_upstream_mask_ref": self.commit_mask_ref,
             "commit_records": _json_safe(self.commit_records),
             "blocked_records": _json_safe(self.blocked_records),
+            "root_transaction_records": _json_safe(self.root_transaction_records),
             "errors": list(self.errors),
             "summary": {
                 "committed_count": len(self.commit_records),
                 "blocked_count": len(self.blocked_records),
+                "root_transaction_count": len(self.root_transaction_records),
+                "root_committed_count": len(
+                    [
+                        record
+                        for record in self.root_transaction_records
+                        if record.get("root_transaction_status") == "root_committed"
+                    ]
+                ),
+                "root_blocked_count": len(
+                    [
+                        record
+                        for record in self.root_transaction_records
+                        if record.get("root_transaction_status") == "root_blocked"
+                    ]
+                ),
                 "error_count": len(self.errors),
                 "renderer_consumed": False,
             },
@@ -387,11 +417,13 @@ def build_cleanup_plans(
     source_image_path: str | None = None,
     source_image: Any | None = None,
     render_eligibility: Any | None = None,
+    inpaint_mode: str = "fast",
 ) -> CleanupPlanBuildResult:
     """Build cleanup-unit plans for accepted cleanup-owned masks."""
 
     plan_started = time.time()
     jobs = _extract_jobs(job_candidates)
+    jobs_by_id = {str(job.cleanup_job_id): job for job in jobs}
     render_eligibility_by_region = _render_eligibility_by_region_id(render_eligibility)
     mask_result = _extract_masks(mask_contracts)
     masks_by_job_id: dict[str, list[CleanupMask]] = {}
@@ -408,6 +440,7 @@ def build_cleanup_plans(
 
     plans: list[CleanupPlan] = []
     plans_by_job_id: dict[str, list[CleanupPlan]] = {}
+    plans_by_cleanup_mask_id: dict[str, list[CleanupPlan]] = {}
     rejected_records: list[dict[str, Any]] = []
     protected_records: list[dict[str, Any]] = []
     skipped_records: list[dict[str, Any]] = []
@@ -416,14 +449,34 @@ def build_cleanup_plans(
     backend_candidates = cleanup_backend_runner.inventory_local_cleanup_backends()
     backend_inventory = cleanup_backend_runner.inventory_to_audit_dict(backend_candidates)
 
-    for job in jobs:
+    for cleanup_mask in mask_result:
         try:
+            cleanup_mask_id = str(cleanup_mask.cleanup_mask_id)
+            job = jobs_by_id.get(str(cleanup_mask.cleanup_job_id))
+            if job is None:
+                rejected_records.append(
+                    {
+                        "page_id": page_id,
+                        "cleanup_job_id": str(cleanup_mask.cleanup_job_id),
+                        "cleanup_mask_id": cleanup_mask_id,
+                        "stage": "CleanupPlan",
+                        "owner": "CleanupPlan accounting",
+                        "reason": "cleanup_plan_rejected_missing_cleanup_job",
+                    }
+                )
+                continue
             base = _job_base_record(page_id, job)
+            base_with_mask = {
+                **base,
+                "cleanup_mask_id": cleanup_mask_id,
+                "stage": "CleanupPlan",
+                "owner": "CleanupPlan accounting",
+            }
             suppressed_decision = _source_grounding_suppressed_decision(job, render_eligibility_by_region)
             if suppressed_decision is not None:
                 skipped_records.append(
                     {
-                        **base,
+                        **base_with_mask,
                         "reason": "render_eligibility_suppressed_source_ungrounded",
                         "source_grounding_status": "suppressed_source_ungrounded",
                         "source_grounding_failure_reason": _decision_value(suppressed_decision, "reason"),
@@ -433,36 +486,18 @@ def build_cleanup_plans(
                 continue
             blocked_reason = _job_exclusion_reason(job)
             if blocked_reason:
-                protected_records.append({**base, "reason": blocked_reason})
+                protected_records.append({**base_with_mask, "reason": blocked_reason})
                 continue
-            candidates = masks_by_job_id.get(str(job.cleanup_job_id), [])
-            if len(candidates) != 1:
-                _cleanup_perf_contract_checkpoint(
-                    "cleanup_plan_mask_filter",
-                    "rejected",
-                    page_id=page_id,
-                    cleanup_job_id=str(job.cleanup_job_id),
-                    reason="expected_exactly_one_non_protected_cleanup_mask",
-                    matching_mask_count=len(candidates),
-                )
-                rejected_records.append(
-                    {
-                        **base,
-                        "reason": "expected_exactly_one_non_protected_cleanup_mask",
-                        "matching_mask_count": len(candidates),
-                    }
-                )
-                continue
-            cleanup_mask = candidates[0]
             mask_rejection = _mask_exclusion_reason(cleanup_mask, image_size)
-            if mask_rejection and not _is_partitionable_mask_rejection(mask_rejection):
+            if not _accepted_executable_cleanup_mask(cleanup_mask):
+                reason = mask_rejection or _cleanup_mask_non_executable_defect(cleanup_mask)
                 _cleanup_perf_contract_checkpoint(
                     "cleanup_plan_mask_filter",
                     "rejected",
                     page_id=page_id,
                     cleanup_job_id=str(job.cleanup_job_id),
-                    cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
-                    reason=mask_rejection,
+                    cleanup_mask_id=cleanup_mask_id,
+                    reason=reason,
                     visual_scope=str(cleanup_mask.visual_scope or ""),
                     foreground_pixels=cleanup_mask.foreground_mask_pixels,
                     erase_pixels=cleanup_mask.erase_mask_pixels,
@@ -470,7 +505,13 @@ def build_cleanup_plans(
                     consumed_source_glyph_count=len(cleanup_mask.consumed_source_glyph_mask_ids or []),
                     missing_source_glyph_count=len(cleanup_mask.missing_source_glyph_mask_ids or []),
                 )
-                rejected_records.append({**base, "cleanup_mask_id": cleanup_mask.cleanup_mask_id, "reason": mask_rejection})
+                rejected_records.append(
+                    {
+                        **base_with_mask,
+                        "reason": reason,
+                        "typed_reason": reason,
+                    }
+                )
                 continue
 
             flat_rejection, flat_metrics = _flat_background_pre_execution_rejection(
@@ -478,80 +519,87 @@ def build_cleanup_plans(
                 source_np=source_np,
                 source_error=source_error,
             )
-            cleanup_tag = _runtime_cleanup_tag_for_class(job.cleanup_class)
-            cleanup_class_value = _enum_value(job.cleanup_class)
-
-            for candidate in backend_candidates:
-                cleanup_plan_id = (
-                    f"cplan_{_safe_id(page_id)}_{_safe_id(job.cleanup_job_id)}_"
-                    f"{_safe_id(candidate.candidate_id)}"
-                )
-                plan = CleanupPlan(
-                    cleanup_plan_id=cleanup_plan_id,
-                    cleanup_job_id=str(job.cleanup_job_id),
-                    cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
-                    cleanup_class=job.cleanup_class,
-                    selected_backend=f"app.pipeline.cleanup_backend_runner.{candidate.candidate_id}",
-                    cleanup_method=f"{cleanup_class_value}_glyph_local_candidate",
-                    backend_parameters={
-                        "cleanup_tag": cleanup_tag,
-                        "target_region_ids": list(job.target_region_ids or []),
-                        "allowed_area": list(cleanup_mask.allowed_area or []),
-                        "renderer_consumed_by_phase": "phase5_phase6_cleanup_contract_status_only",
-                        "eligibility_reason": "cleanup_unit_segmentation_foreground_mask_contract",
-                        "mask_contract_exception_reason": cleanup_mask.mask_contract_exception_reason,
-                        "owned_segmentation_pixels": getattr(cleanup_mask, "owned_segmentation_pixels", None),
-                        "executable_foreground_pixels": getattr(cleanup_mask, "executable_foreground_pixels", None),
-                        "owned_segmentation_to_executable_ratio": getattr(
-                            cleanup_mask,
-                            "owned_segmentation_to_executable_ratio",
-                            None,
-                        ),
-                        "ready_but_sparse_violation": bool(
-                            getattr(cleanup_mask, "ready_but_sparse_violation", False)
-                        ),
-                        "sourceglyph_executable_influence_detected": bool(
-                            getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)
-                        ),
-                        "dense_contract_override_detected": bool(
-                            getattr(cleanup_mask, "dense_contract_override_detected", False)
-                        ),
-                        "pre_execution_risk_reason": mask_rejection or flat_rejection,
-                        "partition_strategy_required": bool(mask_rejection),
-                        "flatness_metrics": flat_metrics,
-                        "backend_candidate_id": candidate.candidate_id,
-                        "backend_family": candidate.backend_family,
-                        "backend_model_path": candidate.model_path,
-                        "backend_adapter_path": candidate.adapter_path,
-                        "backend_candidate_available": candidate.available,
-                        "backend_candidate_unavailable_reason": candidate.unavailable_reason,
-                    },
-                    inpaint_mode="glyph_local_candidate",
-                    crop_context_bbox=list(cleanup_mask.erase_mask_bbox or cleanup_mask.allowed_area or []),
-                    fallback_policy=["runtime_adaptive_cleanup_contract"],
-                    expected_runtime_class="local_candidate",
-                    proof_thresholds={
-                        "mask_source_overlap_ratio_min": PROOF_MASK_SOURCE_OVERLAP_RATIO,
-                        "source_residual_ratio_max": PROOF_RESIDUAL_RATIO,
-                        "source_residual_pixel_fraction_max": PROOF_RESIDUAL_PIXEL_FRACTION,
-                        "changed_outside_allowed_pixels_max": PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS,
-                        "changed_outside_allowed_ratio_max": PROOF_CHANGED_OUTSIDE_ALLOWED_RATIO,
-                        "changed_outside_erase_inside_allowed_ratio_max": PROOF_COLLATERAL_INSIDE_ALLOWED_RATIO,
-                    },
-                )
-                plans.append(plan)
-                plans_by_job_id.setdefault(str(job.cleanup_job_id), []).append(plan)
-                _cleanup_perf_contract_checkpoint(
-                    "cleanup_plan_build",
-                    "plan_created",
-                    page_id=page_id,
-                    cleanup_job_id=str(job.cleanup_job_id),
-                    cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
-                    cleanup_plan_id=str(plan.cleanup_plan_id),
-                    selected_backend=str(plan.selected_backend),
-                    visual_scope=str(cleanup_mask.visual_scope or ""),
-                    expected_runtime_class=plan.expected_runtime_class,
-                )
+            cleanup_class = job.cleanup_class
+            plan = _runtime_speech_flat_plan(
+                page_id=page_id,
+                job=job,
+                cleanup_mask=cleanup_mask,
+                inpaint_mode=inpaint_mode,
+                cleanup_class=cleanup_class,
+            )
+            params = dict(plan.backend_parameters or {})
+            params.update(
+                {
+                    "text_block_root_id": str(
+                        getattr(job, "text_block_root_id", "")
+                        or getattr(job, "parent_logical_text_unit_id", "")
+                        or getattr(job, "cleanup_unit_id", "")
+                        or getattr(job, "cleanup_job_id", "")
+                        or ""
+                    ),
+                    "cleanup_obligation_id": str(cleanup_mask.cleanup_mask_id),
+                    "mask_space": "page",
+                    "bbox_format": "xyxy_exclusive",
+                    "cleanup_plan_authority": "formal_cleanup_plan_build_result",
+                    "formal_cleanup_plan": True,
+                    "renderer_consumed_by_phase": "phase5_phase6_cleanup_contract_status_only",
+                    "eligibility_reason": "cleanup_unit_segmentation_foreground_mask_contract",
+                    "mask_contract_exception_reason": cleanup_mask.mask_contract_exception_reason,
+                    "owned_segmentation_pixels": getattr(cleanup_mask, "owned_segmentation_pixels", None),
+                    "executable_foreground_pixels": getattr(cleanup_mask, "executable_foreground_pixels", None),
+                    "owned_segmentation_to_executable_ratio": getattr(
+                        cleanup_mask,
+                        "owned_segmentation_to_executable_ratio",
+                        None,
+                    ),
+                    "ready_but_sparse_violation": bool(
+                        getattr(cleanup_mask, "ready_but_sparse_violation", False)
+                    ),
+                    "sourceglyph_executable_influence_detected": bool(
+                        getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)
+                    ),
+                    "dense_contract_override_detected": bool(
+                        getattr(cleanup_mask, "dense_contract_override_detected", False)
+                    ),
+                    "component_projection_method": str(
+                        getattr(cleanup_mask, "component_projection_method", "") or ""
+                    ),
+                    "pre_execution_risk_reason": mask_rejection or flat_rejection,
+                    "partition_strategy_required": bool(mask_rejection),
+                    "flatness_metrics": flat_metrics,
+                    "backend_inventory": backend_inventory,
+                }
+            )
+            plan = CleanupPlan(
+                cleanup_plan_id=(
+                    f"cplan_{_safe_id(page_id)}_{_safe_id(job.cleanup_job_id)}_{_safe_id(cleanup_mask.cleanup_mask_id)}_formal"
+                ),
+                cleanup_job_id=str(job.cleanup_job_id),
+                cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
+                cleanup_class=cleanup_class,
+                selected_backend=plan.selected_backend,
+                cleanup_method=plan.cleanup_method,
+                backend_parameters=params,
+                inpaint_mode=plan.inpaint_mode,
+                crop_context_bbox=list(cleanup_mask.erase_mask_bbox or cleanup_mask.allowed_area or []),
+                fallback_policy=["runtime_adaptive_cleanup_contract"],
+                expected_runtime_class="formal_cleanup_plan",
+                proof_thresholds=dict(plan.proof_thresholds or {}),
+            )
+            plans.append(plan)
+            plans_by_job_id.setdefault(str(job.cleanup_job_id), []).append(plan)
+            plans_by_cleanup_mask_id.setdefault(str(cleanup_mask.cleanup_mask_id), []).append(plan)
+            _cleanup_perf_contract_checkpoint(
+                "cleanup_plan_build",
+                "plan_created",
+                page_id=page_id,
+                cleanup_job_id=str(job.cleanup_job_id),
+                cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
+                cleanup_plan_id=str(plan.cleanup_plan_id),
+                selected_backend=str(plan.selected_backend),
+                visual_scope=str(cleanup_mask.visual_scope or ""),
+                expected_runtime_class=plan.expected_runtime_class,
+            )
         except Exception as exc:
             errors.append(f"{type(exc).__name__}: {exc}")
 
@@ -571,6 +619,7 @@ def build_cleanup_plans(
         version=CLEANUP_PLAN_CONTRACT_VERSION,
         plans=plans,
         plans_by_job_id=plans_by_job_id,
+        plans_by_cleanup_mask_id=plans_by_cleanup_mask_id,
         rejected_records=rejected_records,
         protected_records=protected_records,
         skipped_records=skipped_records,
@@ -649,6 +698,32 @@ def prove_cleanup_result(
     metrics: dict[str, Any] = {}
     failure_reason = "passed"
     proof_status = ProofStatus.PASSED
+    if (
+        str(cleanup_result.execution_status or "") == "contract_error"
+        or str(cleanup_result.failure_reason or "")
+        in {
+            "model_required_backend_not_invoked",
+            "model_required_backend_failed",
+        }
+    ):
+        return _proof(
+            cleanup_result,
+            cleanup_plan,
+            status=ProofStatus.FAILED,
+            failure_reason=cleanup_result.failure_reason or "cleanup_backend_contract_error",
+            metrics={
+                "backend_contract_error": True,
+                "model_required": bool(
+                    (cleanup_result.backend_parameters or {}).get("model_required")
+                ),
+                "backend_kind": str(cleanup_result.backend_kind or ""),
+                "backend_method": str(cleanup_result.backend_method or ""),
+                "model_invocation_attempted": bool(cleanup_result.model_invocation_attempted),
+                "model_invocation_succeeded": bool(cleanup_result.model_invocation_succeeded),
+                "proof_scope": "cleanup_mask_foreground",
+                "sourceglyph_bbox_residual_failure_impossible": True,
+            },
+        )
     try:
         if np is None:
             raise RuntimeError("numpy_unavailable")
@@ -692,14 +767,23 @@ def prove_cleanup_result(
         source_light_foreground = (foreground > 0) & ~(source_gray < 210)
         source_dark_foreground_pixels = int(np.count_nonzero(source_dark_foreground))
         source_light_foreground_pixels = int(np.count_nonzero(source_light_foreground))
+        cleanup_class_value = _enum_value(cleanup_plan.cleanup_class)
         baseline_residual_dark = _dark_source_residual_mask(source_gray, before_gray, foreground)
         baseline_residual_dark_pixels = int(np.count_nonzero(baseline_residual_dark))
         baseline_residual_dark_ratio = baseline_residual_dark_pixels / max(1, source_dark_foreground_pixels)
         residual_dark = _dark_source_residual_mask(source_gray, cleaned_gray, foreground)
         residual_dark_pixels = int(np.count_nonzero(residual_dark))
         residual_dark_ratio = residual_dark_pixels / max(1, source_dark_foreground_pixels)
+        light_context = _source_light_foreground_context(
+            source_gray,
+            foreground,
+        )
+        light_residual_scope_active = bool(light_context.get("dark_context", False))
         residual_light_unchanged_pixels = int(
             np.count_nonzero(legacy_residual & source_light_foreground)
+        )
+        residual_light_unchanged_ratio = (
+            residual_light_unchanged_pixels / max(1, source_light_foreground_pixels)
         )
         params = cleanup_plan.backend_parameters or {}
         proof_scope = _proof_scope_metadata(cleanup_plan, cleanup_mask)
@@ -741,23 +825,222 @@ def prove_cleanup_result(
         collateral_ratio = collateral_pixels / max(1, int(np.count_nonzero(allowed_changed)))
         changed_inside_erase = changed & (erase > 0) & (allowed > 0)
         changed_inside_erase_pixels = int(np.count_nonzero(changed_inside_erase))
-        white_patch_pixels = int(
-            np.count_nonzero(changed_inside_erase & (cleaned_gray > 245) & (source_gray < 180))
-        )
+        white_patch_candidate = changed_inside_erase & (cleaned_gray > 235) & (source_gray < 180)
+        white_patch_pixels = int(np.count_nonzero(white_patch_candidate))
         white_patch_ratio = white_patch_pixels / max(1, changed_inside_erase_pixels)
-        cleanup_class_value = _enum_value(cleanup_plan.cleanup_class)
-        broad_white_patch_risk = (
-            cleanup_class_value not in {
-                CleanupClass.SPEECH_FLAT_BUBBLE.value,
-                CleanupClass.SPEECH_COMPLEX_BUBBLE.value,
+        white_patch_context = _white_patch_context_metrics(
+            source_gray=source_gray,
+            white_patch_mask=white_patch_candidate,
+            erase_mask=erase,
+        )
+        white_patch_light_context = bool(white_patch_context.get("light_context", False))
+        white_patch_cleaned_median_luma: float | None = None
+        white_patch_matches_light_context = False
+        if white_patch_pixels > 0 and white_patch_light_context:
+            try:
+                white_patch_cleaned_median_luma = float(np.median(cleaned_gray[white_patch_candidate]))
+                context_median = _float_or_none(white_patch_context.get("median_luma"))
+                white_patch_matches_light_context = (
+                    context_median is not None
+                    and abs(white_patch_cleaned_median_luma - context_median) <= 6.0
+                )
+            except Exception:
+                white_patch_cleaned_median_luma = None
+                white_patch_matches_light_context = False
+        white_patch_light_context_exempt = (
+            white_patch_light_context
+            and (
+                cleanup_class_value
+                in {
+                    CleanupClass.CAPTION_FLAT_BACKGROUND.value,
+                }
+                or white_patch_matches_light_context
+            )
+        )
+        dark_caption_white_patch_risk = (
+            cleanup_class_value
+            in {
+                CleanupClass.CAPTION_DARK_OR_SCREENTONE.value,
+                CleanupClass.BACKGROUND_ART_TEXT.value,
+                CleanupClass.TITLE_OR_SIGN.value,
+                CleanupClass.SIDE_CAPTION_GLYPH_LOCAL.value,
             }
             and white_patch_pixels > max(96, int(foreground_pixels * 0.45))
-            and white_patch_ratio > 0.70
+            and not white_patch_light_context_exempt
+        )
+        broad_white_patch_risk = (
+            dark_caption_white_patch_risk
+            or (
+                cleanup_class_value
+                not in {
+                    CleanupClass.SPEECH_FLAT_BUBBLE.value,
+                    CleanupClass.SPEECH_COMPLEX_BUBBLE.value,
+                }
+                and white_patch_pixels > max(96, int(foreground_pixels * 0.45))
+                and white_patch_ratio > 0.70
+                and not white_patch_light_context_exempt
+            )
         )
         residual_pixel_limit = max(24, int(source_dark_foreground_pixels * PROOF_RESIDUAL_PIXEL_FRACTION))
+        residual_light_pixel_limit = max(
+            4,
+            int(source_light_foreground_pixels * PROOF_RESIDUAL_PIXEL_FRACTION),
+        )
+        source_light_foreground_ratio = source_light_foreground_pixels / max(1, foreground_pixels)
+        light_context_median_luma = _float_or_none(light_context.get("median_luma"))
+        light_context_dark_ratio = _float_or_none(light_context.get("dark_ratio")) or 0.0
+        light_context_is_light = (
+            light_context_median_luma is not None
+            and light_context_median_luma >= 225.0
+            and light_context_dark_ratio <= 0.15
+        )
+        source_light_text_on_dark_context = (
+            light_residual_scope_active
+            and source_light_foreground_ratio > 0.25
+        )
+        light_residual_strict_cleanup_class = cleanup_class_value in {
+            CleanupClass.CAPTION_DARK_OR_SCREENTONE.value,
+            CleanupClass.BACKGROUND_ART_TEXT.value,
+            CleanupClass.TITLE_OR_SIGN.value,
+            CleanupClass.SIDE_CAPTION_GLYPH_LOCAL.value,
+        }
+        light_residual_scope_active = bool(
+            light_residual_scope_active
+            or (
+                light_residual_strict_cleanup_class
+                and not light_context_is_light
+                and source_dark_foreground_pixels > 0
+                and source_light_foreground_pixels
+                >= max(16, int(foreground_pixels * 0.08))
+                and residual_light_unchanged_pixels
+                >= max(8, int(source_light_foreground_pixels * PROOF_RESIDUAL_PIXEL_FRACTION))
+            )
+        )
+        source_light_text_on_dark_context = (
+            light_residual_scope_active
+            and source_light_foreground_ratio > 0.25
+        )
+        outside_boundary_residual = _outside_accepted_mask_boundary_residual_mask(
+            source_gray=source_gray,
+            cleaned_gray=cleaned_gray,
+            foreground=foreground,
+            erase=erase,
+            allowed=allowed,
+            source_light_foreground_ratio=source_light_foreground_ratio,
+        )
+        outside_boundary_residual_pixels = int(np.count_nonzero(outside_boundary_residual))
+        outside_boundary_residual_ratio = outside_boundary_residual_pixels / max(1, foreground_pixels)
+        outside_boundary_residual_pixel_limit = max(16, int(foreground_pixels * 0.015))
+        outside_boundary_residual_remaining = (
+            not source_light_text_on_dark_context
+            and outside_boundary_residual_pixels >= outside_boundary_residual_pixel_limit
+            and outside_boundary_residual_ratio >= 0.015
+        )
+        dark_source_residual_remaining = (
+            False
+            if source_light_text_on_dark_context
+            else not (
+                residual_dark_ratio < PROOF_RESIDUAL_RATIO
+                or residual_dark_pixels < residual_pixel_limit
+            )
+        )
+        light_context_dark_shadow_residual = np.zeros_like(foreground, dtype=bool)
+        light_context_dark_shadow_pixels = 0
+        light_context_dark_shadow_ratio = 0.0
+        light_context_dark_shadow_remaining = False
+        if (
+            light_residual_strict_cleanup_class
+            and light_context_is_light
+            and light_context_median_luma is not None
+            and source_dark_foreground_pixels > 0
+        ):
+            light_context_dark_shadow_residual = (
+                (foreground > 0)
+                & source_dark_foreground
+                & (cleaned_gray < max(0.0, light_context_median_luma - 10.0))
+            )
+            light_context_dark_shadow_pixels = int(
+                np.count_nonzero(light_context_dark_shadow_residual)
+            )
+            light_context_dark_shadow_ratio = (
+                light_context_dark_shadow_pixels / max(1, source_dark_foreground_pixels)
+            )
+            light_context_dark_shadow_remaining = not (
+                light_context_dark_shadow_ratio < PROOF_RESIDUAL_RATIO
+                or light_context_dark_shadow_pixels < residual_pixel_limit
+            )
+        if light_context_dark_shadow_remaining and not broad_white_patch_risk:
+            dark_source_residual_remaining = True
+        light_source_residual_remaining = (
+            light_residual_scope_active
+            and source_light_foreground_pixels > 0
+            and not (
+                residual_light_unchanged_ratio < PROOF_RESIDUAL_RATIO
+                or residual_light_unchanged_pixels < residual_light_pixel_limit
+            )
+        )
+        cleaned_light_foreground = (
+            (foreground > 0)
+            & (source_light_foreground | light_residual_scope_active)
+            & (cleaned_gray > 190)
+        )
+        cleaned_light_foreground_pixels = int(np.count_nonzero(cleaned_light_foreground))
+        cleaned_light_foreground_ratio = (
+            cleaned_light_foreground_pixels / max(1, source_light_foreground_pixels)
+        )
+        cleaned_light_source_residual_remaining = (
+            light_residual_scope_active
+            and source_light_foreground_pixels > 0
+            and not (
+                cleaned_light_foreground_ratio < PROOF_RESIDUAL_RATIO
+                or cleaned_light_foreground_pixels < residual_light_pixel_limit
+            )
+        )
+        model_backend_executed = (
+            str(cleanup_result.backend_kind or "") == "model_inpaint"
+            and bool(cleanup_result.model_invocation_attempted)
+            and bool(cleanup_result.model_invocation_succeeded)
+        )
+        model_clearance_cleanup_class = cleanup_class_value in {
+            CleanupClass.CAPTION_DARK_OR_SCREENTONE.value,
+            CleanupClass.BACKGROUND_ART_TEXT.value,
+            CleanupClass.TITLE_OR_SIGN.value,
+            CleanupClass.SIDE_CAPTION_GLYPH_LOCAL.value,
+        }
+        changed_foreground_pixels = int(np.count_nonzero(changed & (foreground > 0)))
+        changed_foreground_ratio = changed_foreground_pixels / max(1, foreground_pixels)
+        residual_dark_reduction_ratio = (
+            (baseline_residual_dark_pixels - residual_dark_pixels)
+            / max(1, baseline_residual_dark_pixels)
+        )
+        model_inpaint_source_text_cleared = (
+            model_backend_executed
+            and model_clearance_cleanup_class
+            and bool(cleanup_result.pixel_changed)
+            and changed_foreground_pixels >= max(24, int(foreground_pixels * 0.30))
+            and changed_foreground_ratio >= 0.30
+            and residual_dark_reduction_ratio >= 0.55
+            and residual_dark_ratio <= 0.42
+            and not broad_white_patch_risk
+            and changed_outside_allowed_pixels <= PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS
+            and changed_outside_allowed_ratio <= PROOF_CHANGED_OUTSIDE_ALLOWED_RATIO
+            and collateral_ratio <= PROOF_COLLATERAL_INSIDE_ALLOWED_RATIO
+        )
+        if model_inpaint_source_text_cleared:
+            dark_source_residual_remaining = False
+            light_context_dark_shadow_remaining = False
+            light_source_residual_remaining = False
+            cleaned_light_source_residual_remaining = False
+        executable_residual_mask = residual_dark | light_context_dark_shadow_residual
+        if light_source_residual_remaining or cleaned_light_source_residual_remaining:
+            executable_residual_mask = residual_dark | (legacy_residual & source_light_foreground)
+            if cleaned_light_source_residual_remaining:
+                executable_residual_mask = executable_residual_mask | cleaned_light_foreground
+        executable_residual_pixels = int(np.count_nonzero(executable_residual_mask))
+        executable_residual_ratio = executable_residual_pixels / max(1, foreground_pixels)
         residual_mask_ref, residual_mask_missing_reason = _write_residual_source_mask(
             cleanup_result=cleanup_result,
-            residual_mask=residual_dark,
+            residual_mask=executable_residual_mask,
         )
 
         backend_name = str(cleanup_result.backend_name or "")
@@ -774,20 +1057,53 @@ def prove_cleanup_result(
             "residual_pass_metric": "dark_source_foreground",
             "source_dark_foreground_pixels": source_dark_foreground_pixels,
             "source_light_foreground_pixels": source_light_foreground_pixels,
+            "source_light_foreground_ratio": round(source_light_foreground_ratio, 4),
+            "source_light_text_on_dark_context": source_light_text_on_dark_context,
             "source_residual_baseline_dark_pixels": baseline_residual_dark_pixels,
             "source_residual_baseline_dark_ratio": round(baseline_residual_dark_ratio, 4),
             "residual_dark_source_pixels": residual_dark_pixels,
             "residual_dark_source_ratio": round(residual_dark_ratio, 4),
+            "executable_text_residual_pixels": executable_residual_pixels,
+            "executable_text_residual_ratio": round(executable_residual_ratio, 4),
+            "executable_text_residual_pixel_limit": residual_pixel_limit,
+            "proof_residual_scope": "cleanup_mask_foreground",
             "source_residual_delta_dark_pixels": int(baseline_residual_dark_pixels - residual_dark_pixels),
             "source_residual_delta_dark_ratio": round(
                 baseline_residual_dark_ratio - residual_dark_ratio,
                 4,
             ),
+            "model_backend_executed": bool(model_backend_executed),
+            "model_clearance_cleanup_class": bool(model_clearance_cleanup_class),
+            "model_inpaint_source_text_cleared": bool(model_inpaint_source_text_cleared),
+            "model_changed_foreground_pixels": changed_foreground_pixels,
+            "model_changed_foreground_ratio": round(changed_foreground_ratio, 4),
+            "model_residual_dark_reduction_ratio": round(residual_dark_reduction_ratio, 4),
             "legacy_residual_source_pixels": legacy_residual_pixels,
             "legacy_residual_source_ratio": round(legacy_residual_ratio, 4),
             "residual_source_pixels": legacy_residual_pixels,
             "residual_source_ratio": round(legacy_residual_ratio, 4),
             "residual_light_unchanged_foreground_pixels": residual_light_unchanged_pixels,
+            "residual_light_unchanged_foreground_ratio": round(residual_light_unchanged_ratio, 4),
+            "residual_light_unchanged_pixel_limit": residual_light_pixel_limit,
+            "residual_light_context_scope_active": light_residual_scope_active,
+            "residual_light_context_median_luma": light_context.get("median_luma"),
+            "residual_light_context_dark_ratio": light_context.get("dark_ratio"),
+            "residual_light_context_light_like": light_context_is_light,
+            "dark_source_residual_remaining": dark_source_residual_remaining,
+            "light_context_dark_shadow_residual_pixels": light_context_dark_shadow_pixels,
+            "light_context_dark_shadow_residual_ratio": round(
+                light_context_dark_shadow_ratio,
+                4,
+            ),
+            "light_context_dark_shadow_residual_remaining": light_context_dark_shadow_remaining,
+            "light_source_residual_remaining": light_source_residual_remaining,
+            "cleaned_light_foreground_pixels": cleaned_light_foreground_pixels,
+            "cleaned_light_foreground_ratio": round(cleaned_light_foreground_ratio, 4),
+            "cleaned_light_source_residual_remaining": cleaned_light_source_residual_remaining,
+            "outside_accepted_mask_boundary_residual_pixels": outside_boundary_residual_pixels,
+            "outside_accepted_mask_boundary_residual_ratio": round(outside_boundary_residual_ratio, 4),
+            "outside_accepted_mask_boundary_residual_pixel_limit": outside_boundary_residual_pixel_limit,
+            "outside_accepted_mask_boundary_residual_remaining": outside_boundary_residual_remaining,
             "proof_scope": proof_scope.get("proof_scope"),
             "proof_scope_bbox": proof_scope.get("proof_scope_bbox"),
             "proof_scope_uses_parent_expected_bbox": proof_scope.get(
@@ -811,6 +1127,9 @@ def prove_cleanup_result(
             ),
             "source_glyph_erasure_visual_residual_pixels": visual_residual_pixels,
             "source_glyph_erasure_visual_residual_ratio": round(visual_residual_ratio, 4),
+            "audit_bbox_residual_scope": "source_glyph_erasure_bbox",
+            "audit_bbox_residual_pixels": visual_residual_pixels,
+            "audit_bbox_residual_ratio": round(visual_residual_ratio, 4),
             "source_glyph_erasure_visual_residual_delta_pixels": int(
                 visual_residual_baseline_pixels - visual_residual_pixels
             ),
@@ -827,6 +1146,13 @@ def prove_cleanup_result(
             "broad_white_patch_pixels": white_patch_pixels,
             "broad_white_patch_ratio": round(white_patch_ratio, 4),
             "broad_white_patch_risk": bool(broad_white_patch_risk),
+            "broad_white_patch_light_context": white_patch_light_context,
+            "broad_white_patch_light_context_exempt": white_patch_light_context_exempt,
+            "broad_white_patch_context_median_luma": white_patch_context.get("median_luma", 0.0),
+            "broad_white_patch_context_light_ratio": white_patch_context.get("light_ratio", 0.0),
+            "broad_white_patch_context_dark_ratio": white_patch_context.get("dark_ratio", 0.0),
+            "broad_white_patch_cleaned_median_luma": white_patch_cleaned_median_luma,
+            "broad_white_patch_matches_light_context": white_patch_matches_light_context,
             "collateral_art_damage_delta": round(collateral_ratio, 4),
             "backend_name": backend_name,
             "backend_candidate_id": (cleanup_result.backend_parameters or {}).get("backend_candidate_id"),
@@ -848,23 +1174,16 @@ def prove_cleanup_result(
             failure_reason = "backend_noop_or_error"
         elif mask_source_overlap_ratio < PROOF_MASK_SOURCE_OVERLAP_RATIO:
             failure_reason = "mask_missing_source_pixels"
-        elif source_dark_foreground_pixels <= 0:
+        elif source_dark_foreground_pixels <= 0 and not (
+            light_residual_scope_active and source_light_foreground_pixels > 0
+        ):
             failure_reason = "inconclusive_missing_dark_source_foreground"
-        elif not (
-            residual_dark_ratio < PROOF_RESIDUAL_RATIO
-            or residual_dark_pixels < residual_pixel_limit
+        elif (
+            dark_source_residual_remaining
+            or light_source_residual_remaining
+            or cleaned_light_source_residual_remaining
         ):
             failure_reason = "source_residual_remaining"
-        elif (
-            visual_residual is not None
-            and visual_residual_dark_pixels >= 20
-            and visual_residual_ratio >= PROOF_RESIDUAL_RATIO
-        ):
-            failure_reason = (
-                "source_residual_remaining_in_component_partition_bbox"
-                if proof_scope.get("proof_scope") == "component_partition"
-                else "source_residual_remaining_in_source_glyph_erasure_bbox"
-            )
         elif (
             changed_outside_allowed_pixels > PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS
             or changed_outside_allowed_ratio > PROOF_CHANGED_OUTSIDE_ALLOWED_RATIO
@@ -872,6 +1191,8 @@ def prove_cleanup_result(
             failure_reason = "changed_outside_allowed_area"
         elif collateral_ratio > PROOF_COLLATERAL_INSIDE_ALLOWED_RATIO:
             failure_reason = "collateral_change_too_broad"
+        elif broad_white_patch_risk:
+            failure_reason = "broad_white_patch_risk"
         else:
             failure_reason = "passed"
 
@@ -882,24 +1203,16 @@ def prove_cleanup_result(
 
         source_residual_improved = (
             residual_dark_pixels < baseline_residual_dark_pixels
-            or (
-                visual_residual_baseline_pixels > 0
-                and visual_residual_pixels < visual_residual_baseline_pixels
-            )
         )
         source_visible_area_increased = (
             residual_dark_pixels > baseline_residual_dark_pixels + 4
-            or (
-                visual_residual_baseline_pixels > 0
-                and visual_residual_pixels > visual_residual_baseline_pixels + 4
-            )
         )
         allowed_area_safe = (
             changed_outside_allowed_pixels <= PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS
             and changed_outside_allowed_ratio <= PROOF_CHANGED_OUTSIDE_ALLOWED_RATIO
         )
         collateral_safe = collateral_ratio <= PROOF_COLLATERAL_INSIDE_ALLOWED_RATIO
-        degraded_commit_allowed = (
+        degraded_cleanup_diagnostic = (
             proof_status == ProofStatus.FAILED
             and bool(cleanup_result.pixel_changed)
             and str(failure_reason or "").startswith("source_residual")
@@ -912,8 +1225,6 @@ def prove_cleanup_result(
         )
         if failure_reason == "passed":
             proof_quality_state = "proof_passed_clean"
-        elif degraded_commit_allowed:
-            proof_quality_state = "proof_passed_with_minor_residual"
         elif str(failure_reason or "").startswith("source_residual"):
             proof_quality_state = "proof_failed_residual_warning"
         elif failure_reason in {"changed_outside_allowed_area", "collateral_change_too_broad"}:
@@ -926,7 +1237,8 @@ def prove_cleanup_result(
                 "source_visible_area_increased": bool(source_visible_area_increased),
                 "allowed_area_safe": bool(allowed_area_safe),
                 "collateral_safe": bool(collateral_safe),
-                "degraded_commit_allowed": bool(degraded_commit_allowed),
+                "degraded_commit_allowed": False,
+                "degraded_cleanup_diagnostic": bool(degraded_cleanup_diagnostic),
                 "proof_quality_state": proof_quality_state,
                 "proof_thresholds_unchanged": True,
                 "erase_limits_unchanged": True,
@@ -1149,6 +1461,7 @@ def run_cleanup_runtime_contract(
     source_image: Any,
     job_candidates: Sequence[CleanupJob] | Any,
     mask_contracts: CleanupMaskBuildResult | Sequence[CleanupMask] | Any,
+    plan_contracts: CleanupPlanBuildResult | Sequence[CleanupPlan] | Any | None = None,
     render_eligibility: Any | None,
     use_gpu: bool,
     model_id: str,
@@ -1165,7 +1478,11 @@ def run_cleanup_runtime_contract(
     parent_cleanup_unit_aggregate_records: list[dict[str, Any]] = []
     errors: list[str] = []
     jobs = _extract_jobs(job_candidates)
+    jobs_by_id = {str(job.cleanup_job_id): job for job in jobs}
     masks = _extract_masks(mask_contracts)
+    formal_plans = _extract_plans(plan_contracts)
+    masks_by_cleanup_mask_id = {str(cleanup_mask.cleanup_mask_id): cleanup_mask for cleanup_mask in masks}
+    formal_plans_by_cleanup_mask_id = _plans_by_cleanup_mask_id(formal_plans)
     masks_by_job_id: dict[str, list[CleanupMask]] = {}
     for cleanup_mask in masks:
         masks_by_job_id.setdefault(str(cleanup_mask.cleanup_job_id), []).append(cleanup_mask)
@@ -1176,6 +1493,7 @@ def run_cleanup_runtime_contract(
         page_id=page_id,
         job_count=len(jobs),
         mask_count=len(masks),
+        plan_count=len(formal_plans),
         artifact_dir=artifact_dir or "",
     )
     if artifact_dir:
@@ -1184,7 +1502,100 @@ def run_cleanup_runtime_contract(
         except Exception as exc:
             errors.append(f"artifact_dir:{type(exc).__name__}: {exc}")
 
-    for job in jobs:
+    runtime_obligations: list[tuple[CleanupJob, CleanupMask, CleanupPlan]] = []
+    planned_mask_ids: set[str] = set()
+    for formal_plan in formal_plans:
+        cleanup_mask_id = str(formal_plan.cleanup_mask_id)
+        cleanup_mask = masks_by_cleanup_mask_id.get(cleanup_mask_id)
+        if cleanup_mask is None:
+            status_records.append(
+                {
+                    "page_id": page_id,
+                    "region_id": "",
+                    "target_region_ids": [],
+                    "cleanup_job_id": str(formal_plan.cleanup_job_id),
+                    "cleanup_mask_id": cleanup_mask_id,
+                    "cleanup_plan_id": str(formal_plan.cleanup_plan_id),
+                    "runtime_status": "contract_error",
+                    "failure_reason": "cleanup_contract_error_missing_cleanup_mask_for_formal_plan",
+                    "cleanup_outcome_state": "cleanup_contract_error_missing_cleanup_mask_for_formal_plan",
+                    "contract_error_original_reason": "formal_cleanup_plan_bound_mask_missing",
+                    "render_consumption_decision_if_consumed": "block_future_renderer_consumption",
+                    "renderer_consumed": False,
+                }
+            )
+            continue
+        job = jobs_by_id.get(str(formal_plan.cleanup_job_id)) or jobs_by_id.get(str(cleanup_mask.cleanup_job_id))
+        if job is None:
+            status_records.append(
+                {
+                    "page_id": page_id,
+                    "region_id": "",
+                    "target_region_ids": [],
+                    "cleanup_job_id": str(formal_plan.cleanup_job_id or cleanup_mask.cleanup_job_id),
+                    "cleanup_mask_id": cleanup_mask_id,
+                    "cleanup_plan_id": str(formal_plan.cleanup_plan_id),
+                    "runtime_status": "contract_error",
+                    "failure_reason": "cleanup_contract_error_missing_cleanup_job_for_formal_plan",
+                    "cleanup_outcome_state": "cleanup_contract_error_missing_cleanup_job_for_formal_plan",
+                    "contract_error_original_reason": "formal_cleanup_plan_bound_job_missing",
+                    "render_consumption_decision_if_consumed": "block_future_renderer_consumption",
+                    "renderer_consumed": False,
+                }
+            )
+            continue
+        planned_mask_ids.add(cleanup_mask_id)
+        runtime_obligations.append((job, cleanup_mask, formal_plan))
+
+    for cleanup_mask in masks:
+        cleanup_mask_id = str(cleanup_mask.cleanup_mask_id)
+        if cleanup_mask_id in planned_mask_ids:
+            continue
+        if not _accepted_executable_cleanup_mask(cleanup_mask):
+            continue
+        job = jobs_by_id.get(str(cleanup_mask.cleanup_job_id))
+        if job is None:
+            status_records.append(
+                {
+                    "page_id": page_id,
+                    "region_id": "",
+                    "target_region_ids": [],
+                    "cleanup_job_id": str(cleanup_mask.cleanup_job_id),
+                    "cleanup_mask_id": cleanup_mask_id,
+                    "runtime_status": "contract_error",
+                    "failure_reason": "cleanup_contract_error_missing_cleanup_job_for_accepted_mask",
+                    "cleanup_outcome_state": "cleanup_contract_error_missing_cleanup_job_for_accepted_mask",
+                    "contract_error_original_reason": "accepted_cleanup_mask_bound_job_missing",
+                    "render_consumption_decision_if_consumed": "block_future_renderer_consumption",
+                    "renderer_consumed": False,
+                }
+            )
+            continue
+        base_record = _runtime_base_record(
+            page_id,
+            job,
+            runtime_class=job.cleanup_class,
+        )
+        status_records.append(
+            {
+                **base_record,
+                "runtime_status": "contract_error",
+                "cleanup_mask_id": cleanup_mask_id,
+                "failure_reason": "cleanup_contract_error_missing_formal_cleanup_plan",
+                "cleanup_outcome_state": "cleanup_contract_error_missing_formal_cleanup_plan",
+                "contract_error_original_reason": "formal_cleanup_plan_missing_for_accepted_cleanup_mask",
+                "matching_formal_plan_count": len(formal_plans_by_cleanup_mask_id.get(cleanup_mask_id, [])),
+                "render_consumption_decision_if_consumed": "block_future_renderer_consumption",
+                "renderer_consumed": False,
+            }
+        )
+
+    backend_contexts_by_mask_id = _backend_contexts_by_cleanup_mask_id(
+        runtime_obligations,
+        image,
+    )
+
+    for job, cleanup_mask, formal_plan in runtime_obligations:
         job_started = time.time()
         planned_runtime_class = _runtime_cleanup_class_for_job(job, runtime_class)
         base_record = _runtime_base_record(
@@ -1254,33 +1665,6 @@ def run_cleanup_runtime_contract(
                     }
                 )
                 continue
-            candidates = masks_by_job_id.get(str(job.cleanup_job_id), [])
-            if len(candidates) != 1:
-                contract_error = _contract_error_for_reason("expected_exactly_one_cleanup_mask")
-                _page014_timeout_checkpoint(
-                    "cleanup_runtime_job",
-                    "contract_error",
-                    page_id=page_id,
-                    cleanup_job_id=str(job.cleanup_job_id),
-                    region_id=target_region_ids[0] if target_region_ids else "",
-                    reason=contract_error,
-                    matching_mask_count=len(candidates),
-                    elapsed_ms=round((time.time() - job_started) * 1000.0, 3),
-                )
-                status_records.append(
-                    {
-                        **base_record,
-                        "runtime_status": "contract_error",
-                        "failure_reason": contract_error,
-                        "cleanup_outcome_state": contract_error,
-                        "contract_error_original_reason": "expected_exactly_one_cleanup_mask",
-                        "matching_mask_count": len(candidates),
-                        "render_consumption_decision_if_consumed": "block_future_renderer_consumption",
-                        "renderer_consumed": False,
-                    }
-                )
-                continue
-            cleanup_mask = candidates[0]
             exclusion = _runtime_job_exclusion_reason(job, cleanup_mask)
             if exclusion:
                 contract_error = _contract_error_for_reason(exclusion)
@@ -1310,7 +1694,7 @@ def run_cleanup_runtime_contract(
                 source_image,
                 planned_runtime_class,
             )
-            mask_rejection = _mask_exclusion_reason(runtime_mask, None)
+            mask_rejection = _runtime_structural_mask_error(runtime_mask)
             if mask_rejection:
                 _cleanup_perf_contract_checkpoint(
                     "cleanup_runtime_mask_filter",
@@ -1362,12 +1746,11 @@ def run_cleanup_runtime_contract(
                     ) = _run_partitioned_cleanup_attempts(
                         image=image.copy() if hasattr(image, "copy") else image,
                         source_image=source_image,
-                        base_plan_kwargs={
-                            "page_id": page_id,
-                            "job": job,
-                            "inpaint_mode": inpaint_mode,
-                            "cleanup_class": planned_runtime_class,
-                        },
+                        formal_plan=formal_plan,
+                        job=job,
+                        parent_cleanup_mask=runtime_mask,
+                        inpaint_mode=inpaint_mode,
+                        cleanup_class=planned_runtime_class,
                         partition_masks=partitioned,
                         base_record=base_record,
                         target_region_ids=target_region_ids,
@@ -1425,7 +1808,27 @@ def run_cleanup_runtime_contract(
                 )
                 continue
 
-            plan = _runtime_speech_flat_plan(
+            pre_execution_risk_reason = str(
+                (formal_plan.backend_parameters or {}).get("pre_execution_risk_reason")
+                or ""
+            )
+            if pre_execution_risk_reason:
+                _cleanup_perf_contract_checkpoint(
+                    "cleanup_runtime_mask_filter",
+                    "risk_recorded_execute_full_mask",
+                    page_id=page_id,
+                    cleanup_job_id=str(job.cleanup_job_id),
+                    region_id=target_region_ids[0] if target_region_ids else "",
+                    cleanup_mask_id=str(runtime_mask.cleanup_mask_id),
+                    risk_reason=pre_execution_risk_reason,
+                    visual_scope=str(runtime_mask.visual_scope or ""),
+                    foreground_pixels=runtime_mask.foreground_mask_pixels,
+                    erase_pixels=runtime_mask.erase_mask_pixels,
+                    allowed_area=runtime_mask.allowed_area,
+                )
+
+            plan = _runtime_plan_from_formal_plan(
+                formal_plan=formal_plan,
                 page_id=page_id,
                 job=job,
                 cleanup_mask=runtime_mask,
@@ -1447,6 +1850,7 @@ def run_cleanup_runtime_contract(
                 source_image=source_image,
                 cleanup_plan=plan,
                 cleanup_mask=runtime_mask,
+                backend_context=backend_contexts_by_mask_id.get(str(runtime_mask.cleanup_mask_id)),
                 page_id=page_id,
                 region_id=target_region_ids[0] if target_region_ids else "",
                 use_gpu=use_gpu,
@@ -1470,15 +1874,15 @@ def run_cleanup_runtime_contract(
             if cleanup_result is None:
                 cleanup_result, cleanup_proof = _best_failed_attempt(job_results, job_proofs)
             proof_passed = bool(cleanup_proof and cleanup_proof.proof_status == ProofStatus.PASSED)
-            degraded_commit_allowed = bool(
-                cleanup_result
-                and cleanup_proof
-                and _proof_allows_degraded_commit(cleanup_proof, cleanup_result, {})
+            degraded_cleanup_diagnostic = bool(
+                cleanup_proof
+                and isinstance(cleanup_proof.metrics, Mapping)
+                and cleanup_proof.metrics.get("degraded_cleanup_diagnostic", False)
             )
             runtime_status = (
                 "passed"
                 if proof_passed and cleanup_result and cleanup_result.pixel_changed
-                else ("warning" if degraded_commit_allowed else "failed")
+                else "failed"
             )
             failure_reason = (
                 "passed"
@@ -1495,6 +1899,11 @@ def run_cleanup_runtime_contract(
                     "runtime_status": runtime_status,
                     "cleanup_plan_id": cleanup_result.cleanup_plan_id if cleanup_result else plan.cleanup_plan_id,
                     "cleanup_mask_id": runtime_mask.cleanup_mask_id,
+                    "cleanup_obligation_id": runtime_mask.cleanup_mask_id,
+                    "text_block_root_id": (plan.backend_parameters or {}).get(
+                        "text_block_root_id",
+                        base_record.get("text_block_root_id", ""),
+                    ),
                     "cleanup_result_id": cleanup_result.cleanup_result_id if cleanup_result else "",
                     "cleanup_proof_id": cleanup_proof.cleanup_proof_id if cleanup_proof else "",
                     "proof_status": _enum_value(cleanup_proof.proof_status) if cleanup_proof else "",
@@ -1507,9 +1916,8 @@ def run_cleanup_runtime_contract(
                     "mask_ref": cleanup_result.mask_ref if cleanup_result else None,
                     "proof_metrics": selected_proof_metrics,
                     "proof_quality_state": selected_proof_metrics.get("proof_quality_state", ""),
-                    "degraded_commit_allowed": bool(
-                        selected_proof_metrics.get("degraded_commit_allowed", False)
-                    ),
+                    "degraded_commit_allowed": False,
+                    "degraded_cleanup_diagnostic": bool(degraded_cleanup_diagnostic),
                     "source_residual_delta_dark_pixels": selected_proof_metrics.get(
                         "source_residual_delta_dark_pixels",
                         0,
@@ -1669,162 +2077,223 @@ def commit_cleanup_runtime_results_to_working_image(
             ],
         )
 
+    commit_entries: list[dict[str, Any]] = []
+    root_transaction_records: list[dict[str, Any]] = []
+    result_ids = {str(result.cleanup_result_id) for result in result_records}
+    selected_result_ids = {
+        str(status.get("cleanup_result_id") or "")
+        for status in status_records
+        if isinstance(status, Mapping) and str(status.get("cleanup_result_id") or "")
+    }
     for cleanup_result in result_records:
-        result_started = time.time()
         result_id = str(cleanup_result.cleanup_result_id)
+        if selected_result_ids and result_id not in selected_result_ids:
+            continue
         proof = proof_by_result_id.get(result_id)
         status = status_by_result_id.get(result_id, {})
-        region_id = str(cleanup_result.region_id or status.get("region_id") or "")
-        result_backend_parameters = (
-            cleanup_result.backend_parameters
-            if isinstance(getattr(cleanup_result, "backend_parameters", None), Mapping)
-            else {}
+        entry = _upstream_commit_entry_for_result(
+            page_id=page_id,
+            cleanup_result=cleanup_result,
+            proof=proof,
+            status=status,
+            excluded_region_ids=excluded,
         )
-        owned_segmentation_pixels = _int_or_none(result_backend_parameters.get("owned_segmentation_pixels"))
-        executable_foreground_pixels = _int_or_none(result_backend_parameters.get("executable_foreground_pixels"))
-        owned_to_executable_ratio = _float_or_none(
-            result_backend_parameters.get("owned_segmentation_to_executable_ratio")
-        )
-        base = {
-            "page_id": page_id,
-            "region_id": region_id,
-            "cleanup_result_id": result_id,
-            "cleanup_proof_id": str(getattr(proof, "cleanup_proof_id", "") or ""),
-            "cleanup_plan_id": str(cleanup_result.cleanup_plan_id),
-            "cleanup_class": _enum_value(cleanup_result.cleanup_class),
-            "pixel_changed": bool(cleanup_result.pixel_changed),
-            "changed_pixel_count": int(cleanup_result.changed_pixel_count or 0),
-            "renderer_consumed": False,
-            "runtime_cleaned_image_ref": cleanup_result.cleaned_image_ref or "",
-            "runtime_diff_ref": cleanup_result.diff_ref or "",
-            "runtime_mask_ref": cleanup_result.mask_ref or "",
-            "owned_segmentation_pixels": owned_segmentation_pixels,
-            "executable_foreground_pixels": executable_foreground_pixels,
-            "owned_segmentation_to_executable_ratio": owned_to_executable_ratio,
-            "committed_cleanup_mask_pixels": 0,
-            "owned_segmentation_to_commit_ratio": 0.0 if owned_segmentation_pixels is not None else None,
-            "ready_but_sparse_violation": bool(result_backend_parameters.get("ready_but_sparse_violation", False)),
-            "sourceglyph_executable_influence_detected": bool(
-                result_backend_parameters.get("sourceglyph_executable_influence_detected", False)
-            ),
-            "dense_contract_override_detected": bool(result_backend_parameters.get("dense_contract_override_detected", False)),
-        }
-        failure_reason = _upstream_commit_block_reason(cleanup_result, proof, status, excluded)
-        if failure_reason:
-            _page014_timeout_checkpoint(
-                "cleanup_upstream_commit_result",
-                "blocked",
-                page_id=page_id,
-                region_id=region_id,
-                cleanup_result_id=result_id,
-                reason=failure_reason,
-                elapsed_ms=round((time.time() - result_started) * 1000.0, 3),
-            )
-            blocked_records.append(
-                {
-                    **base,
-                    "cleanup_applied_upstream": False,
-                    "cleanup_committed_to_working_image": False,
-                    "failure_reason": failure_reason,
-                }
-            )
-            continue
+        commit_entries.append(entry)
 
-        cleaned_image = cleanup_result.cleaned_image or _load_cleanup_image(cleanup_result.cleaned_image_ref)
-        if cleaned_image is None:
-            _page014_timeout_checkpoint(
-                "cleanup_upstream_commit_result",
-                "blocked",
-                page_id=page_id,
-                region_id=region_id,
-                cleanup_result_id=result_id,
-                reason="runtime_cleaned_image_missing",
-                elapsed_ms=round((time.time() - result_started) * 1000.0, 3),
-            )
-            blocked_records.append(
-                {
-                    **base,
-                    "cleanup_applied_upstream": False,
-                    "cleanup_committed_to_working_image": False,
-                    "failure_reason": "runtime_cleaned_image_missing",
-                }
-            )
+    for status in status_records:
+        if not isinstance(status, Mapping):
             continue
-        try:
-            committed_pixels, commit_mask = _commit_runtime_result_pixels(
-                working_np=working_np,
-                source_np=source_np,
-                cleaned_image=cleaned_image,
-                operation_bbox=cleanup_result.operation_bbox,
-            )
-        except Exception as exc:
-            errors.append(f"{region_id}:{type(exc).__name__}: {exc}")
-            committed_pixels = 0
-            commit_mask = None
-        if committed_pixels <= 0:
-            _page014_timeout_checkpoint(
-                "cleanup_upstream_commit_result",
-                "blocked",
-                page_id=page_id,
-                region_id=region_id,
-                cleanup_result_id=result_id,
-                reason="no_pixels_committed_to_working_image",
-                elapsed_ms=round((time.time() - result_started) * 1000.0, 3),
-            )
-            blocked_records.append(
-                {
-                    **base,
-                    "cleanup_applied_upstream": False,
-                    "cleanup_committed_to_working_image": False,
-                    "failure_reason": "no_pixels_committed_to_working_image",
-                }
-            )
+        result_id = str(status.get("cleanup_result_id") or "")
+        if result_id and result_id in result_ids:
             continue
-        proof_metrics = proof.metrics if proof is not None and isinstance(proof.metrics, Mapping) else {}
-        degraded_warning_commit = _proof_allows_degraded_commit(proof, cleanup_result, status)
-        committed_cleanup_mask_pixels = int(np.count_nonzero(commit_mask)) if commit_mask is not None else 0
-        owned_segmentation_to_commit_ratio = (
-            round(float(committed_cleanup_mask_pixels) / float(max(1, owned_segmentation_pixels)), 4)
-            if owned_segmentation_pixels is not None
-            else None
-        )
-        commit_records.append(
+        if not _status_addresses_cleanup_obligation(status):
+            continue
+        commit_entries.append(_upstream_commit_entry_for_status(page_id=page_id, status=status))
+
+    entries_by_root: dict[str, list[dict[str, Any]]] = {}
+    for entry in commit_entries:
+        entries_by_root.setdefault(str(entry.get("text_block_root_id") or "root_unknown"), []).append(entry)
+
+    for root_id in sorted(entries_by_root):
+        root_started = time.time()
+        root_entries = entries_by_root[root_id]
+        root_obligation_ids = sorted(
             {
-                **base,
-                "cleanup_applied_upstream": True,
-                "cleanup_committed_to_working_image": True,
-                "committed_pixel_count": committed_pixels,
-                "commit_mask_pixels": committed_cleanup_mask_pixels,
-                "committed_cleanup_mask_pixels": committed_cleanup_mask_pixels,
-                "owned_segmentation_to_commit_ratio": owned_segmentation_to_commit_ratio,
-                "failure_reason": "passed",
-                "cleanup_commit_quality": (
-                    "residual_warning_commit"
-                    if degraded_warning_commit
-                    else "proof_passed_clean_commit"
-                ),
-                "residual_warning": bool(degraded_warning_commit),
-                "proof_quality_state": proof_metrics.get("proof_quality_state", ""),
-                "source_residual_delta_dark_pixels": proof_metrics.get(
-                    "source_residual_delta_dark_pixels",
-                    0,
-                ),
-                "source_residual_delta_dark_ratio": proof_metrics.get(
-                    "source_residual_delta_dark_ratio",
-                    0,
-                ),
-                "collateral_art_damage_delta": proof_metrics.get("collateral_art_damage_delta", 0),
-                "broad_white_patch_risk": bool(proof_metrics.get("broad_white_patch_risk", False)),
+                str(entry.get("cleanup_obligation_id") or entry.get("cleanup_mask_id") or "")
+                for entry in root_entries
+                if str(entry.get("cleanup_obligation_id") or entry.get("cleanup_mask_id") or "")
             }
         )
-        _page014_timeout_checkpoint(
-            "cleanup_upstream_commit_result",
-            "committed",
-            page_id=page_id,
-            region_id=region_id,
-            cleanup_result_id=result_id,
-            committed_pixel_count=committed_pixels,
-            elapsed_ms=round((time.time() - result_started) * 1000.0, 3),
+        failed_entries = [entry for entry in root_entries if str(entry.get("failure_reason") or "")]
+        candidate_entries = [
+            entry
+            for entry in root_entries
+            if not str(entry.get("failure_reason") or "") and entry.get("cleanup_result") is not None
+        ]
+        proof_passed_obligations = sorted(
+            {
+                str(entry.get("cleanup_obligation_id") or entry.get("cleanup_mask_id") or "")
+                for entry in candidate_entries
+                if str(entry.get("cleanup_obligation_id") or entry.get("cleanup_mask_id") or "")
+            }
+        )
+        root_failure = ""
+        if failed_entries:
+            root_failure = "root_transaction_incomplete"
+        elif not root_obligation_ids:
+            root_failure = "root_transaction_missing_cleanup_obligation"
+        elif set(proof_passed_obligations) != set(root_obligation_ids):
+            root_failure = "root_transaction_incomplete"
+
+        root_commit_records: list[dict[str, Any]] = []
+        root_committed_obligations: set[str] = set()
+        if not root_failure:
+            root_working_np = working_np.copy()
+            for entry in candidate_entries:
+                result_started = time.time()
+                cleanup_result = entry["cleanup_result"]
+                proof = entry.get("proof")
+                status = entry.get("status") if isinstance(entry.get("status"), Mapping) else {}
+                base = dict(entry.get("base") or {})
+                region_id = str(base.get("region_id") or "")
+                result_id = str(base.get("cleanup_result_id") or "")
+                cleaned_image = cleanup_result.cleaned_image or _load_cleanup_image(cleanup_result.cleaned_image_ref)
+                if cleaned_image is None:
+                    root_failure = "runtime_cleaned_image_missing"
+                    entry["failure_reason"] = root_failure
+                    break
+                try:
+                    committed_pixels, commit_mask = _commit_runtime_result_pixels(
+                        working_np=root_working_np,
+                        source_np=source_np,
+                        cleaned_image=cleaned_image,
+                        operation_bbox=cleanup_result.operation_bbox,
+                        accepted_mask=_load_binary_mask_ref(
+                            cleanup_result.mask_ref,
+                            source_np.shape[:2],
+                        ),
+                    )
+                except Exception as exc:
+                    errors.append(f"{region_id}:{type(exc).__name__}: {exc}")
+                    committed_pixels = 0
+                    commit_mask = None
+                if committed_pixels <= 0:
+                    root_failure = "no_pixels_committed_to_working_image"
+                    entry["failure_reason"] = root_failure
+                    break
+                proof_metrics = proof.metrics if proof is not None and isinstance(proof.metrics, Mapping) else {}
+                owned_segmentation_pixels = _int_or_none(base.get("owned_segmentation_pixels"))
+                committed_cleanup_mask_pixels = int(np.count_nonzero(commit_mask)) if commit_mask is not None else 0
+                owned_segmentation_to_commit_ratio = (
+                    round(float(committed_cleanup_mask_pixels) / float(max(1, owned_segmentation_pixels)), 4)
+                    if owned_segmentation_pixels is not None
+                    else None
+                )
+                degraded_warning_commit = _proof_allows_degraded_commit(proof, cleanup_result, status)
+                root_commit_records.append(
+                    {
+                        **base,
+                        "cleanup_applied_upstream": True,
+                        "cleanup_committed_to_working_image": True,
+                        "committed_pixel_count": committed_pixels,
+                        "commit_mask_pixels": committed_cleanup_mask_pixels,
+                        "committed_cleanup_mask_pixels": committed_cleanup_mask_pixels,
+                        "owned_segmentation_to_commit_ratio": owned_segmentation_to_commit_ratio,
+                        "failure_reason": "passed",
+                        "cleanup_commit_quality": (
+                            "residual_warning_commit"
+                            if degraded_warning_commit
+                            else "proof_passed_clean_commit"
+                        ),
+                        "residual_warning": bool(degraded_warning_commit),
+                        "proof_quality_state": proof_metrics.get("proof_quality_state", ""),
+                        "source_residual_delta_dark_pixels": proof_metrics.get(
+                            "source_residual_delta_dark_pixels",
+                            0,
+                        ),
+                        "source_residual_delta_dark_ratio": proof_metrics.get(
+                            "source_residual_delta_dark_ratio",
+                            0,
+                        ),
+                        "collateral_art_damage_delta": proof_metrics.get("collateral_art_damage_delta", 0),
+                        "broad_white_patch_risk": bool(proof_metrics.get("broad_white_patch_risk", False)),
+                        "root_transaction_status": "root_committed",
+                    }
+                )
+                root_committed_obligations.add(
+                    str(base.get("cleanup_obligation_id") or base.get("cleanup_mask_id") or "")
+                )
+                _page014_timeout_checkpoint(
+                    "cleanup_upstream_commit_result",
+                    "root_candidate_committed",
+                    page_id=page_id,
+                    region_id=region_id,
+                    cleanup_result_id=result_id,
+                    text_block_root_id=root_id,
+                    committed_pixel_count=committed_pixels,
+                    elapsed_ms=round((time.time() - result_started) * 1000.0, 3),
+                )
+            if not root_failure:
+                working_np[:] = root_working_np
+                commit_records.extend(root_commit_records)
+
+        if root_failure:
+            for entry in root_entries:
+                base = dict(entry.get("base") or {})
+                entry_failure = str(entry.get("failure_reason") or "")
+                blocked_reason = entry_failure or root_failure
+                if not entry_failure and root_failure == "root_transaction_incomplete":
+                    blocked_reason = "root_transaction_incomplete"
+                blocked_records.append(
+                    {
+                        **base,
+                        "cleanup_applied_upstream": False,
+                        "cleanup_committed_to_working_image": False,
+                        "failure_reason": blocked_reason,
+                        "root_transaction_status": "root_blocked",
+                        "root_block_reason": root_failure,
+                    }
+                )
+                _page014_timeout_checkpoint(
+                    "cleanup_upstream_commit_result",
+                    "root_blocked",
+                    page_id=page_id,
+                    region_id=str(base.get("region_id") or ""),
+                    cleanup_result_id=str(base.get("cleanup_result_id") or ""),
+                    text_block_root_id=root_id,
+                    reason=blocked_reason,
+                    elapsed_ms=round((time.time() - root_started) * 1000.0, 3),
+                )
+
+        root_status = "root_blocked" if root_failure else "root_committed"
+        root_transaction_records.append(
+            {
+                "page_id": page_id,
+                "text_block_root_id": root_id,
+                "root_id": root_id,
+                "accepted_cleanup_mask_ids": root_obligation_ids,
+                "planned_cleanup_mask_ids": root_obligation_ids,
+                "executed_cleanup_mask_ids": sorted(
+                    {
+                        str(entry.get("cleanup_obligation_id") or entry.get("cleanup_mask_id") or "")
+                        for entry in root_entries
+                        if entry.get("cleanup_result") is not None
+                        and str(entry.get("cleanup_obligation_id") or entry.get("cleanup_mask_id") or "")
+                    }
+                ),
+                "proof_passed_cleanup_mask_ids": proof_passed_obligations,
+                "committed_cleanup_mask_ids": sorted(root_committed_obligations),
+                "blocked_cleanup_mask_ids": (
+                    sorted(set(root_obligation_ids) - set(root_committed_obligations))
+                    if root_failure
+                    else []
+                ),
+                "root_obligation_count": len(root_obligation_ids),
+                "root_completed_obligation_count": len(root_committed_obligations),
+                "root_transaction_status": root_status,
+                "block_reason": root_failure,
+                "renderer_consumed": False,
+            }
         )
 
     committed_image = Image.fromarray(working_np.astype("uint8"), mode="RGB")
@@ -1858,7 +2327,221 @@ def commit_cleanup_runtime_results_to_working_image(
         commit_mask_ref=refs.get("commit_mask_ref", ""),
         commit_records=commit_records,
         blocked_records=blocked_records,
+        root_transaction_records=root_transaction_records,
         errors=errors,
+    )
+
+
+def _upstream_commit_entry_for_result(
+    *,
+    page_id: str,
+    cleanup_result: CleanupResult,
+    proof: CleanupProof | None,
+    status: Mapping[str, Any],
+    excluded_region_ids: set[str],
+) -> dict[str, Any]:
+    result_id = str(cleanup_result.cleanup_result_id)
+    region_id = str(cleanup_result.region_id or status.get("region_id") or "")
+    result_backend_parameters = (
+        cleanup_result.backend_parameters
+        if isinstance(getattr(cleanup_result, "backend_parameters", None), Mapping)
+        else {}
+    )
+    owned_segmentation_pixels = _int_or_none(result_backend_parameters.get("owned_segmentation_pixels"))
+    executable_foreground_pixels = _int_or_none(result_backend_parameters.get("executable_foreground_pixels"))
+    owned_to_executable_ratio = _float_or_none(
+        result_backend_parameters.get("owned_segmentation_to_executable_ratio")
+    )
+    cleanup_obligation_id = _commit_cleanup_obligation_id(
+        cleanup_result=cleanup_result,
+        status=status,
+        backend_parameters=result_backend_parameters,
+    )
+    text_block_root_id = _commit_text_block_root_id(
+        cleanup_result=cleanup_result,
+        status=status,
+        backend_parameters=result_backend_parameters,
+        cleanup_obligation_id=cleanup_obligation_id,
+    )
+    base = {
+        "page_id": page_id,
+        "region_id": region_id,
+        "text_block_root_id": text_block_root_id,
+        "cleanup_obligation_id": cleanup_obligation_id,
+        "mask_space": str(result_backend_parameters.get("mask_space") or status.get("mask_space") or "page"),
+        "bbox_format": str(
+            result_backend_parameters.get("bbox_format")
+            or status.get("bbox_format")
+            or "xyxy_exclusive"
+        ),
+        "cleanup_result_id": result_id,
+        "cleanup_proof_id": str(getattr(proof, "cleanup_proof_id", "") or ""),
+        "cleanup_job_id": str(cleanup_result.cleanup_job_id),
+        "cleanup_mask_id": str(cleanup_result.cleanup_mask_id),
+        "cleanup_plan_id": str(cleanup_result.cleanup_plan_id),
+        "cleanup_unit_id": str(status.get("cleanup_unit_id") or cleanup_result.cleanup_job_id),
+        "cleanup_class": _enum_value(cleanup_result.cleanup_class),
+        "pixel_changed": bool(cleanup_result.pixel_changed),
+        "changed_pixel_count": int(cleanup_result.changed_pixel_count or 0),
+        "renderer_consumed": False,
+        "runtime_cleaned_image_ref": cleanup_result.cleaned_image_ref or "",
+        "runtime_diff_ref": cleanup_result.diff_ref or "",
+        "runtime_mask_ref": cleanup_result.mask_ref or "",
+        "owned_segmentation_pixels": owned_segmentation_pixels,
+        "executable_foreground_pixels": executable_foreground_pixels,
+        "foreground_mask_pixels": result_backend_parameters.get("foreground_mask_pixels"),
+        "erase_mask_pixels": result_backend_parameters.get("erase_mask_pixels"),
+        "owned_segmentation_to_executable_ratio": owned_to_executable_ratio,
+        "committed_cleanup_mask_pixels": 0,
+        "owned_segmentation_to_commit_ratio": 0.0 if owned_segmentation_pixels is not None else None,
+        "ready_but_sparse_violation": bool(result_backend_parameters.get("ready_but_sparse_violation", False)),
+        "sourceglyph_executable_influence_detected": bool(
+            result_backend_parameters.get("sourceglyph_executable_influence_detected", False)
+        ),
+        "dense_contract_override_detected": bool(result_backend_parameters.get("dense_contract_override_detected", False)),
+        "partitioned_cleanup": bool(status.get("partitioned_cleanup", False)),
+        "partition_index": status.get("partition_index", ""),
+        "partition_count": status.get("partition_count", ""),
+        "parent_cleanup_mask_id": status.get("parent_cleanup_mask_id", ""),
+        "parent_cleanup_unit_id": status.get("parent_cleanup_unit_id", ""),
+        "parent_cleanup_unit_aggregate_status": status.get("parent_cleanup_unit_aggregate_status", ""),
+        "parent_cleanup_unit_aggregate_complete": status.get("parent_cleanup_unit_aggregate_complete", ""),
+        "partition_parent_full_mask_proof_complete": bool(
+            status.get("partition_parent_full_mask_proof_complete", False)
+        ),
+        "parent_cleanup_unit_component_attempt_count": status.get(
+            "parent_cleanup_unit_component_attempt_count",
+            0,
+        ),
+    }
+    failure_reason = _upstream_commit_block_reason(cleanup_result, proof, status, excluded_region_ids)
+    return {
+        "text_block_root_id": text_block_root_id,
+        "cleanup_obligation_id": cleanup_obligation_id,
+        "cleanup_mask_id": str(cleanup_result.cleanup_mask_id),
+        "cleanup_result": cleanup_result,
+        "proof": proof,
+        "status": status,
+        "base": base,
+        "failure_reason": failure_reason,
+    }
+
+
+def _upstream_commit_entry_for_status(
+    *,
+    page_id: str,
+    status: Mapping[str, Any],
+) -> dict[str, Any]:
+    cleanup_mask_id = str(status.get("cleanup_mask_id") or "")
+    cleanup_obligation_id = str(
+        status.get("cleanup_obligation_id")
+        or status.get("parent_cleanup_mask_id")
+        or cleanup_mask_id
+        or ""
+    )
+    text_block_root_id = str(
+        status.get("text_block_root_id")
+        or status.get("parent_cleanup_unit_id")
+        or status.get("cleanup_unit_id")
+        or cleanup_obligation_id
+        or status.get("cleanup_job_id")
+        or "root_unknown"
+    )
+    failure_reason = str(
+        status.get("failure_reason")
+        or status.get("cleanup_outcome_state")
+        or "runtime_result_missing_for_obligation"
+    )
+    base = {
+        "page_id": page_id,
+        "region_id": str(status.get("region_id") or ""),
+        "text_block_root_id": text_block_root_id,
+        "cleanup_obligation_id": cleanup_obligation_id,
+        "mask_space": str(status.get("mask_space") or "page"),
+        "bbox_format": str(status.get("bbox_format") or "xyxy_exclusive"),
+        "cleanup_result_id": str(status.get("cleanup_result_id") or ""),
+        "cleanup_proof_id": str(status.get("cleanup_proof_id") or ""),
+        "cleanup_job_id": str(status.get("cleanup_job_id") or ""),
+        "cleanup_mask_id": cleanup_mask_id,
+        "cleanup_plan_id": str(status.get("cleanup_plan_id") or ""),
+        "cleanup_unit_id": str(status.get("cleanup_unit_id") or ""),
+        "cleanup_class": str(status.get("cleanup_class") or ""),
+        "pixel_changed": bool(status.get("pixel_changed")),
+        "changed_pixel_count": int(status.get("changed_pixel_count") or 0),
+        "renderer_consumed": False,
+        "runtime_cleaned_image_ref": str(status.get("cleaned_image_ref") or ""),
+        "runtime_diff_ref": str(status.get("diff_ref") or ""),
+        "runtime_mask_ref": str(status.get("mask_ref") or ""),
+        "owned_segmentation_pixels": _int_or_none(status.get("owned_segmentation_pixels")),
+        "executable_foreground_pixels": _int_or_none(status.get("executable_foreground_pixels")),
+        "committed_cleanup_mask_pixels": 0,
+        "partitioned_cleanup": bool(status.get("partitioned_cleanup", False)),
+        "partition_index": status.get("partition_index", ""),
+        "partition_count": status.get("partition_count", ""),
+        "parent_cleanup_mask_id": status.get("parent_cleanup_mask_id", ""),
+        "parent_cleanup_unit_id": status.get("parent_cleanup_unit_id", ""),
+        "parent_cleanup_unit_aggregate_status": status.get("parent_cleanup_unit_aggregate_status", ""),
+        "parent_cleanup_unit_aggregate_complete": status.get("parent_cleanup_unit_aggregate_complete", ""),
+        "partition_parent_full_mask_proof_complete": bool(
+            status.get("partition_parent_full_mask_proof_complete", False)
+        ),
+        "parent_cleanup_unit_component_attempt_count": status.get(
+            "parent_cleanup_unit_component_attempt_count",
+            0,
+        ),
+    }
+    return {
+        "text_block_root_id": text_block_root_id,
+        "cleanup_obligation_id": cleanup_obligation_id,
+        "cleanup_mask_id": cleanup_mask_id,
+        "cleanup_result": None,
+        "proof": None,
+        "status": status,
+        "base": base,
+        "failure_reason": failure_reason,
+    }
+
+
+def _commit_cleanup_obligation_id(
+    *,
+    cleanup_result: CleanupResult,
+    status: Mapping[str, Any],
+    backend_parameters: Mapping[str, Any],
+) -> str:
+    return str(
+        backend_parameters.get("cleanup_obligation_id")
+        or status.get("cleanup_obligation_id")
+        or status.get("parent_cleanup_mask_id")
+        or backend_parameters.get("parent_cleanup_mask_id")
+        or cleanup_result.cleanup_mask_id
+        or ""
+    )
+
+
+def _commit_text_block_root_id(
+    *,
+    cleanup_result: CleanupResult,
+    status: Mapping[str, Any],
+    backend_parameters: Mapping[str, Any],
+    cleanup_obligation_id: str,
+) -> str:
+    return str(
+        backend_parameters.get("text_block_root_id")
+        or status.get("text_block_root_id")
+        or status.get("parent_cleanup_unit_id")
+        or backend_parameters.get("parent_cleanup_unit_id")
+        or status.get("cleanup_unit_id")
+        or cleanup_obligation_id
+        or cleanup_result.cleanup_job_id
+        or "root_unknown"
+    )
+
+
+def _status_addresses_cleanup_obligation(status: Mapping[str, Any]) -> bool:
+    return bool(
+        str(status.get("cleanup_mask_id") or "")
+        or str(status.get("cleanup_obligation_id") or "")
+        or str(status.get("parent_cleanup_mask_id") or "")
     )
 
 
@@ -1878,6 +2561,14 @@ def _upstream_commit_block_reason(
         return "missing_cleanup_proof"
     if proof.proof_status != ProofStatus.PASSED:
         return proof.failure_reason or "cleanup_proof_not_passed"
+    if isinstance(proof.metrics, Mapping) and bool(proof.metrics.get("broad_white_patch_risk", False)):
+        return "broad_white_patch_risk"
+    if (
+        bool(status.get("partitioned_cleanup", False))
+        and status.get("parent_cleanup_unit_aggregate_complete") is False
+        and not bool(status.get("partition_parent_full_mask_proof_complete", False))
+    ):
+        return "parent_cleanup_unit_aggregate_incomplete"
     if str(status.get("runtime_status") or "") not in {"", "passed", "warning", "failed"}:
         return str(status.get("failure_reason") or "cleanup_runtime_status_not_passed")
     if not cleanup_result.pixel_changed or int(cleanup_result.changed_pixel_count or 0) <= 0:
@@ -1922,13 +2613,21 @@ def _commit_runtime_result_pixels(
     source_np: Any,
     cleaned_image: Any,
     operation_bbox: Sequence[int] | None,
+    accepted_mask: Any | None = None,
 ) -> tuple[int, Any | None]:
     if np is None:
         return 0, None
     cleaned_np = np.asarray(cleaned_image.convert("RGB") if hasattr(cleaned_image, "convert") else cleaned_image)
     if cleaned_np.shape != source_np.shape or working_np.shape != source_np.shape:
         return 0, None
-    box = _valid_bbox(operation_bbox)
+    accepted = None
+    if accepted_mask is not None:
+        accepted = np.asarray(accepted_mask) > 0
+        if accepted.shape[:2] != source_np.shape[:2]:
+            return 0, None
+    box = _mask_page_bbox(accepted) if accepted is not None else None
+    if box is None:
+        box = _valid_bbox(operation_bbox)
     if box is None:
         return 0, None
     height, width = source_np.shape[:2]
@@ -1943,6 +2642,8 @@ def _commit_runtime_result_pixels(
     cleaned_crop = cleaned_np[y0:y1, x0:x1]
     diff = np.abs(cleaned_crop.astype(np.int16) - before_crop.astype(np.int16))
     changed = np.any(diff > 8, axis=2) if diff.ndim == 3 else diff > 8
+    if accepted is not None:
+        changed = changed & accepted[y0:y1, x0:x1]
     changed_pixels = int(np.count_nonzero(changed))
     if changed_pixels <= 0:
         return 0, None
@@ -1952,6 +2653,37 @@ def _commit_runtime_result_pixels(
     mask = np.zeros(source_np.shape[:2], dtype=np.uint8)
     mask[y0:y1, x0:x1] = changed.astype(np.uint8)
     return changed_pixels, mask
+
+
+def _mask_page_bbox(mask: Any | None) -> list[int] | None:
+    if np is None or mask is None:
+        return None
+    try:
+        arr = np.asarray(mask) > 0
+        ys, xs = np.where(arr)
+    except Exception:
+        return None
+    if xs.size <= 0 or ys.size <= 0:
+        return None
+    return [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
+
+
+def _load_binary_mask_ref(path: str | None, shape: tuple[int, int] | Sequence[int]) -> Any | None:
+    if np is None or Image is None:
+        return None
+    if not path:
+        return None
+    try:
+        if not os.path.isfile(str(path)):
+            return None
+        with Image.open(str(path)) as img:
+            arr = np.asarray(img.convert("L")) > 0
+        expected = tuple(int(v) for v in tuple(shape)[:2])
+        if arr.shape[:2] != expected:
+            return None
+        return arr
+    except Exception:
+        return None
 
 
 def _write_upstream_commit_artifacts(
@@ -2002,6 +2734,7 @@ def execute_cleanup_runtime_plan(
     image: Any,
     cleanup_plan: CleanupPlan,
     cleanup_mask: CleanupMask,
+    backend_context: Mapping[str, Any] | None = None,
     page_id: str,
     region_id: str,
     use_gpu: bool,
@@ -2015,6 +2748,27 @@ def execute_cleanup_runtime_plan(
     debug_info: dict[str, Any] = {}
     mode = str(params.get("inpaint_mode") or cleanup_plan.inpaint_mode or "fast")
     cleanup_tag = str(params.get("cleanup_tag") or "speech_strong")
+    model_required = _model_required_for_plan(cleanup_plan, cleanup_mask)
+    if model_required:
+        mode = "ai"
+        cleanup_tag = "authorized_ai_inpaint_full_mask"
+    backend_erase_mask = cleanup_mask.erase_mask
+    backend_foreground_mask = cleanup_mask.foreground_mask
+    backend_context_mask_ids: list[str] = []
+    backend_context_used = False
+    if isinstance(backend_context, Mapping):
+        backend_context_mask_ids = [
+            str(item)
+            for item in (backend_context.get("cleanup_mask_ids") or [])
+            if str(item)
+        ]
+        backend_context_used = bool(backend_context_mask_ids)
+        debug_info["backend_context_mask_available"] = backend_context_used
+        debug_info["backend_context_cleanup_mask_ids"] = backend_context_mask_ids
+        debug_info["backend_context_executable_input_used"] = False
+        debug_info["backend_context_audit_only"] = True
+    debug_info["model_required"] = bool(model_required)
+    debug_info["requested_model_id"] = str(model_id or "")
     _page014_timeout_checkpoint(
         "cleanup_execute_runtime_plan",
         "start",
@@ -2024,22 +2778,57 @@ def execute_cleanup_runtime_plan(
         cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
         cleanup_tag=cleanup_tag,
         inpaint_mode=mode,
+        model_required=bool(model_required),
     )
+    input_image_hash = _hash_image(image)
+    input_mask_hash = _hash_mask(backend_erase_mask)
     execution = cleanup_execution.apply_local_text_removal(
         image,
-        cleanup_mask.erase_mask,
+        backend_erase_mask,
         mode,
         use_gpu,
         model_id=model_id,
         cleanup_tag=cleanup_tag,
+        foreground_mask=backend_foreground_mask,
         debug_info=debug_info,
     )
-    cleaned_image = execution.cleaned_image or image
+    raw_cleaned_image = execution.cleaned_image or image
+    raw_backend_output_hash = _hash_image(raw_cleaned_image)
+    cleaned_image = _clip_cleaned_candidate_to_authorized_mask(
+        before=image,
+        candidate=raw_cleaned_image,
+        accepted_mask=cleanup_mask.erase_mask,
+    )
+    final_clipped_output_hash = _hash_image(cleaned_image)
     runtime_ms = (time.time() - started) * 1000.0
     changed_pixels = _changed_pixel_count(image, cleaned_image)
     pixel_changed = changed_pixels > 0
-    execution_status = "completed" if pixel_changed else "completed_no_pixel_change"
-    failure_reason = "" if pixel_changed else "no_pixels_changed"
+    backend = str(execution.backend or debug_info.get("backend") or "unknown")
+    backend_kind = str(execution.backend_kind or debug_info.get("backend_kind") or _backend_kind_for_name(backend))
+    model_attempted = bool(execution.model_invocation_attempted or debug_info.get("model_invocation_attempted", False))
+    model_succeeded = bool(execution.model_invocation_succeeded or debug_info.get("model_invocation_succeeded", False))
+    if backend_kind == "model_inpaint":
+        model_attempted = True
+        model_succeeded = bool(model_succeeded or execution.cleaned_image is not None)
+    fallback_reason = str(
+        execution.backend_detail
+        if backend_kind in {"backend_error", "noop"}
+        else debug_info.get("fallback_reason", "")
+        or ""
+    )
+    model_contract_failure = ""
+    if model_required and backend_kind != "model_inpaint":
+        model_contract_failure = "model_required_backend_not_invoked"
+    elif model_required and not model_succeeded:
+        model_contract_failure = "model_required_backend_failed"
+    if model_contract_failure:
+        execution_status = "contract_error"
+        failure_reason = model_contract_failure
+        pixel_changed = False
+        changed_pixels = 0
+    else:
+        execution_status = "completed" if pixel_changed else "completed_no_pixel_change"
+        failure_reason = "" if pixel_changed else "no_pixels_changed"
     refs = _write_runtime_artifacts(
         artifact_dir=artifact_dir,
         page_id=page_id,
@@ -2047,9 +2836,10 @@ def execute_cleanup_runtime_plan(
         cleanup_plan=cleanup_plan,
         cleanup_mask=cleanup_mask,
         before=image,
+        backend_input_mask=backend_erase_mask,
+        raw_cleaned=raw_cleaned_image,
         cleaned=cleaned_image,
     )
-    backend = str(execution.backend or debug_info.get("backend") or "unknown")
     _page014_timeout_checkpoint(
         "cleanup_execute_runtime_plan",
         "end",
@@ -2058,6 +2848,10 @@ def execute_cleanup_runtime_plan(
         cleanup_plan_id=str(cleanup_plan.cleanup_plan_id),
         cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
         backend=backend,
+        backend_kind=backend_kind,
+        model_required=bool(model_required),
+        model_invocation_attempted=bool(model_attempted),
+        model_invocation_succeeded=bool(model_succeeded),
         pixel_changed=pixel_changed,
         changed_pixel_count=changed_pixels,
         artifact_ref_count=len([value for value in refs.values() if value]),
@@ -2078,20 +2872,63 @@ def execute_cleanup_runtime_plan(
         cleaned_crop_ref=refs.get("cleaned_crop_ref"),
         diff_ref=refs.get("diff_ref"),
         mask_ref=refs.get("mask_ref"),
+        backend_input_mask_ref=refs.get("backend_input_mask_ref"),
+        model_input_image_ref=refs.get("model_input_image_ref"),
+        model_input_mask_ref=refs.get("model_input_mask_ref"),
+        raw_backend_output_ref=refs.get("raw_backend_output_ref"),
+        final_clipped_output_ref=refs.get("final_clipped_output_ref"),
         renderer_consumed=False,
         execution_backend=backend,
         execution_status=execution_status,
         failure_reason=failure_reason,
         mask_stats=mask_stats(cleanup_mask.erase_mask) or {},
         backend_name=backend,
+        backend_kind=backend_kind,
+        backend_method=str(execution.backend_method or backend),
+        requested_model_id=str(execution.requested_model_id or model_id or ""),
+        actual_model_name=str(execution.actual_model_name or ""),
+        actual_model_path=str(execution.actual_model_path or ""),
+        model_invocation_attempted=model_attempted,
+        model_invocation_succeeded=model_succeeded,
+        input_image_hash=input_image_hash,
+        input_mask_hash=input_mask_hash,
+        raw_backend_output_hash=raw_backend_output_hash,
+        final_clipped_output_hash=final_clipped_output_hash,
+        fallback_reason=fallback_reason,
         backend_parameters={
             "backend_detail": execution.backend_detail,
             "candidate_status": "completed" if pixel_changed else "no_pixel_change",
+            "backend_kind": backend_kind,
+            "backend_method": str(execution.backend_method or backend),
+            "model_required": bool(model_required),
+            "model_required_reason": (
+                "inpaint_mode_ai_requires_model_for_accepted_normal_text"
+                if model_required
+                else ""
+            ),
+            "model_invocation_attempted": bool(model_attempted),
+            "model_invocation_succeeded": bool(model_succeeded),
+            "requested_model_id": str(execution.requested_model_id or model_id or ""),
+            "actual_model_name": str(execution.actual_model_name or ""),
+            "actual_model_path": str(execution.actual_model_path or ""),
+            "input_image_hash": input_image_hash,
+            "input_mask_hash": input_mask_hash,
+            "raw_backend_output_hash": raw_backend_output_hash,
+            "final_clipped_output_hash": final_clipped_output_hash,
+            "fallback_reason": fallback_reason,
+            "model_backend_contract_failure": model_contract_failure,
+            "text_block_root_id": str(params.get("text_block_root_id") or ""),
+            "cleanup_obligation_id": str(params.get("cleanup_obligation_id") or cleanup_plan.cleanup_mask_id),
+            "parent_cleanup_mask_id": str(params.get("parent_cleanup_mask_id") or ""),
+            "mask_space": str(params.get("mask_space") or "page"),
+            "bbox_format": str(params.get("bbox_format") or "xyxy_exclusive"),
             "cleanup_tag": cleanup_tag,
             "effective_inpaint_mode": execution.effective_inpaint_mode,
             "crop_bbox": execution.crop_bbox,
             "crop_area": execution.crop_area,
             "mask_ratio": execution.mask_ratio,
+            "foreground_mask_pixels": getattr(cleanup_mask, "foreground_mask_pixels", None),
+            "erase_mask_pixels": getattr(cleanup_mask, "erase_mask_pixels", None),
             "owned_segmentation_pixels": getattr(cleanup_mask, "owned_segmentation_pixels", None),
             "executable_foreground_pixels": getattr(cleanup_mask, "executable_foreground_pixels", None),
             "owned_segmentation_to_executable_ratio": getattr(
@@ -2104,6 +2941,12 @@ def execute_cleanup_runtime_plan(
                 getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)
             ),
             "dense_contract_override_detected": bool(getattr(cleanup_mask, "dense_contract_override_detected", False)),
+            "backend_context_mask_used": bool(backend_context_used),
+            "backend_context_cleanup_mask_ids": backend_context_mask_ids,
+            "backend_context_executable_input_used": False,
+            "backend_context_audit_only": bool(backend_context_used),
+            "backend_context_clipped_to_cleanup_mask": False,
+            "backend_candidate_clipped_to_cleanup_mask": True,
         },
         runtime_ms=runtime_ms,
         fallback_status=execution_status,
@@ -2164,7 +3007,7 @@ def _proof(
     pass_residual_ratio = _float_or_none(metrics.get("residual_dark_source_ratio"))
     if pass_residual_ratio is None:
         pass_residual_ratio = _float_or_none(metrics.get("residual_source_ratio"))
-    degraded_commit_allowed = bool(metrics.get("degraded_commit_allowed"))
+    degraded_cleanup_diagnostic = bool(metrics.get("degraded_cleanup_diagnostic"))
     proof_quality_state = str(metrics.get("proof_quality_state") or "")
     render_decision = (
         "allow_stage6_consumption_candidate"
@@ -2186,7 +3029,7 @@ def _proof(
         residual_source_text_risk=(
             "low"
             if status == ProofStatus.PASSED
-            else ("warning_residual" if degraded_commit_allowed else "visible_or_unknown")
+            else ("diagnostic_residual_not_committable" if degraded_cleanup_diagnostic else "visible_or_unknown")
         ),
         mask_containment_passed=(
             metrics.get("changed_outside_allowed_pixels", 0) <= PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS
@@ -2195,7 +3038,7 @@ def _proof(
         ),
         collateral_damage_risk=(
             "low"
-            if status == ProofStatus.PASSED or degraded_commit_allowed
+            if status == ProofStatus.PASSED
             else "possible"
         ),
         backend_failure_visible=failure_reason == "backend_noop_or_error",
@@ -2257,16 +3100,59 @@ def _best_failed_attempt(
     return by_result_id[proof.cleanup_result_id], proof
 
 
-def _proof_selection_key(proof: CleanupProof, result: CleanupResult) -> tuple[float, float, float]:
+def _proof_selection_key(proof: CleanupProof, result: CleanupResult) -> tuple[float, ...]:
     metrics = proof.metrics or {}
-    residual = float(
-        metrics.get("residual_dark_source_ratio")
-        or metrics.get("residual_source_ratio")
-        or 999.0
+    candidate_status = str((result.backend_parameters or {}).get("candidate_status") or "")
+    failure_reason = str(proof.failure_reason or result.failure_reason or "")
+    pixel_changed = bool(result.pixel_changed and int(result.changed_pixel_count or 0) > 0)
+    noop_rank = 1 if (
+        not pixel_changed
+        or candidate_status in {"no_pixel_change", "completed_no_pixel_change"}
+        or failure_reason == "backend_noop_or_error"
+    ) else 0
+    status_rank = {
+        ProofStatus.PASSED: 0,
+        ProofStatus.FAILED: 1,
+        ProofStatus.INCONCLUSIVE: 2,
+    }.get(proof.proof_status, 3)
+    residual = _first_metric_float(
+        metrics,
+        "executable_text_residual_ratio",
+        "residual_dark_source_ratio",
+        "residual_source_ratio",
+        default=999.0,
     )
-    collateral = float(metrics.get("changed_outside_erase_inside_allowed_ratio") or 999.0)
+    residual_pixels = _first_metric_float(
+        metrics,
+        "executable_text_residual_pixels",
+        "residual_dark_source_pixels",
+        "residual_source_pixels",
+        default=999_999.0,
+    )
+    collateral = _first_metric_float(
+        metrics,
+        "changed_outside_erase_inside_allowed_ratio",
+        default=999.0,
+    )
+    changed_rank = -float(max(0, int(result.changed_pixel_count or 0)))
     runtime = float(result.runtime_ms if result.runtime_ms is not None else 999_999.0)
-    return residual, collateral, runtime
+    return (
+        float(noop_rank),
+        float(status_rank),
+        residual,
+        residual_pixels,
+        collateral,
+        changed_rank,
+        runtime,
+    )
+
+
+def _first_metric_float(metrics: Mapping[str, Any], *keys: str, default: float) -> float:
+    for key in keys:
+        value = _float_or_none(metrics.get(key))
+        if value is not None:
+            return float(value)
+    return float(default)
 
 
 def _plan_for_result(
@@ -2326,12 +3212,23 @@ def _runtime_base_record(
     runtime_class: CleanupClass,
 ) -> dict[str, Any]:
     target_region_ids = [str(rid) for rid in job.target_region_ids or [] if str(rid)]
+    cleanup_unit_id = str(getattr(job, "cleanup_unit_id", "") or job.cleanup_job_id)
+    text_block_root_id = str(
+        getattr(job, "text_block_root_id", "")
+        or getattr(job, "parent_logical_text_unit_id", "")
+        or cleanup_unit_id
+        or job.cleanup_job_id
+        or ""
+    )
     return {
         "page_id": page_id,
         "region_id": target_region_ids[0] if target_region_ids else "",
         "target_region_ids": target_region_ids,
         "cleanup_job_id": str(job.cleanup_job_id),
-        "cleanup_unit_id": str(getattr(job, "cleanup_unit_id", "") or job.cleanup_job_id),
+        "text_block_root_id": text_block_root_id,
+        "mask_space": "page",
+        "bbox_format": "xyxy_exclusive",
+        "cleanup_unit_id": cleanup_unit_id,
         "cleanup_unit_level": str(getattr(job, "cleanup_unit_level", "") or ""),
         "cleanup_unit_anchor_region_id": str(
             getattr(job, "cleanup_unit_anchor_region_id", "") or ""
@@ -2415,6 +3312,8 @@ def _runtime_source_evidence_exclusion_reason(
         has_source_ids = bool(consumed_ids or getattr(cleanup_mask, "foreground_mask_source_id", None))
         if missing_ids:
             return "phase5_runtime_requires_consumable_sourceglyph_evidence"
+        if _is_component_projected_cleanup_mask(cleanup_mask) and (foreground_pixels > 0 or has_foreground_array):
+            return ""
         if has_source_ids and (foreground_pixels > 0 or has_foreground_array):
             return ""
     if not job.source_glyph_evidence or not job.source_glyph_mask_ids:
@@ -2563,6 +3462,251 @@ def _runtime_speech_flat_mask(cleanup_mask: CleanupMask, source_image: Any) -> C
     return _runtime_glyph_precision_mask(cleanup_mask, source_image, None)
 
 
+def _backend_contexts_by_cleanup_mask_id(
+    runtime_obligations: Sequence[tuple[CleanupJob, CleanupMask, CleanupPlan]],
+    image: Any,
+) -> dict[str, dict[str, Any]]:
+    if np is None:
+        return {}
+    try:
+        shape = np.asarray(image.convert("RGB") if hasattr(image, "convert") else image).shape[:2]
+    except Exception:
+        return {}
+    groups: dict[str, list[tuple[CleanupJob, CleanupMask, CleanupPlan]]] = {}
+    for job, cleanup_mask, cleanup_plan in runtime_obligations or []:
+        root_id = _explicit_runtime_root_id(job, cleanup_mask, cleanup_plan)
+        if not root_id:
+            continue
+        if not _cleanup_plan_can_use_root_backend_context(cleanup_plan, cleanup_mask):
+            continue
+        groups.setdefault(root_id, []).append((job, cleanup_mask, cleanup_plan))
+
+    contexts: dict[str, dict[str, Any]] = {}
+    for root_id, entries in groups.items():
+        accepted_entries = [
+            entry
+            for entry in entries
+            if _accepted_executable_cleanup_mask(entry[1])
+        ]
+        if len(accepted_entries) <= 1:
+            continue
+        union_erase = np.zeros(shape, dtype=np.uint8)
+        union_foreground = np.zeros(shape, dtype=np.uint8)
+        cleanup_mask_ids: list[str] = []
+        for _, cleanup_mask, _ in accepted_entries:
+            erase = _binary_mask(cleanup_mask.erase_mask, shape)
+            foreground = _binary_mask(cleanup_mask.foreground_mask, shape)
+            if erase is None or not np.any(erase):
+                continue
+            union_erase = np.maximum(union_erase, erase.astype(np.uint8))
+            if foreground is not None and np.any(foreground):
+                union_foreground = np.maximum(union_foreground, foreground.astype(np.uint8))
+            cleanup_mask_ids.append(str(cleanup_mask.cleanup_mask_id))
+        if len(cleanup_mask_ids) <= 1 or not np.any(union_erase):
+            continue
+        if not np.any(union_foreground):
+            union_foreground = union_erase.copy()
+        context = {
+            "text_block_root_id": root_id,
+            "erase_mask": union_erase,
+            "foreground_mask": union_foreground,
+            "cleanup_mask_ids": cleanup_mask_ids,
+            "context_source": "same_text_block_root_accepted_cleanup_masks",
+        }
+        for cleanup_mask_id in cleanup_mask_ids:
+            contexts[cleanup_mask_id] = context
+    return contexts
+
+
+def _explicit_runtime_root_id(
+    job: CleanupJob,
+    cleanup_mask: CleanupMask,
+    cleanup_plan: CleanupPlan,
+) -> str:
+    params = cleanup_plan.backend_parameters or {}
+    root_id = str(
+        params.get("text_block_root_id")
+        or getattr(job, "text_block_root_id", "")
+        or ""
+    ).strip()
+    if not root_id:
+        return ""
+    fallback_ids = {
+        str(getattr(job, "cleanup_job_id", "") or ""),
+        str(getattr(job, "cleanup_unit_id", "") or ""),
+        str(getattr(job, "parent_logical_text_unit_id", "") or ""),
+        str(getattr(cleanup_mask, "cleanup_mask_id", "") or ""),
+    }
+    if root_id in fallback_ids:
+        return ""
+    return root_id
+
+
+def _cleanup_plan_can_use_root_backend_context(
+    cleanup_plan: CleanupPlan,
+    cleanup_mask: CleanupMask,
+) -> bool:
+    cleanup_class = _enum_value(cleanup_plan.cleanup_class)
+    semantic_state = str(getattr(cleanup_mask, "semantic_authorization_state", "") or "").strip()
+    cleanup_auth = str(getattr(cleanup_mask, "cleanup_authorization", "") or "").strip()
+    cleanup_tag = str((cleanup_plan.backend_parameters or {}).get("cleanup_tag") or "").strip().lower()
+    if semantic_state in {"cleanup_translate_background", "cleanup_translate_caption"}:
+        return True
+    if cleanup_auth in {"cleanup_translate_background", "cleanup_translate_caption"}:
+        return True
+    if cleanup_class in {
+        CleanupClass.BACKGROUND_ART_TEXT.value,
+        CleanupClass.CAPTION_FLAT_BACKGROUND.value,
+        CleanupClass.CAPTION_DARK_OR_SCREENTONE.value,
+        CleanupClass.TITLE_OR_SIGN.value,
+        CleanupClass.SIDE_CAPTION_GLYPH_LOCAL.value,
+    }:
+        return True
+    return cleanup_tag in {"background_narration_inpaint_first", "side_caption_glyph_local"}
+
+
+def _valid_backend_context_mask(candidate: Any, accepted_mask: Any) -> bool:
+    if np is None or candidate is None or accepted_mask is None:
+        return False
+    try:
+        candidate_arr = np.asarray(candidate)
+        accepted_arr = np.asarray(accepted_mask)
+    except Exception:
+        return False
+    return (
+        candidate_arr.ndim == 2
+        and accepted_arr.ndim == 2
+        and candidate_arr.shape[:2] == accepted_arr.shape[:2]
+        and bool(np.any(candidate_arr > 0))
+    )
+
+
+def _model_required_for_plan(cleanup_plan: CleanupPlan, cleanup_mask: CleanupMask) -> bool:
+    mode = str(cleanup_plan.inpaint_mode or (cleanup_plan.backend_parameters or {}).get("inpaint_mode") or "").lower()
+    if mode != "ai":
+        return False
+    if _formal_plan_allows_non_model_method(cleanup_plan):
+        return False
+    if not _normal_text_cleanup_obligation(cleanup_plan, cleanup_mask):
+        return False
+    return True
+
+
+def _formal_plan_allows_non_model_method(cleanup_plan: CleanupPlan) -> bool:
+    params = cleanup_plan.backend_parameters or {}
+    allowed = bool(
+        params.get("allow_non_model_method")
+        or params.get("non_model_method_allowed")
+    )
+    reason = str(
+        params.get("non_model_method_allowed_reason")
+        or params.get("allow_non_model_method_reason")
+        or ""
+    ).strip()
+    return bool(allowed and reason)
+
+
+def _normal_text_cleanup_obligation(cleanup_plan: CleanupPlan, cleanup_mask: CleanupMask) -> bool:
+    if bool(getattr(cleanup_mask, "protected", False)):
+        return False
+    semantic_state = str(getattr(cleanup_mask, "semantic_authorization_state", "") or "")
+    cleanup_authorization = str(getattr(cleanup_mask, "cleanup_authorization", "") or "")
+    if semantic_state in {
+        "cleanup_translate_speech",
+        "cleanup_translate_background",
+        "cleanup_translate_caption",
+    }:
+        return True
+    if cleanup_authorization in {
+        "cleanup_translate_speech",
+        "cleanup_translate_background",
+        "cleanup_translate_caption",
+    }:
+        return True
+    return _enum_value(cleanup_plan.cleanup_class) in {
+        CleanupClass.SPEECH_FLAT_BUBBLE.value,
+        CleanupClass.SPEECH_COMPLEX_BUBBLE.value,
+        CleanupClass.SMALL_REACTION.value,
+        CleanupClass.CAPTION_FLAT_BACKGROUND.value,
+        CleanupClass.CAPTION_DARK_OR_SCREENTONE.value,
+        CleanupClass.TITLE_OR_SIGN.value,
+        CleanupClass.BACKGROUND_ART_TEXT.value,
+        CleanupClass.SIDE_CAPTION_GLYPH_LOCAL.value,
+    }
+
+
+def _backend_kind_for_name(backend: object) -> str:
+    name = str(backend or "").strip().lower()
+    if not name or name == "none":
+        return "noop"
+    if "backend_error" in name or "error" in name:
+        return "backend_error"
+    if "cleanup_ai_inpaint" in name or "simple_lama" in name or "model_inpaint" in name:
+        return "model_inpaint"
+    if "cv2" in name or "opencv" in name or "conservative_local_inpaint" in name:
+        return "opencv_inpaint"
+    if "residual" in name or "repair" in name:
+        return "residual_repair"
+    if any(token in name for token in ("fill", "white", "median", "local", "directional", "bubble")):
+        return "heuristic_fill"
+    return "heuristic_fill"
+
+
+def _hash_image(image: Any) -> str:
+    if np is None or image is None:
+        return ""
+    try:
+        arr = np.asarray(image.convert("RGB") if hasattr(image, "convert") else image)
+    except Exception:
+        return ""
+    return _hash_array(arr)
+
+
+def _hash_mask(mask: Any) -> str:
+    if np is None or mask is None:
+        return ""
+    try:
+        arr = (np.asarray(mask) > 0).astype(np.uint8)
+    except Exception:
+        return ""
+    return _hash_array(arr)
+
+
+def _hash_array(arr: Any) -> str:
+    if np is None:
+        return ""
+    try:
+        array = np.ascontiguousarray(arr)
+        digest = hashlib.sha256()
+        digest.update(str(tuple(array.shape)).encode("ascii", errors="ignore"))
+        digest.update(str(array.dtype).encode("ascii", errors="ignore"))
+        digest.update(array.tobytes())
+        return digest.hexdigest()
+    except Exception:
+        return ""
+
+
+def _clip_cleaned_candidate_to_authorized_mask(
+    *,
+    before: Any,
+    candidate: Any,
+    accepted_mask: Any,
+) -> Any:
+    if np is None or Image is None or accepted_mask is None:
+        return candidate
+    try:
+        before_np = np.asarray(before.convert("RGB") if hasattr(before, "convert") else before)
+        candidate_np = np.asarray(candidate.convert("RGB") if hasattr(candidate, "convert") else candidate)
+        accepted = np.asarray(accepted_mask) > 0
+    except Exception:
+        return candidate
+    if before_np.shape != candidate_np.shape or accepted.shape[:2] != before_np.shape[:2]:
+        return candidate
+    clipped = before_np.copy()
+    clipped[accepted] = candidate_np[accepted]
+    return Image.fromarray(np.clip(clipped, 0, 255).astype(np.uint8))
+
+
 def _runtime_glyph_precision_mask(
     cleanup_mask: CleanupMask,
     source_image: Any,
@@ -2599,11 +3743,15 @@ def _runtime_glyph_precision_mask(
             method_suffix="missing_foreground_or_allowed_area",
         )
     foreground = _clip_mask_to_valid_bbox(foreground, allowed)
-    defect = _glyph_foreground_geometry_defect_reason(
-        foreground=foreground,
-        allowed=allowed,
-        cleanup_class=cleanup_class,
-    )
+    defect = ""
+    if not _accepted_executable_cleanup_mask(cleanup_mask):
+        # Geometry guards are diagnostic for non-accepted masks; accepted
+        # component-projected masks are the cleanup obligation.
+        defect = _glyph_foreground_geometry_defect_reason(
+            foreground=foreground,
+            allowed=allowed,
+            cleanup_class=cleanup_class,
+        )
     if defect:
         return _runtime_rejected_mask(
             cleanup_mask,
@@ -2629,7 +3777,7 @@ def _runtime_glyph_precision_mask(
             erase=erase,
         )
     runtime = CleanupMask(
-        cleanup_mask_id=f"{cleanup_mask.cleanup_mask_id}_phase5_runtime",
+        cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
         cleanup_job_id=str(cleanup_mask.cleanup_job_id),
         foreground_mask_source_id=cleanup_mask.foreground_mask_source_id,
         foreground_mask_source_ids=list(cleanup_mask.foreground_mask_source_ids or []),
@@ -2660,7 +3808,7 @@ def _runtime_glyph_precision_mask(
         "erase_allowed_ratio_too_high",
     }:
         foreground_only = CleanupMask(
-            cleanup_mask_id=f"{cleanup_mask.cleanup_mask_id}_phase5_runtime",
+            cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
             cleanup_job_id=str(cleanup_mask.cleanup_job_id),
             foreground_mask_source_id=cleanup_mask.foreground_mask_source_id,
             foreground_mask_source_ids=list(cleanup_mask.foreground_mask_source_ids or []),
@@ -2736,7 +3884,7 @@ def _runtime_rejected_mask(
         else "non_segmentation_diagnostic_runtime_precision"
     )
     return CleanupMask(
-        cleanup_mask_id=f"{cleanup_mask.cleanup_mask_id}_phase5_runtime",
+        cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
         cleanup_job_id=str(cleanup_mask.cleanup_job_id),
         foreground_mask_source_id=cleanup_mask.foreground_mask_source_id,
         foreground_mask_source_ids=list(cleanup_mask.foreground_mask_source_ids or []),
@@ -2829,7 +3977,21 @@ def _runtime_speech_flat_plan(
     expected_bbox = _valid_bbox(job.source_glyph_erasure_expected_area_bbox)
     proof_scope_bbox = _union_valid_bboxes(source_bbox, expected_bbox)
     parent_cleanup_unit_id = str(getattr(job, "cleanup_unit_id", "") or job.cleanup_job_id or "")
+    text_block_root_id = str(
+        getattr(job, "text_block_root_id", "")
+        or getattr(job, "parent_logical_text_unit_id", "")
+        or parent_cleanup_unit_id
+        or job.cleanup_job_id
+        or ""
+    )
+    cleanup_obligation_id = str(cleanup_mask.cleanup_mask_id)
     backend_parameters = {
+        "text_block_root_id": text_block_root_id,
+        "cleanup_obligation_id": cleanup_obligation_id,
+        "mask_space": "page",
+        "bbox_format": "xyxy_exclusive",
+        "foreground_mask_pixels": getattr(cleanup_mask, "foreground_mask_pixels", None),
+        "erase_mask_pixels": getattr(cleanup_mask, "erase_mask_pixels", None),
         "cleanup_tag": cleanup_tag,
         "target_region_ids": list(job.target_region_ids or []),
         "allowed_area": list(cleanup_mask.allowed_area or []),
@@ -2875,6 +4037,71 @@ def _runtime_speech_flat_plan(
     )
 
 
+def _runtime_plan_from_formal_plan(
+    *,
+    formal_plan: CleanupPlan,
+    page_id: str,
+    job: CleanupJob,
+    cleanup_mask: CleanupMask,
+    inpaint_mode: str,
+    cleanup_class: CleanupClass,
+) -> CleanupPlan:
+    """Derive runtime geometry from a formal CleanupPlan without adding eligibility."""
+
+    runtime_plan = _runtime_speech_flat_plan(
+        page_id=page_id,
+        job=job,
+        cleanup_mask=cleanup_mask,
+        inpaint_mode=inpaint_mode,
+        cleanup_class=cleanup_class,
+    )
+    params = dict(runtime_plan.backend_parameters or {})
+    formal_params = dict(formal_plan.backend_parameters or {})
+    params.update(
+        {
+            key: value
+            for key, value in formal_params.items()
+            if key
+            not in {
+                "cleanup_tag",
+                "target_region_ids",
+                "allowed_area",
+                "source_glyph_erasure_bbox",
+                "source_glyph_erasure_expected_area_bbox",
+                "proof_scope",
+                "proof_scope_bbox",
+                "parent_cleanup_unit_id",
+                "parent_expected_erasure_bbox",
+                "represented_source_glyph_ids",
+                "consumed_source_glyph_mask_ids",
+                "missing_source_glyph_mask_ids",
+            }
+        }
+    )
+    params.update(
+        {
+            "formal_cleanup_plan_id": str(formal_plan.cleanup_plan_id),
+            "formal_cleanup_mask_id": str(formal_plan.cleanup_mask_id),
+            "cleanup_plan_authority": "formal_cleanup_plan_build_result",
+            "runtime_plan_derived_from_formal_plan": True,
+        }
+    )
+    return CleanupPlan(
+        cleanup_plan_id=f"{formal_plan.cleanup_plan_id}_runtime",
+        cleanup_job_id=str(formal_plan.cleanup_job_id),
+        cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
+        cleanup_class=cleanup_class,
+        selected_backend=runtime_plan.selected_backend,
+        cleanup_method=f"{runtime_plan.cleanup_method}_formal_plan_authorized",
+        backend_parameters=params,
+        inpaint_mode=str(inpaint_mode or formal_plan.inpaint_mode or runtime_plan.inpaint_mode or "fast"),
+        crop_context_bbox=list(cleanup_mask.erase_mask_bbox or formal_plan.crop_context_bbox or []),
+        fallback_policy=list(formal_plan.fallback_policy or runtime_plan.fallback_policy or []),
+        expected_runtime_class="formal_cleanup_plan_runtime",
+        proof_thresholds=dict(formal_plan.proof_thresholds or runtime_plan.proof_thresholds or {}),
+    )
+
+
 def _runtime_cleanup_tag_for_class(cleanup_class: CleanupClass) -> str:
     cleanup_class_value = _enum_value(cleanup_class)
     if cleanup_class_value in {
@@ -2884,14 +4111,17 @@ def _runtime_cleanup_tag_for_class(cleanup_class: CleanupClass) -> str:
     }:
         return "speech_glyph_local"
     if cleanup_class_value in {
+        CleanupClass.SIDE_CAPTION_GLYPH_LOCAL.value,
+    }:
+        return "side_caption_glyph_local"
+    if cleanup_class_value in {
         CleanupClass.CAPTION_DARK_OR_SCREENTONE.value,
         CleanupClass.CAPTION_FLAT_BACKGROUND.value,
         CleanupClass.BACKGROUND_ART_TEXT.value,
         CleanupClass.TITLE_OR_SIGN.value,
-        CleanupClass.SIDE_CAPTION_GLYPH_LOCAL.value,
         CleanupClass.ART_ENTANGLED_AMBIGUOUS.value,
     }:
-        return "glyph_stroke_local"
+        return "background_narration_inpaint_first"
     return "minimal_erasure"
 
 
@@ -3079,7 +4309,11 @@ def _run_partitioned_cleanup_attempts(
     *,
     image: Any,
     source_image: Any,
-    base_plan_kwargs: Mapping[str, Any],
+    formal_plan: CleanupPlan,
+    job: CleanupJob,
+    parent_cleanup_mask: CleanupMask,
+    inpaint_mode: str,
+    cleanup_class: CleanupClass,
     partition_masks: Sequence[CleanupMask],
     base_record: Mapping[str, Any],
     target_region_ids: Sequence[str],
@@ -3094,12 +4328,147 @@ def _run_partitioned_cleanup_attempts(
     proofs: list[CleanupProof] = []
     statuses: list[dict[str, Any]] = []
     aggregate_records: list[dict[str, Any]] = []
-    job = base_plan_kwargs.get("job")
+    selected_child_records: list[tuple[CleanupResult, CleanupProof, Mapping[str, Any]]] = []
+    child_result_count = 0
+    child_proof_count = 0
     partition_count = len(partition_masks)
+    base_params = dict(formal_plan.backend_parameters or {})
+    parent_cleanup_unit_id = str(
+        base_params.get("parent_cleanup_unit_id")
+        or getattr(job, "cleanup_unit_id", "")
+        or getattr(job, "cleanup_job_id", "")
+        or ""
+    )
+    parent_cleanup_mask_id = str(
+        base_params.get("cleanup_obligation_id")
+        or base_params.get("formal_cleanup_mask_id")
+        or formal_plan.cleanup_mask_id
+        or parent_cleanup_mask.cleanup_mask_id
+        or ""
+    )
+    text_block_root_id = str(
+        base_params.get("text_block_root_id")
+        or getattr(job, "text_block_root_id", "")
+        or parent_cleanup_unit_id
+        or ""
+    )
+    parent_full_plan = _runtime_plan_from_formal_plan(
+        formal_plan=formal_plan,
+        page_id=page_id,
+        job=job,
+        inpaint_mode=inpaint_mode,
+        cleanup_class=cleanup_class,
+        cleanup_mask=parent_cleanup_mask,
+    )
+    parent_full_plan = _adaptive_plan_variant(
+        parent_full_plan,
+        attempt_index=0,
+        strategy="partition_parent_full_mask_first",
+        cleanup_tag=str(
+            (parent_full_plan.backend_parameters or {}).get("cleanup_tag")
+            or "cleanup_effectiveness_retry"
+        ),
+        retry_reason=parent_rejection_reason,
+        suffix="_partition_parent_full_mask_first",
+    )
+    parent_full_params = dict(parent_full_plan.backend_parameters or {})
+    parent_full_params.update(
+        {
+            "partition_parent_full_mask_first_attempt": True,
+            "partition_strategy_required": True,
+            "partition_count": partition_count,
+            "partition_parent_rejection_reason": parent_rejection_reason,
+            "cleanup_obligation_id": parent_cleanup_mask_id,
+            "parent_cleanup_mask_id": parent_cleanup_mask_id,
+            "text_block_root_id": text_block_root_id,
+            "mask_space": "page",
+            "bbox_format": "xyxy_exclusive",
+        }
+    )
+    parent_full_plan = CleanupPlan(
+        cleanup_plan_id=parent_full_plan.cleanup_plan_id,
+        cleanup_job_id=parent_full_plan.cleanup_job_id,
+        cleanup_mask_id=parent_full_plan.cleanup_mask_id,
+        cleanup_class=parent_full_plan.cleanup_class,
+        selected_backend=parent_full_plan.selected_backend,
+        cleanup_method=f"{parent_full_plan.cleanup_method}_partition_parent_full_mask_first",
+        backend_parameters=parent_full_params,
+        inpaint_mode=parent_full_plan.inpaint_mode,
+        crop_context_bbox=list(parent_cleanup_mask.erase_mask_bbox or parent_full_plan.crop_context_bbox or []),
+        fallback_policy=list(parent_full_plan.fallback_policy or []),
+        expected_runtime_class=parent_full_plan.expected_runtime_class,
+        proof_thresholds=dict(parent_full_plan.proof_thresholds or {}),
+    )
+    parent_full_results, parent_full_proofs, parent_full_attempts = _run_adaptive_cleanup_attempts(
+        image=image,
+        source_image=source_image,
+        cleanup_plan=parent_full_plan,
+        cleanup_mask=parent_cleanup_mask,
+        page_id=page_id,
+        region_id=region_id,
+        use_gpu=use_gpu,
+        model_id=model_id,
+        artifact_dir=artifact_dir,
+    )
+    parent_full_result, parent_full_proof = _select_best_commit_candidate_result(
+        parent_full_results,
+        parent_full_proofs,
+    )
+    if parent_full_result is not None and parent_full_proof is not None:
+        proof_metrics = _json_safe(parent_full_proof.metrics or {})
+        parent_status = {
+            **dict(base_record),
+            "runtime_status": "passed",
+            "cleanup_plan_id": parent_full_result.cleanup_plan_id,
+            "cleanup_mask_id": str(parent_cleanup_mask.cleanup_mask_id),
+            "cleanup_obligation_id": parent_cleanup_mask_id,
+            "parent_cleanup_mask_id": parent_cleanup_mask_id,
+            "text_block_root_id": text_block_root_id,
+            "cleanup_result_id": parent_full_result.cleanup_result_id,
+            "cleanup_proof_id": parent_full_proof.cleanup_proof_id,
+            "proof_status": _enum_value(parent_full_proof.proof_status),
+            "failure_reason": "passed",
+            "cleanup_outcome_state": "cleanup_completed",
+            "pixel_changed": bool(parent_full_result.pixel_changed),
+            "changed_pixel_count": int(parent_full_result.changed_pixel_count or 0),
+            "cleaned_image_ref": parent_full_result.cleaned_image_ref,
+            "diff_ref": parent_full_result.diff_ref,
+            "mask_ref": parent_full_result.mask_ref,
+            "proof_metrics": proof_metrics,
+            "proof_quality_state": proof_metrics.get("proof_quality_state", ""),
+            "degraded_commit_allowed": False,
+            "partitioned_cleanup": False,
+            "partition_parent_full_mask_first_attempt": True,
+            "partition_parent_full_mask_proof_complete": True,
+            "partition_count": partition_count,
+            "partition_backend_result_count": 0,
+            "partition_backend_proof_count": 0,
+            "partition_parent_rejection_reason": parent_rejection_reason,
+            "parent_cleanup_unit_id": parent_cleanup_unit_id,
+            "parent_cleanup_unit_aggregate_status": "parent_full_mask_proof_complete",
+            "parent_cleanup_unit_aggregate_complete": True,
+            "parent_cleanup_unit_component_attempt_count": partition_count,
+            "adaptive_attempt_count": len(parent_full_attempts),
+            "adaptive_attempts": _json_safe(parent_full_attempts),
+            "target_region_ids": list(target_region_ids),
+            "render_consumption_decision_if_consumed": (
+                parent_full_proof.render_consumption_decision_if_consumed
+            ),
+            "renderer_consumed": False,
+        }
+        return [parent_full_result], [parent_full_proof], [parent_status], aggregate_records
+    parent_full_failed_result, parent_full_failed_proof = _best_failed_attempt(
+        parent_full_results,
+        parent_full_proofs,
+    )
     for index, partition_mask in enumerate(partition_masks):
-        plan = _runtime_speech_flat_plan(
+        plan = _runtime_plan_from_formal_plan(
+            formal_plan=formal_plan,
+            page_id=page_id,
+            job=job,
+            inpaint_mode=inpaint_mode,
+            cleanup_class=cleanup_class,
             cleanup_mask=partition_mask,
-            **base_plan_kwargs,
         )
         plan = _adaptive_plan_variant(
             plan,
@@ -3129,6 +4498,23 @@ def _run_partitioned_cleanup_attempts(
             or getattr(job, "cleanup_job_id", "")
             or ""
         )
+        parent_cleanup_mask_id = str(
+            params.get("cleanup_obligation_id")
+            or params.get("formal_cleanup_mask_id")
+            or formal_plan.cleanup_mask_id
+            or ""
+        )
+        text_block_root_id = str(
+            params.get("text_block_root_id")
+            or getattr(job, "text_block_root_id", "")
+            or parent_cleanup_unit_id
+            or ""
+        )
+        params["cleanup_obligation_id"] = parent_cleanup_mask_id
+        params["parent_cleanup_mask_id"] = parent_cleanup_mask_id
+        params["text_block_root_id"] = text_block_root_id
+        params["mask_space"] = "page"
+        params["bbox_format"] = "xyxy_exclusive"
         params["source_glyph_erasure_bbox"] = list(partition_bbox or [])
         params["source_glyph_erasure_expected_area_bbox"] = []
         params["parent_expected_erasure_bbox"] = list(parent_expected or [])
@@ -3165,8 +4551,8 @@ def _run_partitioned_cleanup_attempts(
             model_id=model_id,
             artifact_dir=artifact_dir,
         )
-        results.extend(partition_results)
-        proofs.extend(partition_proofs)
+        child_result_count += len(partition_results)
+        child_proof_count += len(partition_proofs)
         result, proof = _select_best_commit_candidate_result(partition_results, partition_proofs)
         if result is None:
             result, proof = _best_failed_attempt(partition_results, partition_proofs)
@@ -3176,6 +4562,9 @@ def _run_partitioned_cleanup_attempts(
                     **dict(base_record),
                     "runtime_status": "contract_error",
                     "cleanup_mask_id": partition_mask.cleanup_mask_id,
+                    "cleanup_obligation_id": parent_cleanup_mask_id,
+                    "parent_cleanup_mask_id": parent_cleanup_mask_id,
+                    "text_block_root_id": text_block_root_id,
                     "failure_reason": "cleanup_contract_error_invalid_input",
                     "cleanup_outcome_state": "cleanup_contract_error_invalid_input",
                     "contract_error_original_reason": "partition_attempt_missing_result_or_proof",
@@ -3189,21 +4578,23 @@ def _run_partitioned_cleanup_attempts(
             )
             continue
         proof_passed = proof.proof_status == ProofStatus.PASSED
-        degraded_commit_allowed = _proof_allows_degraded_commit(proof, result, {})
+        degraded_cleanup_diagnostic = bool((proof.metrics or {}).get("degraded_cleanup_diagnostic", False))
         runtime_status = (
             "passed"
             if proof_passed and result.pixel_changed
-            else ("warning" if degraded_commit_allowed else "failed")
+            else "failed"
         )
         failure_reason = "passed" if runtime_status == "passed" else proof.failure_reason or result.failure_reason
         proof_metrics = _json_safe(proof.metrics or {})
         selected_attempt = _selected_attempt_record(attempt_records, result)
-        statuses.append(
-            {
+        child_status = {
                 **dict(base_record),
                 "runtime_status": runtime_status,
                 "cleanup_plan_id": result.cleanup_plan_id,
                 "cleanup_mask_id": partition_mask.cleanup_mask_id,
+                "cleanup_obligation_id": parent_cleanup_mask_id,
+                "parent_cleanup_mask_id": parent_cleanup_mask_id,
+                "text_block_root_id": text_block_root_id,
                 "cleanup_result_id": result.cleanup_result_id,
                 "cleanup_proof_id": proof.cleanup_proof_id,
                 "proof_status": _enum_value(proof.proof_status),
@@ -3219,7 +4610,8 @@ def _run_partitioned_cleanup_attempts(
                 "mask_ref": result.mask_ref,
                 "proof_metrics": proof_metrics,
                 "proof_quality_state": proof_metrics.get("proof_quality_state", ""),
-                "degraded_commit_allowed": bool(proof_metrics.get("degraded_commit_allowed", False)),
+                "degraded_commit_allowed": False,
+                "degraded_cleanup_diagnostic": bool(degraded_cleanup_diagnostic),
                 "source_residual_delta_dark_pixels": proof_metrics.get("source_residual_delta_dark_pixels", 0),
                 "source_residual_delta_dark_ratio": proof_metrics.get("source_residual_delta_dark_ratio", 0),
                 "collateral_art_damage_delta": proof_metrics.get("collateral_art_damage_delta", 0),
@@ -3245,7 +4637,8 @@ def _run_partitioned_cleanup_attempts(
                 "render_consumption_decision_if_consumed": proof.render_consumption_decision_if_consumed,
                 "renderer_consumed": False,
             }
-        )
+        statuses.append(child_status)
+        selected_child_records.append((result, proof, child_status))
     aggregate_record = _parent_cleanup_unit_aggregate_record(
         base_record=base_record,
         statuses=statuses,
@@ -3269,7 +4662,254 @@ def _run_partitioned_cleanup_attempts(
                 "component_attempt_count",
                 0,
             )
-    return results, proofs, statuses, aggregate_records
+    parent_plan = _runtime_plan_from_formal_plan(
+        formal_plan=formal_plan,
+        page_id=page_id,
+        job=job,
+        inpaint_mode=inpaint_mode,
+        cleanup_class=cleanup_class,
+        cleanup_mask=parent_cleanup_mask,
+    )
+    parent_params = dict(parent_plan.backend_parameters or {})
+    parent_params.update(
+        {
+            "partitioned_cleanup": True,
+            "partition_count": partition_count,
+            "partition_backend_result_count": child_result_count,
+            "partition_backend_proof_count": child_proof_count,
+            "partition_parent_rejection_reason": parent_rejection_reason,
+            "partition_parent_full_mask_first_attempt": True,
+            "partition_parent_full_mask_first_failed_reason": (
+                parent_full_failed_proof.failure_reason
+                if parent_full_failed_proof is not None
+                else (
+                    parent_full_failed_result.failure_reason
+                    if parent_full_failed_result is not None
+                    else "no_parent_full_mask_result"
+                )
+            ),
+            "partition_child_statuses": _json_safe(statuses),
+            "parent_cleanup_unit_aggregate_status": aggregate_record.get("aggregate_status", ""),
+            "parent_cleanup_unit_aggregate_complete": bool(aggregate_record.get("aggregate_complete", False)),
+            "cleanup_obligation_id": parent_cleanup_mask_id,
+            "parent_cleanup_mask_id": parent_cleanup_mask_id,
+            "text_block_root_id": text_block_root_id,
+            "mask_space": "page",
+            "bbox_format": "xyxy_exclusive",
+        }
+    )
+    parent_plan = CleanupPlan(
+        cleanup_plan_id=f"{parent_plan.cleanup_plan_id}_partition_parent",
+        cleanup_job_id=parent_plan.cleanup_job_id,
+        cleanup_mask_id=str(parent_cleanup_mask.cleanup_mask_id),
+        cleanup_class=parent_plan.cleanup_class,
+        selected_backend=parent_plan.selected_backend,
+        cleanup_method=f"{parent_plan.cleanup_method}_partition_parent_merged",
+        backend_parameters=parent_params,
+        inpaint_mode=parent_plan.inpaint_mode,
+        crop_context_bbox=list(parent_cleanup_mask.erase_mask_bbox or parent_plan.crop_context_bbox or []),
+        fallback_policy=list(parent_plan.fallback_policy or []),
+        expected_runtime_class=parent_plan.expected_runtime_class,
+        proof_thresholds=dict(parent_plan.proof_thresholds or {}),
+    )
+    parent_result, parent_merge_failure = _partition_parent_cleanup_result(
+        page_id=page_id,
+        region_id=region_id,
+        image=image,
+        parent_plan=parent_plan,
+        parent_cleanup_mask=parent_cleanup_mask,
+        selected_child_records=selected_child_records,
+        aggregate_record=aggregate_record,
+    )
+    parent_proof = prove_cleanup_result(
+        source_image=source_image,
+        before_image=image,
+        cleanup_result=parent_result,
+        cleanup_plan=parent_plan,
+        cleanup_mask=parent_cleanup_mask,
+    )
+    if parent_merge_failure:
+        parent_proof = _proof(
+            parent_result,
+            parent_plan,
+            status=ProofStatus.FAILED,
+            failure_reason=parent_merge_failure,
+            metrics={
+                "partition_parent_merge_failure": parent_merge_failure,
+                "proof_quality_state": "partition_parent_merge_failed",
+            },
+        )
+    aggregate_complete = bool(aggregate_record.get("aggregate_complete", False))
+    parent_full_mask_proof_complete = (
+        not bool(parent_merge_failure)
+        and parent_proof.proof_status == ProofStatus.PASSED
+        and bool(parent_result.pixel_changed)
+    )
+    parent_passed = parent_full_mask_proof_complete
+    first_child_failure = next(
+        (
+            str(status.get("failure_reason") or "")
+            for status in statuses
+            if str(status.get("failure_reason") or "") and str(status.get("failure_reason") or "") != "passed"
+        ),
+        "",
+    )
+    parent_failure_reason = (
+        "passed"
+        if parent_passed
+        else parent_merge_failure
+        or first_child_failure
+        or parent_proof.failure_reason
+        or parent_rejection_reason
+        or "parent_cleanup_unit_aggregate_incomplete"
+    )
+    parent_status = {
+        **dict(base_record),
+        "runtime_status": "passed" if parent_passed else "failed",
+        "cleanup_plan_id": parent_result.cleanup_plan_id,
+        "cleanup_mask_id": str(parent_cleanup_mask.cleanup_mask_id),
+        "cleanup_obligation_id": parent_cleanup_mask_id,
+        "parent_cleanup_mask_id": parent_cleanup_mask_id,
+        "text_block_root_id": text_block_root_id,
+        "cleanup_result_id": parent_result.cleanup_result_id,
+        "cleanup_proof_id": parent_proof.cleanup_proof_id,
+        "proof_status": _enum_value(parent_proof.proof_status),
+        "failure_reason": parent_failure_reason,
+        "cleanup_outcome_state": _cleanup_outcome_state_for_failure(
+            parent_failure_reason,
+            runtime_status="passed" if parent_passed else "failed",
+        ),
+        "pixel_changed": bool(parent_result.pixel_changed),
+        "changed_pixel_count": int(parent_result.changed_pixel_count or 0),
+        "cleaned_image_ref": parent_result.cleaned_image_ref,
+        "diff_ref": parent_result.diff_ref,
+        "mask_ref": parent_result.mask_ref,
+        "proof_metrics": _json_safe(parent_proof.metrics or {}),
+        "proof_quality_state": (parent_proof.metrics or {}).get("proof_quality_state", ""),
+        "degraded_commit_allowed": False,
+        "partitioned_cleanup": True,
+        "partition_count": partition_count,
+        "partition_backend_result_count": child_result_count,
+        "partition_backend_proof_count": child_proof_count,
+        "partition_parent_rejection_reason": parent_rejection_reason,
+        "partition_child_statuses": _json_safe(statuses),
+        "parent_cleanup_unit_id": parent_cleanup_unit_id,
+        "parent_cleanup_unit_aggregate_status": aggregate_record.get("aggregate_status", ""),
+        "parent_cleanup_unit_aggregate_complete": aggregate_complete,
+        "partition_parent_full_mask_proof_complete": parent_full_mask_proof_complete,
+        "parent_cleanup_unit_component_attempt_count": aggregate_record.get("component_attempt_count", 0),
+        "target_region_ids": list(target_region_ids),
+        "render_consumption_decision_if_consumed": parent_proof.render_consumption_decision_if_consumed,
+        "renderer_consumed": False,
+    }
+    return [parent_result], [parent_proof], [parent_status], aggregate_records
+
+
+def _partition_parent_cleanup_result(
+    *,
+    page_id: str,
+    region_id: str,
+    image: Any,
+    parent_plan: CleanupPlan,
+    parent_cleanup_mask: CleanupMask,
+    selected_child_records: Sequence[tuple[CleanupResult, CleanupProof, Mapping[str, Any]]],
+    aggregate_record: Mapping[str, Any],
+) -> tuple[CleanupResult, str]:
+    if np is None or Image is None:
+        return (
+            CleanupResult(
+                cleanup_result_id=f"cres_{_safe_id(parent_plan.cleanup_plan_id)}",
+                cleanup_plan_id=str(parent_plan.cleanup_plan_id),
+                cleanup_job_id=str(parent_plan.cleanup_job_id),
+                cleanup_mask_id=str(parent_cleanup_mask.cleanup_mask_id),
+                operation_bbox=_valid_bbox(parent_cleanup_mask.erase_mask_bbox),
+                page=page_id,
+                region_id=region_id,
+                cleanup_class=parent_plan.cleanup_class,
+                pixel_changed=False,
+                changed_pixel_count=0,
+                execution_status="failed",
+                failure_reason="pillow_or_numpy_unavailable",
+                backend_name="partition_parent_merge",
+                backend_parameters=dict(parent_plan.backend_parameters or {}),
+                cleaned_image=image,
+            ),
+            "pillow_or_numpy_unavailable",
+        )
+    try:
+        source_np = np.asarray(image.convert("RGB") if hasattr(image, "convert") else image)
+        parent_np = source_np.copy()
+    except Exception as exc:
+        return (
+            CleanupResult(
+                cleanup_result_id=f"cres_{_safe_id(parent_plan.cleanup_plan_id)}",
+                cleanup_plan_id=str(parent_plan.cleanup_plan_id),
+                cleanup_job_id=str(parent_plan.cleanup_job_id),
+                cleanup_mask_id=str(parent_cleanup_mask.cleanup_mask_id),
+                operation_bbox=_valid_bbox(parent_cleanup_mask.erase_mask_bbox),
+                page=page_id,
+                region_id=region_id,
+                cleanup_class=parent_plan.cleanup_class,
+                pixel_changed=False,
+                changed_pixel_count=0,
+                execution_status="failed",
+                failure_reason=f"partition_parent_source_array_error:{type(exc).__name__}: {exc}",
+                backend_name="partition_parent_merge",
+                backend_parameters=dict(parent_plan.backend_parameters or {}),
+                cleaned_image=image,
+            ),
+            "partition_parent_source_array_error",
+        )
+    changed_total = 0
+    merge_failure = ""
+    for child_result, child_proof, child_status in selected_child_records:
+        if child_proof.proof_status != ProofStatus.PASSED or not bool(child_result.pixel_changed):
+            continue
+        cleaned_image = child_result.cleaned_image or _load_cleanup_image(child_result.cleaned_image_ref)
+        if cleaned_image is None:
+            merge_failure = "partition_child_cleaned_image_missing"
+            continue
+        committed_pixels, _commit_mask = _commit_runtime_result_pixels(
+            working_np=parent_np,
+            source_np=source_np,
+            cleaned_image=cleaned_image,
+            operation_bbox=child_result.operation_bbox,
+        )
+        changed_total += int(committed_pixels or 0)
+    cleaned_image = Image.fromarray(parent_np.astype("uint8"), mode="RGB")
+    params = dict(parent_plan.backend_parameters or {})
+    params.update(
+        {
+            "candidate_status": "completed" if changed_total > 0 else "no_pixel_change",
+            "partition_parent_candidate": True,
+            "parent_cleanup_unit_aggregate_status": aggregate_record.get("aggregate_status", ""),
+            "parent_cleanup_unit_aggregate_complete": bool(aggregate_record.get("aggregate_complete", False)),
+            "parent_cleanup_unit_component_attempt_count": aggregate_record.get("component_attempt_count", 0),
+        }
+    )
+    if merge_failure:
+        params["partition_parent_merge_failure"] = merge_failure
+    return (
+        CleanupResult(
+            cleanup_result_id=f"cres_{_safe_id(parent_plan.cleanup_plan_id)}",
+            cleanup_plan_id=str(parent_plan.cleanup_plan_id),
+            cleanup_job_id=str(parent_plan.cleanup_job_id),
+            cleanup_mask_id=str(parent_cleanup_mask.cleanup_mask_id),
+            operation_bbox=_valid_bbox(parent_cleanup_mask.erase_mask_bbox),
+            page=page_id,
+            region_id=region_id,
+            cleanup_class=parent_plan.cleanup_class,
+            pixel_changed=changed_total > 0,
+            changed_pixel_count=changed_total,
+            execution_status="completed" if changed_total > 0 else "completed_no_pixel_change",
+            failure_reason="" if changed_total > 0 else "no_pixels_changed",
+            backend_name="partition_parent_merge",
+            backend_parameters=params,
+            mask_stats=mask_stats(parent_cleanup_mask.erase_mask) or {},
+            cleaned_image=cleaned_image,
+        ),
+        merge_failure,
+    )
 
 
 def _parent_cleanup_unit_aggregate_record(
@@ -3402,6 +5042,7 @@ def _run_adaptive_cleanup_attempts(
     source_image: Any,
     cleanup_plan: CleanupPlan,
     cleanup_mask: CleanupMask,
+    backend_context: Mapping[str, Any] | None = None,
     page_id: str,
     region_id: str,
     use_gpu: bool,
@@ -3412,6 +5053,84 @@ def _run_adaptive_cleanup_attempts(
     results: list[CleanupResult] = []
     proofs: list[CleanupProof] = []
     attempts: list[dict[str, Any]] = []
+
+    if _model_required_for_plan(cleanup_plan, cleanup_mask):
+        model_plan = _adaptive_plan_variant(
+            cleanup_plan,
+            attempt_index=0,
+            strategy="model_required_full_mask_inpaint",
+            cleanup_tag="authorized_ai_inpaint_full_mask",
+            retry_reason="model_required_by_ai_mode",
+            suffix="",
+        )
+        model_plan = replace(model_plan, inpaint_mode="ai")
+        model_plan.backend_parameters["inpaint_mode"] = "ai"
+        model_plan.backend_parameters["model_required"] = True
+        model_plan.backend_parameters["model_required_reason"] = (
+            "inpaint_mode_ai_requires_model_for_accepted_normal_text"
+        )
+        model_plan.backend_parameters["authorized_ai_retry_source"] = (
+            "formal_cleanup_plan_exact_cleanup_mask"
+        )
+        _page014_timeout_checkpoint(
+            "adaptive_attempt",
+            "start",
+            page_id=page_id,
+            region_id=region_id,
+            cleanup_plan_id=str(model_plan.cleanup_plan_id),
+            cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
+            attempt_index=0,
+            strategy="model_required_full_mask_inpaint",
+            retry_reason="model_required_by_ai_mode",
+        )
+        model_result, model_proof = _execute_cleanup_attempt(
+            image=image,
+            proof_before=image,
+            source_image=source_image,
+            cleanup_plan=model_plan,
+            cleanup_mask=cleanup_mask,
+            backend_context=None,
+            page_id=page_id,
+            region_id=region_id,
+            use_gpu=use_gpu,
+            model_id=model_id,
+            artifact_dir=artifact_dir,
+            attempt_index=0,
+            strategy="model_required_full_mask_inpaint",
+            retry_reason="model_required_by_ai_mode",
+        )
+        results.append(model_result)
+        proofs.append(model_proof)
+        attempts.append(
+            _adaptive_attempt_record(
+                model_result,
+                model_proof,
+                0,
+                "model_required_full_mask_inpaint",
+                "model_required_by_ai_mode",
+            )
+        )
+        _page014_timeout_checkpoint(
+            "adaptive_attempt",
+            "end",
+            page_id=page_id,
+            region_id=region_id,
+            cleanup_plan_id=str(model_plan.cleanup_plan_id),
+            attempt_index=0,
+            strategy="model_required_full_mask_inpaint",
+            proof_status=_enum_value(model_proof.proof_status),
+            failure_reason=model_proof.failure_reason or model_result.failure_reason,
+            runtime_ms=model_result.runtime_ms,
+        )
+        _page014_timeout_checkpoint(
+            "adaptive_cleanup_attempts",
+            "end",
+            page_id=page_id,
+            region_id=region_id,
+            attempt_count=len(attempts),
+            elapsed_ms=round((time.time() - adaptive_started) * 1000.0, 3),
+        )
+        return results, proofs, attempts
 
     first_plan = _adaptive_plan_variant(
         cleanup_plan,
@@ -3438,6 +5157,7 @@ def _run_adaptive_cleanup_attempts(
         source_image=source_image,
         cleanup_plan=first_plan,
         cleanup_mask=cleanup_mask,
+        backend_context=backend_context,
         page_id=page_id,
         region_id=region_id,
         use_gpu=use_gpu,
@@ -3507,6 +5227,7 @@ def _run_adaptive_cleanup_attempts(
                 source_image=source_image,
                 cleanup_plan=noop_plan,
                 cleanup_mask=cleanup_mask,
+                backend_context=backend_context,
                 page_id=page_id,
                 region_id=region_id,
                 use_gpu=use_gpu,
@@ -3555,51 +5276,54 @@ def _run_adaptive_cleanup_attempts(
             if not _should_run_backend_noop_fallback(noop_result, noop_proof):
                 break
 
-    if _should_run_residual_retry(last_proof):
-        residual_plan = _adaptive_plan_variant(
+    if _should_run_mask_faithful_inpaint_retry(cleanup_plan, last_proof):
+        inpaint_plan = _adaptive_plan_variant(
             cleanup_plan,
             attempt_index=attempt_index,
-            strategy="residual_retry",
-            cleanup_tag="cleanup_effectiveness_retry",
-            retry_reason=last_proof.failure_reason or "source_residual_remaining",
-            suffix=f"_attempt{attempt_index}_residual_retry",
+            strategy="mask_faithful_root_inpaint_retry",
+            cleanup_tag="background_narration_root_inpaint",
+            retry_reason=last_proof.failure_reason or last_result.failure_reason or "background_cleanup_incomplete",
+            suffix=f"_attempt{attempt_index}_mask_faithful_root_inpaint",
+        )
+        inpaint_plan.backend_parameters["mask_faithful_root_inpaint_source"] = (
+            "formal_cleanup_plan_exact_cleanup_mask"
         )
         _page014_timeout_checkpoint(
             "adaptive_attempt",
             "start",
             page_id=page_id,
             region_id=region_id,
-            cleanup_plan_id=str(residual_plan.cleanup_plan_id),
+            cleanup_plan_id=str(inpaint_plan.cleanup_plan_id),
             cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
             attempt_index=attempt_index,
-            strategy="residual_retry",
-            retry_reason=last_proof.failure_reason or "source_residual_remaining",
+            strategy="mask_faithful_root_inpaint_retry",
+            retry_reason=last_proof.failure_reason or last_result.failure_reason or "background_cleanup_incomplete",
         )
-        residual_image = last_result.cleaned_image if last_result.cleaned_image is not None else image
-        residual_result, residual_proof = _execute_cleanup_attempt(
-            image=residual_image,
+        inpaint_result, inpaint_proof = _execute_cleanup_attempt(
+            image=image,
             proof_before=image,
             source_image=source_image,
-            cleanup_plan=residual_plan,
+            cleanup_plan=inpaint_plan,
             cleanup_mask=cleanup_mask,
+            backend_context=backend_context,
             page_id=page_id,
             region_id=region_id,
             use_gpu=use_gpu,
             model_id=model_id,
             artifact_dir=artifact_dir,
             attempt_index=attempt_index,
-            strategy="residual_retry",
-            retry_reason=last_proof.failure_reason or "source_residual_remaining",
+            strategy="mask_faithful_root_inpaint_retry",
+            retry_reason=last_proof.failure_reason or last_result.failure_reason or "background_cleanup_incomplete",
         )
-        results.append(residual_result)
-        proofs.append(residual_proof)
+        results.append(inpaint_result)
+        proofs.append(inpaint_proof)
         attempts.append(
             _adaptive_attempt_record(
-                residual_result,
-                residual_proof,
+                inpaint_result,
+                inpaint_proof,
                 attempt_index,
-                "residual_retry",
-                last_proof.failure_reason or "source_residual_remaining",
+                "mask_faithful_root_inpaint_retry",
+                last_proof.failure_reason or last_result.failure_reason or "background_cleanup_incomplete",
             )
         )
         _page014_timeout_checkpoint(
@@ -3607,17 +5331,17 @@ def _run_adaptive_cleanup_attempts(
             "end",
             page_id=page_id,
             region_id=region_id,
-            cleanup_plan_id=str(residual_plan.cleanup_plan_id),
+            cleanup_plan_id=str(inpaint_plan.cleanup_plan_id),
             attempt_index=attempt_index,
-            strategy="residual_retry",
-            proof_status=_enum_value(residual_proof.proof_status),
-            failure_reason=residual_proof.failure_reason or residual_result.failure_reason,
-            runtime_ms=residual_result.runtime_ms,
+            strategy="mask_faithful_root_inpaint_retry",
+            proof_status=_enum_value(inpaint_proof.proof_status),
+            failure_reason=inpaint_proof.failure_reason or inpaint_result.failure_reason,
+            runtime_ms=inpaint_result.runtime_ms,
         )
-        last_result = residual_result
-        last_proof = residual_proof
+        last_result = inpaint_result
+        last_proof = inpaint_proof
         attempt_index += 1
-        if _proof_passed_with_pixels(residual_result, residual_proof):
+        if _proof_passed_with_pixels(inpaint_result, inpaint_proof):
             _page014_timeout_checkpoint(
                 "adaptive_cleanup_attempts",
                 "early_pass",
@@ -3627,6 +5351,155 @@ def _run_adaptive_cleanup_attempts(
                 elapsed_ms=round((time.time() - adaptive_started) * 1000.0, 3),
             )
             return results, proofs, attempts
+
+    if _should_run_residual_retry(last_proof):
+        residual_retry_mask, residual_retry_skip_reason = _residual_retry_cleanup_mask(
+            cleanup_mask,
+            last_proof,
+        )
+        if residual_retry_mask is None:
+            attempts.append(
+                {
+                    "attempt_index": attempt_index,
+                    "strategy": "residual_retry",
+                    "retry_reason": last_proof.failure_reason or "source_residual_remaining",
+                    "attempt_skipped": True,
+                    "skip_reason": residual_retry_skip_reason,
+                }
+            )
+            _page014_timeout_checkpoint(
+                "adaptive_attempt",
+                "skipped",
+                page_id=page_id,
+                region_id=region_id,
+                cleanup_plan_id=str(cleanup_plan.cleanup_plan_id),
+                cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
+                attempt_index=attempt_index,
+                strategy="residual_retry",
+                reason=residual_retry_skip_reason,
+            )
+        else:
+            residual_plan = _adaptive_plan_variant(
+                cleanup_plan,
+                attempt_index=attempt_index,
+                strategy="residual_retry",
+                cleanup_tag="executable_residual_tone_fill",
+                retry_reason=last_proof.failure_reason or "source_residual_remaining",
+                suffix=f"_attempt{attempt_index}_residual_retry",
+            )
+            retry_pixels = int(getattr(residual_retry_mask, "foreground_mask_pixels", 0) or 0)
+            residual_plan.backend_parameters["residual_retry_source"] = "executable_text_residual_mask"
+            residual_plan.backend_parameters["residual_retry_source_context"] = (
+                "previous_cleanup_candidate"
+            )
+            residual_plan.backend_parameters["residual_retry_foreground_pixels"] = retry_pixels
+            _page014_timeout_checkpoint(
+                "adaptive_attempt",
+                "start",
+                page_id=page_id,
+                region_id=region_id,
+                cleanup_plan_id=str(residual_plan.cleanup_plan_id),
+                cleanup_mask_id=str(residual_retry_mask.cleanup_mask_id),
+                attempt_index=attempt_index,
+                strategy="residual_retry",
+                retry_reason=last_proof.failure_reason or "source_residual_remaining",
+            )
+            # Run the residual mask against the previous candidate, then merge
+            # that residual change back into the primary candidate. This keeps
+            # any texture or line-art recovery produced by the first attempt
+            # instead of replacing it with a source-image white glyph fill.
+            residual_image = (
+                last_result.cleaned_image
+                or _load_cleanup_image(last_result.cleaned_image_ref)
+                or source_image
+            )
+            residual_result, residual_proof = _execute_cleanup_attempt(
+                image=residual_image,
+                proof_before=residual_image,
+                source_image=source_image,
+                cleanup_plan=residual_plan,
+                cleanup_mask=residual_retry_mask,
+                backend_context=backend_context,
+                page_id=page_id,
+                region_id=region_id,
+                use_gpu=use_gpu,
+                model_id=model_id,
+                artifact_dir=artifact_dir,
+                attempt_index=attempt_index,
+                strategy="residual_retry",
+                retry_reason=last_proof.failure_reason or "source_residual_remaining",
+            )
+            results.append(residual_result)
+            proofs.append(residual_proof)
+            attempts.append(
+                _adaptive_attempt_record(
+                    residual_result,
+                    residual_proof,
+                    attempt_index,
+                    "residual_retry",
+                    last_proof.failure_reason or "source_residual_remaining",
+                )
+            )
+            _page014_timeout_checkpoint(
+                "adaptive_attempt",
+                "end",
+                page_id=page_id,
+                region_id=region_id,
+                cleanup_plan_id=str(residual_plan.cleanup_plan_id),
+                attempt_index=attempt_index,
+                strategy="residual_retry",
+                proof_status=_enum_value(residual_proof.proof_status),
+                failure_reason=residual_proof.failure_reason or residual_result.failure_reason,
+                runtime_ms=residual_result.runtime_ms,
+            )
+            combined_plan = _adaptive_plan_variant(
+                cleanup_plan,
+                attempt_index=attempt_index + 1,
+                strategy="residual_retry_combined_parent_proof",
+                cleanup_tag=str((cleanup_plan.backend_parameters or {}).get("cleanup_tag") or "cleanup_effectiveness_retry"),
+                retry_reason=last_proof.failure_reason or "source_residual_remaining",
+                suffix=f"_attempt{attempt_index}_residual_retry_combined",
+            )
+            combined_result = _combined_residual_retry_result(
+                base_image=image,
+                cleanup_plan=combined_plan,
+                cleanup_mask=cleanup_mask,
+                residual_result=residual_result,
+                primary_result=last_result,
+                page_id=page_id,
+                region_id=region_id,
+            )
+            combined_proof = prove_cleanup_result(
+                source_image=source_image,
+                before_image=image,
+                cleanup_result=combined_result,
+                cleanup_plan=combined_plan,
+                cleanup_mask=cleanup_mask,
+            )
+            results.append(combined_result)
+            proofs.append(combined_proof)
+            attempts.append(
+                _adaptive_attempt_record(
+                    combined_result,
+                    combined_proof,
+                    attempt_index + 1,
+                    "residual_retry_combined_parent_proof",
+                    last_proof.failure_reason or "source_residual_remaining",
+                )
+            )
+            last_result = combined_result
+            last_proof = combined_proof
+            attempt_index += 2
+            if _proof_passed_with_pixels(combined_result, combined_proof):
+                _page014_timeout_checkpoint(
+                    "adaptive_cleanup_attempts",
+                    "early_pass",
+                    page_id=page_id,
+                    region_id=region_id,
+                    attempt_count=len(attempts),
+                    elapsed_ms=round((time.time() - adaptive_started) * 1000.0, 3),
+                )
+                return results, proofs, attempts
 
     if _should_run_restoration_retry(last_proof):
         restoration_plan = _adaptive_plan_variant(
@@ -3654,6 +5527,7 @@ def _run_adaptive_cleanup_attempts(
             source_image=source_image,
             cleanup_plan=restoration_plan,
             cleanup_mask=cleanup_mask,
+            backend_context=backend_context,
             page_id=page_id,
             region_id=region_id,
             use_gpu=use_gpu,
@@ -3686,6 +5560,228 @@ def _run_adaptive_cleanup_attempts(
             failure_reason=restoration_proof.failure_reason or restoration_result.failure_reason,
             runtime_ms=restoration_result.runtime_ms,
         )
+        last_result = restoration_result
+        last_proof = restoration_proof
+        attempt_index += 1
+
+    if _should_run_authorized_ai_inpaint_retry(cleanup_plan, last_proof):
+        ai_plan = _adaptive_plan_variant(
+            cleanup_plan,
+            attempt_index=attempt_index,
+            strategy="authorized_ai_inpaint_full_mask_retry",
+            cleanup_tag="authorized_ai_inpaint_full_mask",
+            retry_reason=last_proof.failure_reason or "caption_background_cleanup_incomplete",
+            suffix=f"_attempt{attempt_index}_authorized_ai_inpaint",
+        )
+        ai_plan = replace(ai_plan, inpaint_mode="ai")
+        ai_plan.backend_parameters["inpaint_mode"] = "ai"
+        ai_plan.backend_parameters["authorized_ai_retry_source"] = "formal_cleanup_plan_exact_cleanup_mask"
+        _page014_timeout_checkpoint(
+            "adaptive_attempt",
+            "start",
+            page_id=page_id,
+            region_id=region_id,
+            cleanup_plan_id=str(ai_plan.cleanup_plan_id),
+            cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
+            attempt_index=attempt_index,
+            strategy="authorized_ai_inpaint_full_mask_retry",
+            retry_reason=last_proof.failure_reason or "caption_background_cleanup_incomplete",
+        )
+        ai_result, ai_proof = _execute_cleanup_attempt(
+            image=image,
+            proof_before=image,
+            source_image=source_image,
+            cleanup_plan=ai_plan,
+            cleanup_mask=cleanup_mask,
+            backend_context=backend_context,
+            page_id=page_id,
+            region_id=region_id,
+            use_gpu=use_gpu,
+            model_id=model_id,
+            artifact_dir=artifact_dir,
+            attempt_index=attempt_index,
+            strategy="authorized_ai_inpaint_full_mask_retry",
+            retry_reason=last_proof.failure_reason or "caption_background_cleanup_incomplete",
+        )
+        results.append(ai_result)
+        proofs.append(ai_proof)
+        attempts.append(
+            _adaptive_attempt_record(
+                ai_result,
+                ai_proof,
+                attempt_index,
+                "authorized_ai_inpaint_full_mask_retry",
+                last_proof.failure_reason or "caption_background_cleanup_incomplete",
+            )
+        )
+        _page014_timeout_checkpoint(
+            "adaptive_attempt",
+            "end",
+            page_id=page_id,
+            region_id=region_id,
+            cleanup_plan_id=str(ai_plan.cleanup_plan_id),
+            attempt_index=attempt_index,
+            strategy="authorized_ai_inpaint_full_mask_retry",
+            proof_status=_enum_value(ai_proof.proof_status),
+            failure_reason=ai_proof.failure_reason or ai_result.failure_reason,
+            runtime_ms=ai_result.runtime_ms,
+        )
+        if _proof_passed_with_pixels(ai_result, ai_proof):
+            _page014_timeout_checkpoint(
+                "adaptive_cleanup_attempts",
+                "early_pass",
+                page_id=page_id,
+                region_id=region_id,
+                attempt_count=len(attempts),
+                elapsed_ms=round((time.time() - adaptive_started) * 1000.0, 3),
+            )
+            return results, proofs, attempts
+        if _should_run_residual_retry(ai_proof):
+            residual_retry_mask, residual_retry_skip_reason = _residual_retry_cleanup_mask(
+                cleanup_mask,
+                ai_proof,
+            )
+            if residual_retry_mask is None:
+                attempts.append(
+                    {
+                        "attempt_index": attempt_index + 1,
+                        "strategy": "authorized_ai_residual_retry",
+                        "retry_reason": ai_proof.failure_reason or "source_residual_remaining_after_ai",
+                        "attempt_skipped": True,
+                        "skip_reason": residual_retry_skip_reason,
+                    }
+                )
+                _page014_timeout_checkpoint(
+                    "adaptive_attempt",
+                    "skipped",
+                    page_id=page_id,
+                    region_id=region_id,
+                    cleanup_plan_id=str(ai_plan.cleanup_plan_id),
+                    cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
+                    attempt_index=attempt_index + 1,
+                    strategy="authorized_ai_residual_retry",
+                    reason=residual_retry_skip_reason,
+                )
+            else:
+                residual_plan = _adaptive_plan_variant(
+                    cleanup_plan,
+                    attempt_index=attempt_index + 1,
+                    strategy="authorized_ai_residual_retry",
+                    cleanup_tag="executable_residual_tone_fill",
+                    retry_reason=ai_proof.failure_reason or "source_residual_remaining_after_ai",
+                    suffix=f"_attempt{attempt_index + 1}_authorized_ai_residual_retry",
+                )
+                residual_pixels = int(getattr(residual_retry_mask, "foreground_mask_pixels", 0) or 0)
+                residual_plan.backend_parameters["residual_retry_source"] = (
+                    "authorized_ai_executable_text_residual_mask"
+                )
+                residual_plan.backend_parameters["residual_retry_source_context"] = (
+                    "previous_cleanup_candidate"
+                )
+                residual_plan.backend_parameters["residual_retry_foreground_pixels"] = residual_pixels
+                _page014_timeout_checkpoint(
+                    "adaptive_attempt",
+                    "start",
+                    page_id=page_id,
+                    region_id=region_id,
+                    cleanup_plan_id=str(residual_plan.cleanup_plan_id),
+                    cleanup_mask_id=str(residual_retry_mask.cleanup_mask_id),
+                    attempt_index=attempt_index + 1,
+                    strategy="authorized_ai_residual_retry",
+                    retry_reason=ai_proof.failure_reason or "source_residual_remaining_after_ai",
+                )
+                residual_image = (
+                    ai_result.cleaned_image
+                    or _load_cleanup_image(ai_result.cleaned_image_ref)
+                    or source_image
+                )
+                residual_result, residual_proof = _execute_cleanup_attempt(
+                    image=residual_image,
+                    proof_before=residual_image,
+                    source_image=source_image,
+                    cleanup_plan=residual_plan,
+                    cleanup_mask=residual_retry_mask,
+                    backend_context=backend_context,
+                    page_id=page_id,
+                    region_id=region_id,
+                    use_gpu=use_gpu,
+                    model_id=model_id,
+                    artifact_dir=artifact_dir,
+                    attempt_index=attempt_index + 1,
+                    strategy="authorized_ai_residual_retry",
+                    retry_reason=ai_proof.failure_reason or "source_residual_remaining_after_ai",
+                )
+                results.append(residual_result)
+                proofs.append(residual_proof)
+                attempts.append(
+                    _adaptive_attempt_record(
+                        residual_result,
+                        residual_proof,
+                        attempt_index + 1,
+                        "authorized_ai_residual_retry",
+                        ai_proof.failure_reason or "source_residual_remaining_after_ai",
+                    )
+                )
+                _page014_timeout_checkpoint(
+                    "adaptive_attempt",
+                    "end",
+                    page_id=page_id,
+                    region_id=region_id,
+                    cleanup_plan_id=str(residual_plan.cleanup_plan_id),
+                    attempt_index=attempt_index + 1,
+                    strategy="authorized_ai_residual_retry",
+                    proof_status=_enum_value(residual_proof.proof_status),
+                    failure_reason=residual_proof.failure_reason or residual_result.failure_reason,
+                    runtime_ms=residual_result.runtime_ms,
+                )
+                combined_plan = _adaptive_plan_variant(
+                    cleanup_plan,
+                    attempt_index=attempt_index + 2,
+                    strategy="authorized_ai_residual_retry_combined_parent_proof",
+                    cleanup_tag=str(
+                        (cleanup_plan.backend_parameters or {}).get("cleanup_tag")
+                        or "cleanup_effectiveness_retry"
+                    ),
+                    retry_reason=ai_proof.failure_reason or "source_residual_remaining_after_ai",
+                    suffix=f"_attempt{attempt_index + 1}_authorized_ai_residual_retry_combined",
+                )
+                combined_result = _combined_residual_retry_result(
+                    base_image=image,
+                    cleanup_plan=combined_plan,
+                    cleanup_mask=cleanup_mask,
+                    residual_result=residual_result,
+                    primary_result=ai_result,
+                    page_id=page_id,
+                    region_id=region_id,
+                )
+                combined_proof = prove_cleanup_result(
+                    source_image=source_image,
+                    before_image=image,
+                    cleanup_result=combined_result,
+                    cleanup_plan=combined_plan,
+                    cleanup_mask=cleanup_mask,
+                )
+                results.append(combined_result)
+                proofs.append(combined_proof)
+                attempts.append(
+                    _adaptive_attempt_record(
+                        combined_result,
+                        combined_proof,
+                        attempt_index + 2,
+                        "authorized_ai_residual_retry_combined_parent_proof",
+                        ai_proof.failure_reason or "source_residual_remaining_after_ai",
+                    )
+                )
+                if _proof_passed_with_pixels(combined_result, combined_proof):
+                    _page014_timeout_checkpoint(
+                        "adaptive_cleanup_attempts",
+                        "early_pass",
+                        page_id=page_id,
+                        region_id=region_id,
+                        attempt_count=len(attempts),
+                        elapsed_ms=round((time.time() - adaptive_started) * 1000.0, 3),
+                    )
+                    return results, proofs, attempts
 
     _page014_timeout_checkpoint(
         "adaptive_cleanup_attempts",
@@ -3705,6 +5801,7 @@ def _execute_cleanup_attempt(
     source_image: Any,
     cleanup_plan: CleanupPlan,
     cleanup_mask: CleanupMask,
+    backend_context: Mapping[str, Any] | None = None,
     page_id: str,
     region_id: str,
     use_gpu: bool,
@@ -3730,6 +5827,7 @@ def _execute_cleanup_attempt(
         image=image,
         cleanup_plan=cleanup_plan,
         cleanup_mask=cleanup_mask,
+        backend_context=backend_context,
         page_id=page_id,
         region_id=region_id,
         use_gpu=use_gpu,
@@ -3755,6 +5853,24 @@ def _execute_cleanup_attempt(
         "represented_source_glyph_ids",
         "consumed_source_glyph_mask_ids",
         "missing_source_glyph_mask_ids",
+        "formal_cleanup_plan_id",
+        "formal_cleanup_mask_id",
+        "cleanup_plan_authority",
+        "runtime_plan_derived_from_formal_plan",
+        "formal_cleanup_plan",
+        "component_projection_method",
+        "mask_contract_exception_reason",
+        "owned_segmentation_pixels",
+        "executable_foreground_pixels",
+        "owned_segmentation_to_executable_ratio",
+        "inpaint_mode",
+        "model_required",
+        "model_required_reason",
+        "allow_non_model_method",
+        "non_model_method_allowed",
+        "allow_non_model_method_reason",
+        "non_model_method_allowed_reason",
+        "authorized_ai_retry_source",
     ):
         if key in cleanup_plan.backend_parameters:
             result.backend_parameters.setdefault(key, cleanup_plan.backend_parameters.get(key))
@@ -3790,6 +5906,93 @@ def _execute_cleanup_attempt(
         elapsed_ms=round((time.time() - attempt_started) * 1000.0, 3),
     )
     return result, proof
+
+
+def _combined_residual_retry_result(
+    *,
+    base_image: Any,
+    cleanup_plan: CleanupPlan,
+    cleanup_mask: CleanupMask,
+    residual_result: CleanupResult,
+    primary_result: CleanupResult | None = None,
+    page_id: str,
+    region_id: str,
+) -> CleanupResult:
+    residual_image = residual_result.cleaned_image or _load_cleanup_image(residual_result.cleaned_image_ref)
+    primary_image = (
+        primary_result.cleaned_image
+        if primary_result is not None and primary_result.cleaned_image is not None
+        else (
+            _load_cleanup_image(primary_result.cleaned_image_ref)
+            if primary_result is not None
+            else None
+        )
+    )
+    if residual_image is None:
+        residual_image = base_image
+    if primary_image is None:
+        primary_image = base_image
+    try:
+        base_np = np.asarray(base_image.convert("RGB") if hasattr(base_image, "convert") else base_image)
+        primary_np = np.asarray(primary_image.convert("RGB") if hasattr(primary_image, "convert") else primary_image).copy()
+        residual_np = np.asarray(residual_image.convert("RGB") if hasattr(residual_image, "convert") else residual_image)
+        if base_np.shape == primary_np.shape == residual_np.shape:
+            diff = np.abs(residual_np.astype(np.int16) - base_np.astype(np.int16))
+            changed = np.any(diff > 8, axis=2) if diff.ndim == 3 else diff > 8
+            primary_np[changed] = residual_np[changed]
+            cleaned_image = Image.fromarray(primary_np.astype("uint8"), mode="RGB")
+        else:
+            cleaned_image = residual_image
+    except Exception:
+        cleaned_image = residual_image
+    changed_pixels = _changed_pixel_count(base_image, cleaned_image)
+    params = dict(cleanup_plan.backend_parameters or {})
+    params.update(dict(residual_result.backend_parameters or {}))
+    params.update(
+        {
+            "candidate_status": "completed" if changed_pixels > 0 else "no_pixel_change",
+            "residual_retry_combined_parent_candidate": True,
+            "residual_retry_source_context": str(
+                (residual_result.backend_parameters or {}).get("residual_retry_source_context")
+                or "previous_cleanup_candidate"
+            ),
+            "residual_retry_merged_with_primary_candidate": primary_result is not None,
+            "primary_cleanup_result_id": str(getattr(primary_result, "cleanup_result_id", "") or ""),
+            "residual_retry_result_id": str(residual_result.cleanup_result_id),
+            "residual_retry_mask_id": str(residual_result.cleanup_mask_id),
+            "formal_cleanup_mask_id": str(cleanup_mask.cleanup_mask_id),
+            "cleanup_obligation_id": str(cleanup_mask.cleanup_mask_id),
+        }
+    )
+    backend_name = str(residual_result.backend_name or residual_result.execution_backend or "residual_retry")
+    return CleanupResult(
+        cleanup_result_id=f"cres_{_safe_id(cleanup_plan.cleanup_plan_id)}",
+        cleanup_plan_id=str(cleanup_plan.cleanup_plan_id),
+        cleanup_job_id=str(cleanup_plan.cleanup_job_id),
+        cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
+        operation_bbox=_valid_bbox(cleanup_mask.erase_mask_bbox),
+        page=page_id,
+        region_id=region_id,
+        cleanup_class=cleanup_plan.cleanup_class,
+        pixel_changed=changed_pixels > 0,
+        changed_pixel_count=changed_pixels,
+        diff_ref="",
+        mask_ref=(primary_result.mask_ref if primary_result is not None and primary_result.mask_ref else residual_result.mask_ref),
+        renderer_consumed=False,
+        execution_backend=f"{backend_name}|combined_parent_mask",
+        execution_status="completed" if changed_pixels > 0 else "completed_no_pixel_change",
+        failure_reason="" if changed_pixels > 0 else "no_pixels_changed",
+        mask_stats=mask_stats(cleanup_mask.erase_mask) or {},
+        backend_name=f"{backend_name}|combined_parent_mask",
+        backend_parameters=params,
+        runtime_ms=residual_result.runtime_ms,
+        fallback_status=residual_result.fallback_status,
+        errors=list(residual_result.errors or []),
+        cleaned_image_ref="",
+        cleaned_crop_ref="",
+        cleaned_image=cleaned_image,
+        cleaned_crop=None,
+    )
 
 
 def _adaptive_plan_variant(
@@ -3840,32 +6043,38 @@ def _proof_allows_degraded_commit(
     result: CleanupResult | None = None,
     status: Mapping[str, Any] | None = None,
 ) -> bool:
-    if proof is None:
-        return False
-    metrics = proof.metrics or {}
-    if not bool(metrics.get("degraded_commit_allowed")):
-        return False
-    if result is not None and (not result.pixel_changed or int(result.changed_pixel_count or 0) <= 0):
-        return False
-    if status is not None:
-        runtime_status = str(status.get("runtime_status") or "")
-        if runtime_status and runtime_status not in {"warning", "failed", "passed"}:
-            return False
-    if not bool(metrics.get("source_residual_improved")):
-        return False
-    if bool(metrics.get("source_visible_area_increased")):
-        return False
-    if not bool(metrics.get("allowed_area_safe")):
-        return False
-    if not bool(metrics.get("collateral_safe")):
-        return False
-    if bool(metrics.get("broad_white_patch_risk")):
-        return False
-    return True
+    # Degraded/warning cleanup is diagnostic-only unless a future contract
+    # explicitly authorizes non-passed proof commits.
+    return False
 
 
 def _proof_commit_candidate(result: CleanupResult, proof: CleanupProof) -> bool:
     return _proof_passed_with_pixels(result, proof)
+
+
+def _is_component_projected_cleanup_mask(cleanup_mask: CleanupMask, visual_scope: str | None = None) -> bool:
+    scope = _normalise_cleanup_visual_scope(visual_scope or cleanup_mask.visual_scope)
+    method = str(getattr(cleanup_mask, "component_projection_method", "") or "")
+    return scope == "segmentation_component" or method in COMPONENT_PROJECTION_METHODS
+
+
+def _is_component_projection_ready_audit_rejection(cleanup_mask: CleanupMask, rejection_reason: str) -> bool:
+    if str(rejection_reason or "") not in {
+        "effective_mask_not_ready",
+        "upstream_container_mismatch",
+    }:
+        return False
+    if not _is_component_projected_cleanup_mask(cleanup_mask):
+        return False
+    if str(getattr(cleanup_mask, "projection_quality_state", "") or "") != "projection_ready":
+        return False
+    if str(getattr(cleanup_mask, "mask_readiness_state", "") or "") != "mask_ready":
+        return False
+    if int(getattr(cleanup_mask, "foreground_mask_pixels", 0) or 0) <= 0:
+        return False
+    if int(getattr(cleanup_mask, "erase_mask_pixels", 0) or 0) <= 0:
+        return False
+    return True
 
 
 def _should_run_backend_noop_fallback(result: CleanupResult, proof: CleanupProof | None) -> bool:
@@ -3878,6 +6087,62 @@ def _should_run_backend_noop_fallback(result: CleanupResult, proof: CleanupProof
     return reason in {"backend_noop_or_error", "no_pixels_changed"}
 
 
+def _residual_retry_cleanup_mask(
+    cleanup_mask: CleanupMask,
+    proof: CleanupProof,
+) -> tuple[CleanupMask | None, str]:
+    if np is None or Image is None:
+        return None, "numpy_or_pillow_unavailable"
+    metrics = proof.metrics or {}
+    residual_ref = str(metrics.get("residual_source_mask_ref") or "")
+    if not residual_ref:
+        return None, "residual_retry_skipped_no_executable_text_residual_ref"
+    if not os.path.isfile(residual_ref):
+        return None, "residual_retry_skipped_residual_text_mask_missing"
+    foreground = _binary_cleanup_mask_array(cleanup_mask.foreground_mask)
+    erase = _binary_cleanup_mask_array(cleanup_mask.erase_mask)
+    if foreground is None or not np.any(foreground > 0):
+        return None, "residual_retry_skipped_missing_cleanup_foreground"
+    try:
+        with Image.open(residual_ref) as img:
+            residual_arr = np.asarray(img.convert("L"))
+    except Exception as exc:
+        return None, f"residual_retry_skipped_residual_text_mask_load_error:{type(exc).__name__}"
+    residual = _binary_mask(residual_arr, foreground.shape)
+    if residual is None:
+        return None, "residual_retry_skipped_invalid_residual_text_mask"
+    residual = (residual > 0) & (foreground > 0)
+    if erase is not None and erase.shape == foreground.shape and np.any(erase > 0):
+        residual = residual & (erase > 0)
+    allowed = _valid_bbox(cleanup_mask.allowed_area) or _mask_bbox(foreground)
+    if allowed is None:
+        return None, "residual_retry_skipped_missing_allowed_area"
+    residual_u8 = _clip_mask_to_valid_bbox(residual.astype(np.uint8), allowed)
+    residual_pixels = int(np.count_nonzero(residual_u8))
+    if residual_pixels <= 0:
+        return None, "residual_retry_skipped_no_executable_text_residual"
+    residual_bbox = _mask_bbox(residual_u8)
+    if residual_bbox is None:
+        return None, "residual_retry_skipped_empty_residual_text_bbox"
+    return (
+        replace(
+            cleanup_mask,
+            cleanup_mask_id=f"{cleanup_mask.cleanup_mask_id}_residual_retry",
+            foreground_mask_bbox=residual_bbox,
+            foreground_mask_pixels=residual_pixels,
+            erase_mask_bbox=residual_bbox,
+            erase_mask_pixels=residual_pixels,
+            growth_ratio=1.0,
+            mask_method=f"{cleanup_mask.mask_method}|executable_text_residual_retry",
+            rejection_reason="",
+            visual_scope=_normalise_cleanup_visual_scope(cleanup_mask.visual_scope),
+            foreground_mask=residual_u8,
+            erase_mask=residual_u8.copy(),
+        ),
+        "",
+    )
+
+
 def _should_run_residual_retry(proof: CleanupProof) -> bool:
     reason = str(proof.failure_reason or "")
     if reason not in {
@@ -3887,6 +6152,18 @@ def _should_run_residual_retry(proof: CleanupProof) -> bool:
     }:
         return False
     metrics = proof.metrics or {}
+    residual_pixels = _first_metric_int(
+        metrics,
+        "executable_text_residual_pixels",
+        "residual_dark_source_pixels",
+        "residual_source_pixels",
+        default=0,
+    )
+    if residual_pixels <= 0:
+        return False
+    residual_ref = str(metrics.get("residual_source_mask_ref") or "")
+    if not residual_ref:
+        return False
     overlap = _float_or_none(metrics.get("mask_source_overlap_ratio"))
     if overlap is not None and overlap < PROOF_MASK_SOURCE_OVERLAP_RATIO:
         return False
@@ -3898,6 +6175,14 @@ def _should_run_residual_retry(proof: CleanupProof) -> bool:
         and changed_outside_ratio <= PROOF_CHANGED_OUTSIDE_ALLOWED_RATIO
         and collateral <= PROOF_COLLATERAL_INSIDE_ALLOWED_RATIO
     )
+
+
+def _first_metric_int(metrics: Mapping[str, Any], *keys: str, default: int) -> int:
+    for key in keys:
+        value = _int_or_none(metrics.get(key))
+        if value is not None:
+            return int(value)
+    return int(default)
 
 
 def _should_run_restoration_retry(proof: CleanupProof) -> bool:
@@ -3912,6 +6197,67 @@ def _should_run_restoration_retry(proof: CleanupProof) -> bool:
         changed_outside > PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS
         or changed_outside_ratio > PROOF_CHANGED_OUTSIDE_ALLOWED_RATIO
         or collateral > PROOF_COLLATERAL_INSIDE_ALLOWED_RATIO
+    )
+
+
+def _should_run_authorized_ai_inpaint_retry(
+    cleanup_plan: CleanupPlan,
+    proof: CleanupProof,
+) -> bool:
+    if proof is None or proof.proof_status == ProofStatus.PASSED:
+        return False
+    cleanup_value = _enum_value(getattr(cleanup_plan, "cleanup_class", ""))
+    if cleanup_value not in {
+        CleanupClass.CAPTION_FLAT_BACKGROUND.value,
+        CleanupClass.CAPTION_DARK_OR_SCREENTONE.value,
+        CleanupClass.TITLE_OR_SIGN.value,
+        CleanupClass.BACKGROUND_ART_TEXT.value,
+        CleanupClass.SIDE_CAPTION_GLYPH_LOCAL.value,
+    }:
+        return False
+    reason = str(proof.failure_reason or "")
+    if reason in {
+        "source_residual_remaining",
+        "source_residual_outside_accepted_mask_boundary",
+        "broad_white_patch_risk",
+    }:
+        return True
+    metrics = proof.metrics or {}
+    return bool(
+        metrics.get("outside_accepted_mask_boundary_residual_remaining")
+        or metrics.get("broad_white_patch_risk")
+    )
+
+
+def _should_run_mask_faithful_inpaint_retry(
+    cleanup_plan: CleanupPlan,
+    proof: CleanupProof,
+) -> bool:
+    if proof is None or proof.proof_status == ProofStatus.PASSED:
+        return False
+    cleanup_value = _enum_value(getattr(cleanup_plan, "cleanup_class", ""))
+    if cleanup_value not in {
+        CleanupClass.CAPTION_FLAT_BACKGROUND.value,
+        CleanupClass.CAPTION_DARK_OR_SCREENTONE.value,
+        CleanupClass.TITLE_OR_SIGN.value,
+        CleanupClass.BACKGROUND_ART_TEXT.value,
+        CleanupClass.SIDE_CAPTION_GLYPH_LOCAL.value,
+    }:
+        return False
+    reason = str(proof.failure_reason or "")
+    if reason in {
+        "source_residual_remaining",
+        "source_residual_outside_accepted_mask_boundary",
+        "broad_white_patch_risk",
+        "backend_noop_or_error",
+    }:
+        return True
+    metrics = proof.metrics or {}
+    return bool(
+        metrics.get("dark_source_residual_remaining")
+        or metrics.get("light_source_residual_remaining")
+        or metrics.get("cleaned_light_source_residual_remaining")
+        or metrics.get("broad_white_patch_risk")
     )
 
 
@@ -3944,7 +6290,8 @@ def _adaptive_attempt_record(
         "parent_cleanup_unit_id": metrics.get("parent_cleanup_unit_id", ""),
         "parent_expected_erasure_bbox": metrics.get("parent_expected_erasure_bbox", []),
         "proof_quality_state": metrics.get("proof_quality_state", ""),
-        "degraded_commit_allowed": bool(metrics.get("degraded_commit_allowed", False)),
+        "degraded_commit_allowed": False,
+        "degraded_cleanup_diagnostic": bool(metrics.get("degraded_cleanup_diagnostic", False)),
         "source_residual_delta_dark_pixels": metrics.get("source_residual_delta_dark_pixels", 0),
         "source_residual_delta_dark_ratio": metrics.get("source_residual_delta_dark_ratio", 0),
         "collateral_art_damage_delta": metrics.get("collateral_art_damage_delta", 0),
@@ -3974,6 +6321,75 @@ def _residual_status(metrics: Mapping[str, Any], proof: CleanupProof) -> str:
     if "source_residual" in reason:
         return "failed"
     return "not_primary_failure"
+
+
+def _white_patch_context_metrics(
+    *,
+    source_gray: Any,
+    white_patch_mask: Any,
+    erase_mask: Any,
+) -> dict[str, Any]:
+    if np is None or source_gray is None or white_patch_mask is None:
+        return {
+            "median_luma": 0.0,
+            "light_ratio": 0.0,
+            "dark_ratio": 0.0,
+            "light_context": False,
+        }
+    try:
+        source_arr = np.asarray(source_gray)
+        white_patch = np.asarray(white_patch_mask) > 0
+        erase = np.asarray(erase_mask) > 0 if erase_mask is not None else white_patch
+    except Exception:
+        return {
+            "median_luma": 0.0,
+            "light_ratio": 0.0,
+            "dark_ratio": 0.0,
+            "light_context": False,
+        }
+    if source_arr.ndim != 2 or white_patch.shape != source_arr.shape or not np.any(white_patch):
+        return {
+            "median_luma": 0.0,
+            "light_ratio": 0.0,
+            "dark_ratio": 0.0,
+            "light_context": False,
+        }
+    if erase.shape != source_arr.shape:
+        erase = white_patch
+    if cv2 is not None:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        near = cv2.dilate(white_patch.astype(np.uint8), kernel, iterations=1).astype(bool)
+        far = cv2.dilate(white_patch.astype(np.uint8), kernel, iterations=3).astype(bool)
+        context_mask = far & ~near & ~erase
+    else:
+        y_idx, x_idx = np.where(white_patch)
+        y0 = max(0, int(y_idx.min()) - 3)
+        y1 = min(source_arr.shape[0], int(y_idx.max()) + 4)
+        x0 = max(0, int(x_idx.min()) - 3)
+        x1 = min(source_arr.shape[1], int(x_idx.max()) + 4)
+        context_mask = np.zeros(source_arr.shape, dtype=bool)
+        context_mask[y0:y1, x0:x1] = True
+        context_mask &= ~white_patch & ~erase
+    values = source_arr[context_mask]
+    if values.size < 12:
+        values = source_arr[(~erase) & (~white_patch)]
+    if values.size <= 0:
+        return {
+            "median_luma": 0.0,
+            "light_ratio": 0.0,
+            "dark_ratio": 0.0,
+            "light_context": False,
+        }
+    median_luma = float(np.median(values))
+    light_ratio = float(np.count_nonzero(values >= 225) / max(1, values.size))
+    dark_ratio = float(np.count_nonzero(values < 120) / max(1, values.size))
+    light_context = median_luma >= 235.0 and light_ratio >= 0.50 and dark_ratio <= 0.35
+    return {
+        "median_luma": round(median_luma, 3),
+        "light_ratio": round(light_ratio, 4),
+        "dark_ratio": round(dark_ratio, 4),
+        "light_context": bool(light_context),
+    }
 
 
 def _collateral_status(metrics: Mapping[str, Any], proof: CleanupProof) -> str:
@@ -4085,18 +6501,30 @@ def _write_runtime_artifacts(
     cleanup_plan: CleanupPlan,
     cleanup_mask: CleanupMask,
     before: Any,
+    backend_input_mask: Any,
+    raw_cleaned: Any,
     cleaned: Any,
 ) -> dict[str, str]:
     if not artifact_dir or Image is None:
         return {}
     try:
         os.makedirs(artifact_dir, exist_ok=True)
-        stem = f"{_safe_id(page_id)}_{_safe_id(region_id)}_{_safe_id(cleanup_plan.cleanup_plan_id)}"
+        stem = _short_artifact_stem(page_id, region_id, cleanup_plan.cleanup_plan_id)
         cleaned_path = os.path.join(artifact_dir, f"{stem}_cleaned.png")
         diff_path = os.path.join(artifact_dir, f"{stem}_diff.png")
         mask_path = os.path.join(artifact_dir, f"{stem}_mask.png")
+        backend_input_mask_path = os.path.join(artifact_dir, f"{stem}_backend_input_mask.png")
+        model_input_image_path = os.path.join(artifact_dir, f"{stem}_model_input_image.png")
+        model_input_mask_path = os.path.join(artifact_dir, f"{stem}_model_input_mask.png")
+        raw_backend_output_path = os.path.join(artifact_dir, f"{stem}_raw_backend_output.png")
+        final_clipped_output_path = os.path.join(artifact_dir, f"{stem}_final_clipped_output.png")
         crop_path = os.path.join(artifact_dir, f"{stem}_cleaned_crop.png")
+        _save_image(before, model_input_image_path)
+        _save_mask(backend_input_mask, backend_input_mask_path)
+        _save_mask(backend_input_mask, model_input_mask_path)
+        _save_image(raw_cleaned, raw_backend_output_path)
         _save_image(cleaned, cleaned_path)
+        _save_image(cleaned, final_clipped_output_path)
         _save_diff(before, cleaned, diff_path)
         _save_mask(cleanup_mask.erase_mask, mask_path)
         _save_crop(cleaned, cleanup_mask.erase_mask_bbox or cleanup_mask.allowed_area, crop_path)
@@ -4105,6 +6533,11 @@ def _write_runtime_artifacts(
             "cleaned_crop_ref": crop_path,
             "diff_ref": diff_path,
             "mask_ref": mask_path,
+            "backend_input_mask_ref": backend_input_mask_path,
+            "model_input_image_ref": model_input_image_path,
+            "model_input_mask_ref": model_input_mask_path,
+            "raw_backend_output_ref": raw_backend_output_path,
+            "final_clipped_output_ref": final_clipped_output_path,
         }
     except Exception:
         return {}
@@ -4208,8 +6641,6 @@ def _job_exclusion_reason(job: CleanupJob) -> str:
 def _mask_exclusion_reason(cleanup_mask: CleanupMask, image_size: tuple[int, int] | None) -> str:
     if cleanup_mask.protected:
         return cleanup_mask.protection_reason or "mask_protected"
-    if cleanup_mask.rejection_reason:
-        return f"mask_rejected_{cleanup_mask.rejection_reason}"
     protected_conflict = _mask_protected_conflict_reason(cleanup_mask)
     if protected_conflict:
         return protected_conflict
@@ -4222,10 +6653,10 @@ def _mask_exclusion_reason(cleanup_mask: CleanupMask, image_size: tuple[int, int
         return "cleanup_job_id_missing"
     consumed_source_ids = _unique_texts(cleanup_mask.consumed_source_glyph_mask_ids)
     missing_source_ids = _unique_texts(cleanup_mask.missing_source_glyph_mask_ids)
-    component_projected = (
-        visual_scope == "segmentation_component"
-        or str(getattr(cleanup_mask, "component_projection_method", "") or "") == "segmentation_component_ownership_projection"
-    )
+    component_projected = _is_component_projected_cleanup_mask(cleanup_mask, visual_scope)
+    rejection_reason = str(getattr(cleanup_mask, "rejection_reason", "") or "")
+    if rejection_reason and not _is_component_projection_ready_audit_rejection(cleanup_mask, rejection_reason):
+        return f"mask_rejected_{rejection_reason}"
     if missing_source_ids and not component_projected:
         return "missing_required_source_glyph_evidence"
     if not consumed_source_ids and not component_projected:
@@ -4270,6 +6701,7 @@ def _mask_exclusion_reason(cleanup_mask: CleanupMask, image_size: tuple[int, int
     growth_exception = str(getattr(cleanup_mask, "mask_contract_exception_reason", "") or "") in {
         "caption_flat_small_mask_growth_exception",
         "speech_flat_runtime_dark_pixel_growth_exception",
+        "text_area_component_authorization_map_growth_exception",
     }
     if growth > MAX_PLAN_GROWTH_RATIO and not growth_exception:
         return "growth_ratio_too_high"
@@ -4286,6 +6718,122 @@ def _mask_exclusion_reason(cleanup_mask: CleanupMask, image_size: tuple[int, int
         if allowed_area / max(1, page_area) > MAX_ALLOWED_PAGE_RATIO:
             return "allowed_area_too_broad"
     return ""
+
+
+def _runtime_structural_mask_error(cleanup_mask: CleanupMask) -> str:
+    """Return only hard contract errors that prevent executing an accepted mask.
+
+    Risk signals such as artifact risk, growth ratio, broad bbox, and allowed
+    area size are proof/audit concerns for an already accepted CleanupMask.
+    They must not turn a formal cleanup obligation into a hidden partition or a
+    dropped runtime task before the exact mask reaches the backend.
+    """
+
+    if cleanup_mask.protected:
+        return cleanup_mask.protection_reason or "mask_protected"
+    protected_conflict = _mask_protected_conflict_reason(cleanup_mask)
+    if protected_conflict:
+        return protected_conflict
+    visual_scope = _normalise_cleanup_visual_scope(cleanup_mask.visual_scope)
+    if not visual_scope:
+        return "visual_scope_missing"
+    if visual_scope not in VALID_CLEANUP_VISUAL_SCOPES:
+        return f"unsupported_visual_scope_{_safe_reason_token(visual_scope)}"
+    if not str(cleanup_mask.cleanup_job_id or "").strip():
+        return "cleanup_job_id_missing"
+    component_projected = _is_component_projected_cleanup_mask(cleanup_mask, visual_scope)
+    rejection_reason = str(getattr(cleanup_mask, "rejection_reason", "") or "")
+    if rejection_reason and not _is_component_projection_ready_audit_rejection(cleanup_mask, rejection_reason):
+        return f"mask_rejected_{rejection_reason}"
+    consumed_source_ids = _unique_texts(cleanup_mask.consumed_source_glyph_mask_ids)
+    missing_source_ids = _unique_texts(cleanup_mask.missing_source_glyph_mask_ids)
+    if missing_source_ids and not component_projected:
+        return "missing_required_source_glyph_evidence"
+    if not consumed_source_ids and not component_projected:
+        return "consumed_source_glyph_evidence_missing"
+    if visual_scope == "source_glyph_local" and len(consumed_source_ids) != 1 and not component_projected:
+        return "source_glyph_local_membership_count_mismatch"
+    if visual_scope == "source_glyph_union" and len(consumed_source_ids) <= 1 and not component_projected:
+        return "source_glyph_union_membership_count_mismatch"
+    if visual_scope == "source_glyph_union_partition" and len(consumed_source_ids) <= 1 and not component_projected:
+        return "source_glyph_union_partition_membership_count_mismatch"
+    if cleanup_mask.foreground_mask is None or cleanup_mask.erase_mask is None:
+        return "mask_raw_arrays_missing"
+    if not _valid_bbox(cleanup_mask.allowed_area):
+        return "allowed_area_missing_or_invalid"
+    if not _valid_bbox(cleanup_mask.erase_mask_bbox):
+        return "erase_mask_bbox_missing_or_invalid"
+    if bool(getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)):
+        return "sourceglyph_executable_influence_detected"
+    if bool(getattr(cleanup_mask, "dense_contract_override_detected", False)):
+        return "dense_contract_override_detected"
+    if bool(getattr(cleanup_mask, "ready_but_sparse_violation", False)):
+        return "ready_but_sparse_violation"
+    if int(cleanup_mask.erase_mask_pixels or 0) <= 0:
+        return "erase_mask_empty"
+    return ""
+
+
+def _accepted_executable_cleanup_mask(cleanup_mask: CleanupMask) -> bool:
+    if cleanup_mask is None:
+        return False
+    if bool(getattr(cleanup_mask, "protected", False)):
+        return False
+    if getattr(cleanup_mask, "foreground_mask", None) is None or getattr(cleanup_mask, "erase_mask", None) is None:
+        return False
+    if int(getattr(cleanup_mask, "foreground_mask_pixels", 0) or 0) <= 0:
+        return False
+    if int(getattr(cleanup_mask, "erase_mask_pixels", 0) or 0) <= 0:
+        return False
+    projection_state = str(getattr(cleanup_mask, "projection_quality_state", "") or "")
+    if projection_state and projection_state != "projection_ready":
+        return False
+    readiness_state = str(getattr(cleanup_mask, "mask_readiness_state", "") or "")
+    if readiness_state and readiness_state != "mask_ready":
+        return False
+    rejection_reason = str(getattr(cleanup_mask, "rejection_reason", "") or "")
+    if rejection_reason and not _is_component_projection_ready_audit_rejection(cleanup_mask, rejection_reason):
+        return False
+    if bool(getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)):
+        return False
+    if bool(getattr(cleanup_mask, "dense_contract_override_detected", False)):
+        return False
+    if bool(getattr(cleanup_mask, "bbox_executable_foreground_detected", False)):
+        return False
+    if bool(getattr(cleanup_mask, "page_level_executable_foreground_detected", False)):
+        return False
+    return True
+
+
+def _cleanup_mask_non_executable_defect(cleanup_mask: CleanupMask) -> str:
+    if cleanup_mask is None:
+        return "cleanup_mask_missing"
+    if bool(getattr(cleanup_mask, "protected", False)):
+        return getattr(cleanup_mask, "protection_reason", "") or "cleanup_mask_protected"
+    if getattr(cleanup_mask, "foreground_mask", None) is None or getattr(cleanup_mask, "erase_mask", None) is None:
+        return "mask_raw_arrays_missing"
+    if int(getattr(cleanup_mask, "foreground_mask_pixels", 0) or 0) <= 0:
+        return "foreground_mask_empty"
+    if int(getattr(cleanup_mask, "erase_mask_pixels", 0) or 0) <= 0:
+        return "erase_mask_empty"
+    projection_state = str(getattr(cleanup_mask, "projection_quality_state", "") or "")
+    if projection_state and projection_state != "projection_ready":
+        return f"projection_not_ready_{_safe_reason_token(projection_state)}"
+    readiness_state = str(getattr(cleanup_mask, "mask_readiness_state", "") or "")
+    if readiness_state and readiness_state != "mask_ready":
+        return f"mask_not_ready_{_safe_reason_token(readiness_state)}"
+    rejection_reason = str(getattr(cleanup_mask, "rejection_reason", "") or "")
+    if rejection_reason:
+        return f"mask_rejected_{rejection_reason}"
+    if bool(getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)):
+        return "sourceglyph_executable_influence_detected"
+    if bool(getattr(cleanup_mask, "dense_contract_override_detected", False)):
+        return "dense_contract_override_detected"
+    if bool(getattr(cleanup_mask, "bbox_executable_foreground_detected", False)):
+        return "bbox_executable_foreground_detected"
+    if bool(getattr(cleanup_mask, "page_level_executable_foreground_detected", False)):
+        return "page_level_executable_foreground_detected"
+    return "cleanup_mask_not_executable"
 
 
 def _is_artifact_risk_partition_reason(reason: str) -> bool:
@@ -4329,6 +6877,14 @@ def _safe_reason_token(value: Any) -> str:
     text = str(value or "").strip().lower()
     output = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in text)
     return output.strip("_") or "unknown"
+
+
+def _short_artifact_stem(*parts: Any) -> str:
+    tokens = [_safe_id(part) for part in parts if str(part or "").strip()]
+    raw = "_".join(tokens) or "cleanup_artifact"
+    digest = hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:10]
+    compact = "_".join(token[:24].strip("_") for token in tokens if token) or "cleanup_artifact"
+    return f"{compact[:80].strip('_')}_{digest}"
 
 
 def _mask_protected_conflict_reason(cleanup_mask: CleanupMask) -> str:
@@ -4462,9 +7018,104 @@ def _source_residual_mask(source_gray: Any, cleaned_gray: Any, foreground: Any) 
 
 
 def _dark_source_residual_mask(source_gray: Any, cleaned_gray: Any, foreground: Any) -> Any:
+    diff = np.abs(source_gray.astype(np.int16) - cleaned_gray.astype(np.int16))
     source_dark = source_gray < 210
     cleaned_still_dark = cleaned_gray < 230
-    return (foreground > 0) & source_dark & cleaned_still_dark
+    source_like = diff < 45
+    return (foreground > 0) & source_dark & cleaned_still_dark & source_like
+
+
+def _source_light_foreground_context(source_gray: Any, foreground: Any) -> dict[str, Any]:
+    """Identify when unchanged light foreground pixels are likely light text, not paper."""
+    if source_gray is None or foreground is None:
+        return {
+            "dark_context": False,
+            "median_luma": None,
+            "dark_ratio": 0.0,
+        }
+    try:
+        foreground_bool = np.asarray(foreground) > 0
+        if not np.any(foreground_bool):
+            return {
+                "dark_context": False,
+                "median_luma": None,
+                "dark_ratio": 0.0,
+            }
+        if cv2 is not None:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            context = cv2.dilate(foreground_bool.astype(np.uint8), kernel, iterations=2) > 0
+            context = context & ~foreground_bool
+        else:
+            context = np.zeros_like(foreground_bool, dtype=bool)
+        if not np.any(context):
+            return {
+                "dark_context": False,
+                "median_luma": None,
+                "dark_ratio": 0.0,
+            }
+        values = np.asarray(source_gray)[context]
+        if values.size <= 0:
+            return {
+                "dark_context": False,
+                "median_luma": None,
+                "dark_ratio": 0.0,
+            }
+        median_luma = float(np.median(values))
+        dark_ratio = float(np.count_nonzero(values < 170) / max(1, values.size))
+        return {
+            "dark_context": bool(median_luma < 180 and dark_ratio > 0.15),
+            "median_luma": round(median_luma, 3),
+            "dark_ratio": round(dark_ratio, 4),
+        }
+    except Exception:
+        return {
+            "dark_context": False,
+            "median_luma": None,
+            "dark_ratio": 0.0,
+        }
+
+
+def _outside_accepted_mask_boundary_residual_mask(
+    *,
+    source_gray: Any,
+    cleaned_gray: Any,
+    foreground: Any,
+    erase: Any,
+    allowed: Any,
+    source_light_foreground_ratio: float,
+) -> Any:
+    if np is None or source_gray is None or cleaned_gray is None:
+        return np.zeros((0, 0), dtype=bool) if np is not None else []
+    try:
+        source_arr = np.asarray(source_gray)
+        cleaned_arr = np.asarray(cleaned_gray)
+        foreground_bool = np.asarray(foreground) > 0
+        erase_bool = np.asarray(erase) > 0
+        allowed_bool = np.asarray(allowed) > 0
+    except Exception:
+        return np.zeros(np.asarray(source_gray).shape[:2], dtype=bool)
+    if (
+        source_arr.ndim != 2
+        or cleaned_arr.shape != source_arr.shape
+        or foreground_bool.shape != source_arr.shape
+        or erase_bool.shape != source_arr.shape
+        or allowed_bool.shape != source_arr.shape
+        or not np.any(foreground_bool)
+        or not np.any(erase_bool)
+    ):
+        return np.zeros(source_arr.shape[:2], dtype=bool)
+    if source_light_foreground_ratio < 0.25:
+        return np.zeros(source_arr.shape[:2], dtype=bool)
+    if cv2 is not None:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        near_foreground = cv2.dilate(foreground_bool.astype(np.uint8), kernel, iterations=2) > 0
+        boundary = near_foreground & ~erase_bool & allowed_bool
+    else:
+        boundary = np.zeros(source_arr.shape[:2], dtype=bool)
+    if not np.any(boundary):
+        return np.zeros(source_arr.shape[:2], dtype=bool)
+    unchanged = np.abs(cleaned_arr.astype(np.int16) - source_arr.astype(np.int16)) < 45
+    return boundary & (source_arr < 120) & (cleaned_arr < 140) & unchanged
 
 
 def _source_erasure_box_residual_mask(source_gray: Any, cleaned_gray: Any, bbox: Sequence[int]) -> Any:
@@ -4507,6 +7158,10 @@ def _write_residual_source_mask(
             return "", "cleanup_artifact_dir_unavailable"
         filename = f"{_safe_id(cleanup_result.cleanup_result_id)}_residual_source_mask.png"
         path = os.path.join(artifact_dir, filename)
+        if len(path) > 240:
+            digest = hashlib.sha1(str(cleanup_result.cleanup_result_id).encode("utf-8")).hexdigest()[:16]
+            filename = f"cres_{digest}_residual_source_mask.png"
+            path = os.path.join(artifact_dir, filename)
         arr = (np.asarray(residual_mask) > 0).astype(np.uint8) * 255
         Image.fromarray(arr, mode="L").save(path)
         return path, ""
@@ -4596,6 +7251,30 @@ def _extract_plans(value: Any) -> list[CleanupPlan]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         return [item for item in value if isinstance(item, CleanupPlan)]
     return []
+
+
+def _plans_by_job_and_mask_id(plans: Sequence[CleanupPlan]) -> dict[tuple[str, str], list[CleanupPlan]]:
+    output: dict[tuple[str, str], list[CleanupPlan]] = {}
+    for plan in plans or []:
+        key = (str(plan.cleanup_job_id), str(plan.cleanup_mask_id))
+        output.setdefault(key, []).append(plan)
+    return output
+
+
+def _plans_by_cleanup_mask_id(plans: Sequence[CleanupPlan]) -> dict[str, list[CleanupPlan]]:
+    output: dict[str, list[CleanupPlan]] = {}
+    for plan in plans or []:
+        output.setdefault(str(plan.cleanup_mask_id), []).append(plan)
+    return output
+
+
+def _select_formal_cleanup_plan(plans: Sequence[CleanupPlan]) -> CleanupPlan | None:
+    for plan in plans or []:
+        if bool((plan.backend_parameters or {}).get("formal_cleanup_plan", False)):
+            return plan
+    for plan in plans or []:
+        return plan
+    return None
 
 
 def _job_base_record(page_id: str, job: CleanupJob) -> dict[str, Any]:

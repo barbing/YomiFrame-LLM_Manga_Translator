@@ -559,6 +559,12 @@ def build_cleanup_masks(
                 image_size=image_size,
                 artifact_risk=artifact_risk,
             )
+            if (
+                not exception_reason
+                and growth_ratio > MAX_ERASE_GROWTH_RATIO
+                and _component_authorized_growth_exception_applies(effective)
+            ):
+                exception_reason = "text_area_component_authorization_map_growth_exception"
             broad_rejection = _broad_mask_rejection(
                 allowed=allowed,
                 erase_bbox=erase_bbox,
@@ -567,7 +573,7 @@ def build_cleanup_masks(
                 image_size=image_size,
                 allow_growth_exception=bool(exception_reason),
             )
-            component_projected = str(effective.audit.get("component_projection_method") or "") == "segmentation_component_ownership_projection"
+            component_projected = _effective_uses_component_projection(effective)
             if broad_rejection and not (component_projected and effective.rejected):
                 rejected_records.append(
                     {
@@ -3212,12 +3218,25 @@ def _effective_erase_from_foreground(
         CleanupClass.SPEECH_COMPLEX_BUBBLE.value,
         CleanupClass.SMALL_REACTION.value,
     }
+    outline_sensitive_text = cleanup_value in {
+        CleanupClass.CAPTION_FLAT_BACKGROUND.value,
+        CleanupClass.CAPTION_DARK_OR_SCREENTONE.value,
+        CleanupClass.TITLE_OR_SIGN.value,
+        CleanupClass.BACKGROUND_ART_TEXT.value,
+        CleanupClass.SIDE_CAPTION_GLYPH_LOCAL.value,
+    }
     if cv2 is not None:
         kernel = np.ones((3, 3), dtype=np.uint8)
-        iterations = 2 if speech_like and int(np.count_nonzero(foreground)) < 1400 else 1
+        iterations = (
+            4
+            if outline_sensitive_text
+            else 2
+            if speech_like and int(np.count_nonzero(foreground)) < 1400
+            else 1
+        )
         erase = cv2.dilate(foreground, kernel, iterations=iterations).astype(np.uint8)
     else:
-        erase = _binary_dilate(foreground, radius=1)
+        erase = _binary_dilate(foreground, radius=2 if outline_sensitive_text else 1)
     bounded_dilation = _clip_mask_to_bbox(erase.astype(np.uint8), allowed)
     return np.maximum(foreground, bounded_dilation).astype(np.uint8)
 
@@ -3491,6 +3510,56 @@ def _caption_flat_small_mask_growth_exception_reason(
         if allowed_area / page_area > MAX_CAPTION_FLAT_SMALL_EXCEPTION_ALLOWED_PAGE_RATIO:
             return ""
     return "caption_flat_small_mask_growth_exception"
+
+
+def _effective_uses_component_projection(effective: _EffectiveMaskBuild) -> bool:
+    audit = effective.audit if isinstance(effective.audit, Mapping) else {}
+    joined = " ".join(
+        str(audit.get(key) or "")
+        for key in (
+            "component_projection_method",
+            "mask_completion_method",
+            "segmentation_binding_method",
+            "clean_mask_authority",
+        )
+    )
+    return (
+        "text_area_component_authorization_map" in joined
+        or "segmentation_component_ownership_projection" in joined
+    )
+
+
+def _component_authorized_growth_exception_applies(effective: _EffectiveMaskBuild) -> bool:
+    """Treat growth as audit/proof risk for upstream-authorized component masks.
+
+    Thin vertical manga text can legitimately need a larger erase halo than the
+    foreground-pixel count suggests. Once TextAreaPlan has explicitly authorized
+    a projection-ready component and CleanupMask has the exact foreground/erase
+    arrays, dropping that component here silently breaks the root cleanup
+    obligation. Broad page/bbox limits still run in _broad_mask_rejection.
+    """
+
+    audit = effective.audit if isinstance(effective.audit, Mapping) else {}
+    if not _effective_uses_component_projection(effective):
+        return False
+    if int(audit.get("protected_component_pixels_removed") or 0) > 0:
+        return False
+    if int(audit.get("ambiguous_component_pixels") or 0) > 0:
+        return False
+    projection_state = str(audit.get("projection_quality_state") or "")
+    if projection_state and projection_state != PROJECTION_READY_STATE:
+        return False
+    readiness_state = str(audit.get("mask_readiness_state") or "")
+    if readiness_state and readiness_state != MASK_READY_STATE:
+        return False
+    authorization = " ".join(
+        str(audit.get(key) or "")
+        for key in (
+            "cleanup_authorization",
+            "semantic_authorization_state",
+        )
+    )
+    return any(state in authorization for state in AUTH_CLEANUP_COMPONENT_STATES)
 
 
 def _allowed_area_rejection(allowed: list[int], image_size: tuple[int, int] | None) -> str:

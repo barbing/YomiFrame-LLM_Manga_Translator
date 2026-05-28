@@ -103,8 +103,59 @@ def clear_model_cache() -> None:
     _load_lama_model.cache_clear()
 
 
-@lru_cache(maxsize=1)
-def _load_lama_model(device: str):
+def _repo_root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def resolve_cleanup_inpaint_model(model_id: str = "dreMaz/AnimeMangaInpainting") -> dict[str, str]:
+    """Resolve the actual local cleanup model used for a requested model id."""
+
+    root = _repo_root()
+    requested = str(model_id or "").strip()
+    if requested and os.path.exists(requested):
+        return {
+            "requested_model_id": requested,
+            "actual_model_name": f"SimpleLama({os.path.basename(requested)})",
+            "actual_model_path": requested,
+        }
+
+    requested_key = requested.lower()
+    candidates: list[tuple[str, str]] = []
+    if any(token in requested_key for token in ("dremaz", "anime", "manga")):
+        candidates.append(
+            (
+                "SimpleLama(anime-manga-big-lama)",
+                os.path.join(root, "models", "inpaint", "iopaint", "anime-manga-big-lama.pt"),
+            )
+        )
+    candidates.extend(
+        [
+            (
+                "SimpleLama(big-lama)",
+                os.path.join(root, "models", "inpaint", "simple_lama", "big-lama.pt"),
+            ),
+            (
+                "SimpleLama(big-lama)",
+                os.path.join(root, "models", "lama", "big-lama.pt"),
+            ),
+        ]
+    )
+    for actual_name, path in candidates:
+        if os.path.exists(path):
+            return {
+                "requested_model_id": requested,
+                "actual_model_name": actual_name,
+                "actual_model_path": path,
+            }
+    return {
+        "requested_model_id": requested,
+        "actual_model_name": "SimpleLama(auto-download-big-lama)",
+        "actual_model_path": "",
+    }
+
+
+@lru_cache(maxsize=4)
+def _load_lama_model(device: str, model_path: str = ""):
     """Load the LaMa model for cleanup-owned inpainting."""
 
     import torch
@@ -120,29 +171,22 @@ def _load_lama_model(device: str):
                 "The vendored SimpleLama wrapper could not be imported."
             ) from exc
 
-    app_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    local_path = os.path.join(app_root, "models", "lama", "big-lama.pt")
-    if os.path.exists(local_path):
-        try:
-            hub_dir = torch.hub.get_dir()
-            cache_dir = os.path.join(hub_dir, "checkpoints")
-            os.makedirs(cache_dir, exist_ok=True)
-            cache_path = os.path.join(cache_dir, "big-lama.pt")
-            if not os.path.exists(cache_path):
-                print(f"[Cleanup Inpaint] Copying local model to cache: {cache_path}")
-                import shutil
-
-                shutil.copy2(local_path, cache_path)
-            else:
-                print(f"[Cleanup Inpaint] Found existing system model: {cache_path}")
-        except Exception as exc:
-            print(f"[Cleanup Inpaint] Failed to copy local model: {exc}")
-
-    print(f"[Cleanup Inpaint] Loading SimpleLama model on {device}")
-    _page014_timeout_checkpoint("cleanup_inpaint_model", "load_start", device=device)
-    lama = SimpleLama(device=torch.device(device))
+    print(f"[Cleanup Inpaint] Loading SimpleLama model on {device}: {model_path or 'auto'}")
+    _page014_timeout_checkpoint("cleanup_inpaint_model", "load_start", device=device, model_path=model_path)
+    old_model_path = os.environ.get("LAMA_MODEL")
+    if model_path and os.path.exists(model_path):
+        os.environ["LAMA_MODEL"] = model_path
+    elif "LAMA_MODEL" in os.environ:
+        os.environ.pop("LAMA_MODEL", None)
+    try:
+        lama = SimpleLama(device=torch.device(device))
+    finally:
+        if old_model_path is None:
+            os.environ.pop("LAMA_MODEL", None)
+        else:
+            os.environ["LAMA_MODEL"] = old_model_path
     print("[Cleanup Inpaint] SimpleLama model loaded successfully")
-    _page014_timeout_checkpoint("cleanup_inpaint_model", "load_end", device=device)
+    _page014_timeout_checkpoint("cleanup_inpaint_model", "load_end", device=device, model_path=model_path)
     return lama
 
 
@@ -181,9 +225,11 @@ def ai_inpaint_cleanup(
     dilated_mask = cv2.dilate(mask, kernel, iterations=2)
 
     device = "cuda" if use_gpu else "cpu"
+    model_info = resolve_cleanup_inpaint_model(model_id)
+    actual_model_path = model_info.get("actual_model_path", "")
 
     try:
-        lama = _load_lama_model(device)
+        lama = _load_lama_model(device, actual_model_path)
     except Exception as exc:
         print(f"[Cleanup Inpaint] Failed to load LaMa model: {exc}")
         raise
