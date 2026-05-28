@@ -8,6 +8,7 @@ COMIC_TEXT_DETECTOR_CPU = "https://github.com/zyddnys/manga-image-translator/rel
 SAKURA_GGUF = "https://huggingface.co/SakuraLLM/Sakura-14B-Qwen3-v1.5-GGUF/resolve/main/sakura-14b-qwen3-v1.5-q6k.gguf"
 QWEN_GGUF = "https://huggingface.co/Qwen/Qwen3-14B-GGUF/resolve/main/Qwen3-14B-Q6_K.gguf"
 BIG_LAMA = "https://github.com/enesmsahin/simple-lama-inpainting/releases/download/v0.1.0/big-lama.pt"
+IOPAINT_ANIME_MANGA_BIG_LAMA = "iopaint/anime-manga-big-lama"
 MANGA_OCR_BASE_URL = "https://huggingface.co/kha-white/manga-ocr-base/resolve/main/"
 MANGA_OCR_FILES = [
     "config.json",
@@ -35,10 +36,9 @@ class AppDefaults:
     ocr_engine: str = "MangaOCR"
     filter_strength: str = "normal"
     inpaint_mode: str = "ai"
-    # Available models: 
-    # - "dreMaz/AnimeMangaInpainting" (default, anime-focused)
-    # - "runwayml/stable-diffusion-inpainting" (general, slower)
-    inpaint_model: str = "dreMaz/AnimeMangaInpainting"
+    # Cleanup inpainting uses one fixed local model. The UI value is preserved
+    # for compatibility/provenance only; cleanup does not load arbitrary paths.
+    inpaint_model: str = IOPAINT_ANIME_MANGA_BIG_LAMA
     translator_backend: str = "GGUF"
     gguf_model_path: str = ""
     gguf_prompt_style: str = "sakura"

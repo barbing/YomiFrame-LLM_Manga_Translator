@@ -11,10 +11,6 @@ from typing import Any, Dict, List, Tuple
 
 from app.pipeline.debug_artifacts import add_count, add_timing, debug_artifact_level, mark_render_region, mask_stats
 from app.pipeline import cleanup_execution
-from app.pipeline.cleanup_planning import (
-    build_inconclusive_pilot_runtime_result,
-    run_caption_flat_background_pilot,
-)
 from app.pipeline import source_glyph_masks as source_glyph_mask_stage
 
 _TOP_ROW_CAPTION_REASONS = {
@@ -1030,7 +1026,7 @@ def render_translations(
     font_name: str,
     inpaint_mode: str = "fast",
     use_gpu: bool = True,
-    model_id: str = "dreMaz/AnimeMangaInpainting",
+    model_id: str = cleanup_execution.FIXED_CLEANUP_INPAINT_MODEL_ID,
     debug_context: dict | None = None,
     source_glyph_masks: object | None = None,
     cleanup_pilot_contracts: object | None = None,
@@ -1039,6 +1035,15 @@ def render_translations(
 ) -> None:
     if Image is None:
         raise RuntimeError("Pillow is not installed.")
+    if cleanup_pilot_contracts is not None:
+        if debug_context is not None:
+            debug_context["cleanup_pilot_status"] = {
+                "version": "cleanup_pilot_renderer_disabled",
+                "renderer_consumed": False,
+                "status": "disabled",
+                "failure_reason": "renderer_cleanup_pilot_disabled_pre_render_cleanup_required",
+            }
+        raise RuntimeError("renderer cleanup pilot execution is disabled; cleanup must be completed pre-render")
     micro_token = _renderer_micro_begin(debug_context, perf_telemetry_context)
     font_cache_token = _renderer_font_cache_begin()
     with _renderer_context_cleanup(micro_token, font_cache_token), Image.open(image_path) as img:
@@ -1096,7 +1101,7 @@ def render_translations(
         pilot_region_status_by_id: dict[str, dict[str, object]] = {}
         pilot_passed_region_ids: set[str] = set()
         pilot_blocked_region_ids: set[str] = set()
-        if cleanup_pilot_contracts:
+        if False and cleanup_pilot_contracts:
             try:
                 pilot_plan_contracts = _pilot_bundle_value(cleanup_pilot_contracts, "plan_contracts")
                 pilot_mask_contracts = _pilot_bundle_value(cleanup_pilot_contracts, "mask_contracts")
@@ -5793,7 +5798,7 @@ def _apply_text_removal(
     text_mask,
     mode: str,
     use_gpu: bool,
-    model_id: str = "dreMaz/AnimeMangaInpainting",
+    model_id: str = cleanup_execution.FIXED_CLEANUP_INPAINT_MODEL_ID,
     debug_info: dict | None = None,
 ):
     result = cleanup_execution.apply_text_removal(
@@ -5812,7 +5817,7 @@ def _apply_local_text_removal(
     local_mask,
     mode: str,
     use_gpu: bool,
-    model_id: str = "dreMaz/AnimeMangaInpainting",
+    model_id: str = cleanup_execution.FIXED_CLEANUP_INPAINT_MODEL_ID,
     cleanup_tag: str | None = None,
     debug_info: dict | None = None,
 ):

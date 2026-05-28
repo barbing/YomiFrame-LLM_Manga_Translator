@@ -386,7 +386,6 @@ class PipelineWorker(QtCore.QThread):
         from app.translate.ollama_client import OllamaClient
         from app.render.renderer import render_translations
         from app.pipeline.cleanup_contracts import build_cleanup_job_candidates
-        from app.pipeline.cleanup_dense_masks import build_cleanup_dense_masks
         from app.pipeline.cleanup_masks import build_cleanup_masks
         from app.pipeline.cleanup_planning import (
             build_cleanup_plans,
@@ -837,29 +836,7 @@ class PipelineWorker(QtCore.QThread):
                         rejected_count=len(getattr(cleanup_mask_contract_result, "rejected_records", []) or []),
                         elapsed_ms=round((time.time() - cleanup_mask_start) * 1000.0, 3),
                     )
-                    cleanup_dense_start = time.time()
-                    _page014_timeout_checkpoint(
-                        "cleanup_dense_mask_build",
-                        "start",
-                        page_id=page_id,
-                        job_count=len(getattr(cleanup_job_contract_result, "jobs", []) or []),
-                        mask_count=len(getattr(cleanup_mask_contract_result, "masks", []) or []),
-                    )
-                    cleanup_dense_mask_contract_result = build_cleanup_dense_masks(
-                        page_id=page_id,
-                        cleanup_jobs=cleanup_job_contract_result.jobs,
-                        cleanup_masks=cleanup_mask_contract_result,
-                        source_glyph_masks=source_glyph_mask_result,
-                        source_image_path=source_path,
-                        image_size=source_image_size,
-                    )
-                    _page014_timeout_checkpoint(
-                        "cleanup_dense_mask_build",
-                        "end",
-                        page_id=page_id,
-                        mask_count=len(getattr(cleanup_dense_mask_contract_result, "masks", []) or []),
-                        elapsed_ms=round((time.time() - cleanup_dense_start) * 1000.0, 3),
-                    )
+                    cleanup_dense_mask_contract_result = None
                     render_eligibility_start = time.time()
                     _page014_timeout_checkpoint("render_eligibility_build", "start", page_id=page_id)
                     render_eligibility_contract_result = build_render_eligibility_decisions(
@@ -868,7 +845,7 @@ class PipelineWorker(QtCore.QThread):
                         source_glyph_masks=source_glyph_mask_result,
                         cleanup_job_contracts=cleanup_job_contract_result,
                         cleanup_mask_contracts=cleanup_mask_contract_result,
-                        cleanup_dense_mask_contracts=cleanup_dense_mask_contract_result,
+                        cleanup_dense_mask_contracts=None,
                         source_image_path=source_path,
                         image_size=source_image_size,
                     )
@@ -1132,7 +1109,13 @@ class PipelineWorker(QtCore.QThread):
                         else:
                             debug_context["cleanup_job_contracts"] = cleanup_job_contract_result.to_audit_dict()
                             debug_context["cleanup_mask_contracts"] = cleanup_mask_contract_result.to_audit_dict()
-                            debug_context["cleanup_dense_mask_contracts"] = cleanup_dense_mask_contract_result.to_audit_dict()
+                            debug_context["cleanup_dense_mask_contracts"] = {
+                                "version": "cleanup_dense_masks_diagnostic_only",
+                                "page_id": page_id,
+                                "renderer_consumed": False,
+                                "production_execution_disabled": True,
+                                "summary": {"mask_count": 0, "renderer_consumed": False},
+                            }
                             debug_context["cleanup_dense_contract_override_detected"] = False
                             debug_context["render_eligibility_contracts"] = render_eligibility_contract_result.to_audit_dict()
                             debug_context["cleanup_plan_contracts"] = cleanup_plan_contract_result.to_audit_dict()
@@ -1141,7 +1124,7 @@ class PipelineWorker(QtCore.QThread):
                         set_timing(debug_context, "render_eligibility_contract_time", time.time() - render_eligibility_start)
                         set_count(debug_context, "cleanup_job_contract_count", len(cleanup_job_contract_result.jobs))
                         set_count(debug_context, "cleanup_mask_contract_count", len(cleanup_mask_contract_result.masks))
-                        set_count(debug_context, "cleanup_dense_mask_contract_count", len(cleanup_dense_mask_contract_result.masks))
+                        set_count(debug_context, "cleanup_dense_mask_contract_count", 0)
                         set_count(debug_context, "render_eligibility_suppressed_count", len(render_eligibility_contract_result.suppressed_records))
                         set_count(debug_context, "cleanup_plan_contract_count", len(cleanup_plan_contract_result.plans))
                         set_count(debug_context, "cleanup_mask_rejected_count", len(cleanup_mask_contract_result.rejected_records))
@@ -1231,7 +1214,7 @@ class PipelineWorker(QtCore.QThread):
                         model_id=self._settings.inpaint_model_id,
                         debug_context=debug_context if debug_artifacts_enabled else None,
                         source_glyph_masks=source_glyph_mask_result,
-                        cleanup_pilot_contracts=cleanup_pilot_contract_bundle,
+                        cleanup_pilot_contracts=None,
                         render_eligibility=render_eligibility_contract_result,
                         perf_telemetry_context=debug_context if perf_telemetry_is_enabled else None,
                     )

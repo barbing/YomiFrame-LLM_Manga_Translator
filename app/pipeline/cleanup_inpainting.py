@@ -12,10 +12,23 @@ import os
 import time
 from functools import lru_cache
 
+from app.config.defaults import IOPAINT_ANIME_MANGA_BIG_LAMA
+
 try:
     from PIL import Image
 except ImportError:  # pragma: no cover - optional dependency
     Image = None
+
+
+FIXED_CLEANUP_INPAINT_MODEL_ID = IOPAINT_ANIME_MANGA_BIG_LAMA
+FIXED_CLEANUP_INPAINT_MODEL_NAME = "SimpleLama(iopaint/anime-manga-big-lama)"
+FIXED_CLEANUP_INPAINT_MODEL_RELATIVE_PATH = (
+    "models",
+    "inpaint",
+    "iopaint",
+    "anime-manga-big-lama.pt",
+)
+FIXED_CLEANUP_INPAINT_SELECTION_POLICY = "fixed_cleanup_iopaint_model"
 
 
 def _page014_timeout_diag_enabled() -> bool:
@@ -107,50 +120,26 @@ def _repo_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def resolve_cleanup_inpaint_model(model_id: str = "dreMaz/AnimeMangaInpainting") -> dict[str, str]:
-    """Resolve the actual local cleanup model used for a requested model id."""
+def resolve_cleanup_inpaint_model(model_id: str = FIXED_CLEANUP_INPAINT_MODEL_ID) -> dict[str, str]:
+    """Resolve the one authorized local cleanup model.
+
+    ``model_id`` is retained only as requested-model provenance. Cleanup
+    inpainting is intentionally fixed to the vetted iopaint TorchScript model
+    so UI/config strings, absolute paths, or legacy candidate IDs cannot switch
+    the production cleanup backend.
+    """
 
     root = _repo_root()
     requested = str(model_id or "").strip()
-    if requested and os.path.exists(requested):
-        return {
-            "requested_model_id": requested,
-            "actual_model_name": f"SimpleLama({os.path.basename(requested)})",
-            "actual_model_path": requested,
-        }
-
-    requested_key = requested.lower()
-    candidates: list[tuple[str, str]] = []
-    if any(token in requested_key for token in ("dremaz", "anime", "manga")):
-        candidates.append(
-            (
-                "SimpleLama(anime-manga-big-lama)",
-                os.path.join(root, "models", "inpaint", "iopaint", "anime-manga-big-lama.pt"),
-            )
-        )
-    candidates.extend(
-        [
-            (
-                "SimpleLama(big-lama)",
-                os.path.join(root, "models", "inpaint", "simple_lama", "big-lama.pt"),
-            ),
-            (
-                "SimpleLama(big-lama)",
-                os.path.join(root, "models", "lama", "big-lama.pt"),
-            ),
-        ]
-    )
-    for actual_name, path in candidates:
-        if os.path.exists(path):
-            return {
-                "requested_model_id": requested,
-                "actual_model_name": actual_name,
-                "actual_model_path": path,
-            }
+    fixed_path = os.path.join(root, *FIXED_CLEANUP_INPAINT_MODEL_RELATIVE_PATH)
     return {
         "requested_model_id": requested,
-        "actual_model_name": "SimpleLama(auto-download-big-lama)",
-        "actual_model_path": "",
+        "configured_model_id": FIXED_CLEANUP_INPAINT_MODEL_ID,
+        "selection_policy": FIXED_CLEANUP_INPAINT_SELECTION_POLICY,
+        "actual_model_name": FIXED_CLEANUP_INPAINT_MODEL_NAME,
+        "actual_model_path": fixed_path,
+        "model_available": os.path.exists(fixed_path),
+        "ignored_requested_model": requested not in {"", FIXED_CLEANUP_INPAINT_MODEL_ID},
     }
 
 
@@ -171,13 +160,15 @@ def _load_lama_model(device: str, model_path: str = ""):
                 "The vendored SimpleLama wrapper could not be imported."
             ) from exc
 
-    print(f"[Cleanup Inpaint] Loading SimpleLama model on {device}: {model_path or 'auto'}")
+    if not model_path:
+        raise RuntimeError("fixed cleanup inpaint model path required")
+    if not os.path.exists(model_path):
+        raise RuntimeError(f"fixed cleanup inpaint model missing: {model_path}")
+
+    print(f"[Cleanup Inpaint] Loading SimpleLama model on {device}: {model_path}")
     _page014_timeout_checkpoint("cleanup_inpaint_model", "load_start", device=device, model_path=model_path)
     old_model_path = os.environ.get("LAMA_MODEL")
-    if model_path and os.path.exists(model_path):
-        os.environ["LAMA_MODEL"] = model_path
-    elif "LAMA_MODEL" in os.environ:
-        os.environ.pop("LAMA_MODEL", None)
+    os.environ["LAMA_MODEL"] = model_path
     try:
         lama = SimpleLama(device=torch.device(device))
     finally:
@@ -194,7 +185,7 @@ def ai_inpaint_cleanup(
     image,
     mask,
     use_gpu: bool = True,
-    model_id: str = "dreMaz/AnimeMangaInpainting",
+    model_id: str = FIXED_CLEANUP_INPAINT_MODEL_ID,
 ):
     """Perform cleanup-owned AI inpainting using LaMa."""
 
@@ -299,7 +290,7 @@ def ai_inpaint(
     image,
     mask,
     use_gpu: bool = True,
-    model_id: str = "dreMaz/AnimeMangaInpainting",
+    model_id: str = FIXED_CLEANUP_INPAINT_MODEL_ID,
 ):
     """Compatibility alias for cleanup-owned callers."""
 

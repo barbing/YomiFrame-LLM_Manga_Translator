@@ -473,17 +473,6 @@ def build_cleanup_plans(
                 "owner": "CleanupPlan accounting",
             }
             suppressed_decision = _source_grounding_suppressed_decision(job, render_eligibility_by_region)
-            if suppressed_decision is not None:
-                skipped_records.append(
-                    {
-                        **base_with_mask,
-                        "reason": "render_eligibility_suppressed_source_ungrounded",
-                        "source_grounding_status": "suppressed_source_ungrounded",
-                        "source_grounding_failure_reason": _decision_value(suppressed_decision, "reason"),
-                        "legacy_renderer_behavior_preserved": False,
-                    }
-                )
-                continue
             blocked_reason = _job_exclusion_reason(job)
             if blocked_reason:
                 protected_records.append({**base_with_mask, "reason": blocked_reason})
@@ -568,6 +557,12 @@ def build_cleanup_plans(
                     "partition_strategy_required": bool(mask_rejection),
                     "flatness_metrics": flat_metrics,
                     "backend_inventory": backend_inventory,
+                    "render_eligibility_suppressed_source_ungrounded": bool(suppressed_decision is not None),
+                    "render_eligibility_source_grounding_failure_reason": (
+                        _decision_value(suppressed_decision, "reason")
+                        if suppressed_decision is not None
+                        else ""
+                    ),
                 }
             )
             plan = CleanupPlan(
@@ -1013,7 +1008,7 @@ def prove_cleanup_result(
             (baseline_residual_dark_pixels - residual_dark_pixels)
             / max(1, baseline_residual_dark_pixels)
         )
-        model_inpaint_source_text_cleared = (
+        model_inpaint_source_text_clearance_candidate = (
             model_backend_executed
             and model_clearance_cleanup_class
             and bool(cleanup_result.pixel_changed)
@@ -1026,11 +1021,8 @@ def prove_cleanup_result(
             and changed_outside_allowed_ratio <= PROOF_CHANGED_OUTSIDE_ALLOWED_RATIO
             and collateral_ratio <= PROOF_COLLATERAL_INSIDE_ALLOWED_RATIO
         )
-        if model_inpaint_source_text_cleared:
-            dark_source_residual_remaining = False
-            light_context_dark_shadow_remaining = False
-            light_source_residual_remaining = False
-            cleaned_light_source_residual_remaining = False
+        # Model execution/progress is audit evidence only. It must not override
+        # executable foreground residual proof when source-like pixels remain.
         executable_residual_mask = residual_dark | light_context_dark_shadow_residual
         if light_source_residual_remaining or cleaned_light_source_residual_remaining:
             executable_residual_mask = residual_dark | (legacy_residual & source_light_foreground)
@@ -1074,7 +1066,16 @@ def prove_cleanup_result(
             ),
             "model_backend_executed": bool(model_backend_executed),
             "model_clearance_cleanup_class": bool(model_clearance_cleanup_class),
-            "model_inpaint_source_text_cleared": bool(model_inpaint_source_text_cleared),
+            "model_inpaint_source_text_clearance_candidate": bool(
+                model_inpaint_source_text_clearance_candidate
+            ),
+            "model_inpaint_source_text_cleared": bool(
+                not dark_source_residual_remaining
+                and not light_context_dark_shadow_remaining
+                and not light_source_residual_remaining
+                and not cleaned_light_source_residual_remaining
+            ),
+            "model_inpaint_clearance_override_disabled": True,
             "model_changed_foreground_pixels": changed_foreground_pixels,
             "model_changed_foreground_ratio": round(changed_foreground_ratio, 4),
             "model_residual_dark_reduction_ratio": round(residual_dark_reduction_ratio, 4),
@@ -1615,31 +1616,14 @@ def run_cleanup_runtime_contract(
         try:
             suppressed_decision = _source_grounding_suppressed_decision(job, render_eligibility_by_region)
             if suppressed_decision is not None:
-                contract_error = _contract_error_for_reason(
-                    "render_eligibility_suppressed_source_ungrounded"
-                )
-                _page014_timeout_checkpoint(
-                    "cleanup_runtime_job",
-                    "contract_error",
-                    page_id=page_id,
-                    cleanup_job_id=str(job.cleanup_job_id),
-                    region_id=target_region_ids[0] if target_region_ids else "",
-                    reason="render_eligibility_suppressed_source_ungrounded",
-                    elapsed_ms=round((time.time() - job_started) * 1000.0, 3),
-                )
-                status_records.append(
-                    {
-                        **base_record,
-                        "runtime_status": "contract_error",
-                        "failure_reason": contract_error,
-                        "cleanup_outcome_state": contract_error,
-                        "contract_error_original_reason": "render_eligibility_suppressed_source_ungrounded",
-                        "source_grounding_status": "suppressed_source_ungrounded",
-                        "render_consumption_decision_if_consumed": "block_future_renderer_consumption",
-            "renderer_consumed": False,
-        }
-                )
-                continue
+                base_record = {
+                    **base_record,
+                    "render_eligibility_suppressed_source_ungrounded": True,
+                    "render_eligibility_source_grounding_failure_reason": _decision_value(
+                        suppressed_decision,
+                        "reason",
+                    ),
+                }
             if planned_runtime_class is None:
                 contract_error = _contract_error_for_reason(
                     "runtime_cleanup_class_not_executable"
@@ -2163,15 +2147,13 @@ def commit_cleanup_runtime_results_to_working_image(
                     entry["failure_reason"] = root_failure
                     break
                 try:
+                    accepted_commit_mask = _cleanup_result_commit_mask(cleanup_result, source_np.shape[:2])
                     committed_pixels, commit_mask = _commit_runtime_result_pixels(
                         working_np=root_working_np,
                         source_np=source_np,
                         cleaned_image=cleaned_image,
                         operation_bbox=cleanup_result.operation_bbox,
-                        accepted_mask=_load_binary_mask_ref(
-                            cleanup_result.mask_ref,
-                            source_np.shape[:2],
-                        ),
+                        accepted_mask=accepted_commit_mask,
                     )
                 except Exception as exc:
                     errors.append(f"{region_id}:{type(exc).__name__}: {exc}")
@@ -2198,6 +2180,12 @@ def commit_cleanup_runtime_results_to_working_image(
                         "committed_pixel_count": committed_pixels,
                         "commit_mask_pixels": committed_cleanup_mask_pixels,
                         "committed_cleanup_mask_pixels": committed_cleanup_mask_pixels,
+                        "accepted_erase_mask_hash": str(
+                            (cleanup_result.backend_parameters or {}).get("input_mask_hash")
+                            or cleanup_result.input_mask_hash
+                            or ""
+                        ),
+                        "committed_mask_hash": _hash_mask(commit_mask),
                         "owned_segmentation_to_commit_ratio": owned_segmentation_to_commit_ratio,
                         "failure_reason": "passed",
                         "cleanup_commit_quality": (
@@ -2607,6 +2595,13 @@ def _load_cleanup_image(path: str | None) -> Any | None:
         return None
 
 
+def _cleanup_result_commit_mask(cleanup_result: CleanupResult, shape: tuple[int, int] | Sequence[int]) -> Any | None:
+    in_memory = _binary_mask(getattr(cleanup_result, "commit_mask", None), shape)
+    if in_memory is not None and np is not None and np.any(in_memory > 0):
+        return in_memory
+    return _load_binary_mask_ref(cleanup_result.mask_ref, shape)
+
+
 def _commit_runtime_result_pixels(
     *,
     working_np: Any,
@@ -2951,6 +2946,7 @@ def execute_cleanup_runtime_plan(
         runtime_ms=runtime_ms,
         fallback_status=execution_status,
         errors=list(execution.errors or []),
+        commit_mask=cleanup_mask.erase_mask,
         cleaned_image=cleaned_image,
         cleaned_crop=execution.cleaned_image,
     )

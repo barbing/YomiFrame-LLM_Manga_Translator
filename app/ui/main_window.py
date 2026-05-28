@@ -1166,9 +1166,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.inpaint_mode.setCurrentText(self._defaults.inpaint_mode)
         layout.addRow("Inpainting", self.inpaint_mode)
         
-        # New: AI Model ID - read from defaults
+        # Cleanup inpainting is fixed; this field is provenance/status only.
         self.inpaint_model_id = QtWidgets.QLineEdit(self._defaults.inpaint_model)
-        layout.addRow("AI Model ID", self.inpaint_model_id)
+        self.inpaint_model_id.setReadOnly(True)
+        layout.addRow("AI Model (fixed)", self.inpaint_model_id)
         
         return group
 

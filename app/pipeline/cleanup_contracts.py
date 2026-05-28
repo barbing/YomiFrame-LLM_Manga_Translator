@@ -347,11 +347,12 @@ class CleanupResult:
     errors: list[str] = field(default_factory=list)
     cleaned_image_ref: str | None = None
     cleaned_crop_ref: str | None = None
+    commit_mask: Any = field(default=None, repr=False, compare=False)
     cleaned_image: Any = field(default=None, repr=False, compare=False)
     cleaned_crop: Any = field(default=None, repr=False, compare=False)
 
     def to_audit_dict(self) -> dict[str, Any]:
-        return _dataclass_audit_dict(self, omit={"cleaned_image", "cleaned_crop"})
+        return _dataclass_audit_dict(self, omit={"commit_mask", "cleaned_image", "cleaned_crop"})
 
 
 @dataclass(frozen=True)

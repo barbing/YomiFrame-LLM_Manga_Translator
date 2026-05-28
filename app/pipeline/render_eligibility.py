@@ -807,9 +807,11 @@ def _mask_records_by_region(
                 job_to_regions.setdefault(job_id, []).append(region_id)
 
     output: dict[str, list[dict[str, Any]]] = {}
+    # Dense masks are diagnostic only. Production render eligibility may consume
+    # accepted CleanupMask records, but dense/local recovery artifacts must not
+    # prove cleanup authority or suppress cleanup obligations.
     for source_name, contracts in (
         ("cleanup_mask_contracts", cleanup_mask_contracts),
-        ("cleanup_dense_mask_contracts", cleanup_dense_mask_contracts),
     ):
         for section in ("masks", "rejected_records", "protected_records", "skipped_records", "errors"):
             for item in _records_from(contracts, section):

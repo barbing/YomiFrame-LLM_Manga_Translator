@@ -26,6 +26,11 @@ except Exception:  # pragma: no cover - optional dependency
     np = None
 
 from app.pipeline.debug_artifacts import mask_stats
+from app.pipeline.cleanup_inpainting import (
+    FIXED_CLEANUP_INPAINT_MODEL_ID,
+    FIXED_CLEANUP_INPAINT_MODEL_RELATIVE_PATH,
+    resolve_cleanup_inpaint_model,
+)
 
 
 def _page014_timeout_diag_enabled() -> bool:
@@ -132,7 +137,7 @@ def apply_text_removal(
     text_mask: Any,
     mode: str,
     use_gpu: bool,
-    model_id: str = "dreMaz/AnimeMangaInpainting",
+    model_id: str = FIXED_CLEANUP_INPAINT_MODEL_ID,
     debug_info: dict | None = None,
 ) -> CleanupExecutionResult:
     started = time.time()
@@ -333,7 +338,7 @@ def apply_local_text_removal(
     local_mask: Any,
     mode: str,
     use_gpu: bool,
-    model_id: str = "dreMaz/AnimeMangaInpainting",
+    model_id: str = FIXED_CLEANUP_INPAINT_MODEL_ID,
     cleanup_tag: str | None = None,
     foreground_mask: Any | None = None,
     debug_info: dict | None = None,
@@ -919,14 +924,14 @@ def _backend_kind_for_name(backend: object) -> str:
     return "heuristic_fill"
 
 
-def _cleanup_inpaint_model_info(model_id: str = "dreMaz/AnimeMangaInpainting") -> dict[str, str]:
+def _cleanup_inpaint_model_info(model_id: str = FIXED_CLEANUP_INPAINT_MODEL_ID) -> dict[str, str]:
     try:
-        from app.pipeline.cleanup_inpainting import resolve_cleanup_inpaint_model
-
         return resolve_cleanup_inpaint_model(model_id)
     except Exception:
         return {
             "requested_model_id": str(model_id or ""),
+            "configured_model_id": FIXED_CLEANUP_INPAINT_MODEL_ID,
+            "selection_policy": "fixed_cleanup_iopaint_model_resolution_error",
             "actual_model_name": "SimpleLama(unknown)",
             "actual_model_path": _cleanup_inpaint_model_path(),
         }
@@ -934,14 +939,7 @@ def _cleanup_inpaint_model_info(model_id: str = "dreMaz/AnimeMangaInpainting") -
 
 def _cleanup_inpaint_model_path() -> str:
     app_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    for local_path in (
-        os.path.join(app_root, "models", "inpaint", "iopaint", "anime-manga-big-lama.pt"),
-        os.path.join(app_root, "models", "inpaint", "simple_lama", "big-lama.pt"),
-        os.path.join(app_root, "models", "lama", "big-lama.pt"),
-    ):
-        if os.path.exists(local_path):
-            return local_path
-    return ""
+    return os.path.join(app_root, *FIXED_CLEANUP_INPAINT_MODEL_RELATIVE_PATH)
 
 
 def _masked_pixels_changed(before, after, mask) -> bool:
