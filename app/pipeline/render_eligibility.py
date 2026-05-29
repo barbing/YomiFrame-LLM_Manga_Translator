@@ -155,7 +155,6 @@ def build_render_eligibility_decisions(
     source_glyph_masks: Any = None,
     cleanup_job_contracts: Any = None,
     cleanup_mask_contracts: Any = None,
-    cleanup_dense_mask_contracts: Any = None,
     source_image_path: str | None = None,
     image_size: tuple[int, int] | None = None,
 ) -> RenderEligibilityResult:
@@ -165,7 +164,6 @@ def build_render_eligibility_decisions(
     cleanup_records_by_region = _cleanup_records_by_region(cleanup_job_contracts)
     mask_records_by_region = _mask_records_by_region(
         cleanup_mask_contracts,
-        cleanup_dense_mask_contracts,
         cleanup_records_by_region,
     )
     decisions: list[RenderEligibilityDecision] = []
@@ -662,8 +660,8 @@ def _hard_contradictions(
             contradictions.append("mislocalized_source_erasure_required")
         else:
             contradictions.append("source_present_cleanup_unproven")
-    if _caption_flat_dense_art_risk(cleanup_records, mask_records):
-        contradictions.append("dense_background_not_flat_or_art_risk")
+    if _caption_flat_cleanup_art_risk(cleanup_records, mask_records):
+        contradictions.append("cleanup_background_not_flat_or_art_risk")
     if _punctuation_only(source_text) and _meaningful_text(translated_text):
         contradictions.append("punctuation_only_source_meaningful_translation")
     if risky_source and not _has_compact_source_glyph_grounding(source_records):
@@ -715,7 +713,7 @@ def _unsafe_cleanup_protected_reason(
     combined = " ".join(
         [
             str(semantic_class or ""),
-            _text_from(audit, region, keys=("cleanup_mode", "cleanup_pilot_class", "cleanup_class")),
+            _text_from(audit, region, keys=("cleanup_mode", "cleanup_class")),
             _text_from(audit, region, keys=("classification_reason", "text_area_route_intent")),
             " ".join(_reason_codes(audit, region)),
             str(_first_present(audit, "source_grounding_status", default="") or ""),
@@ -796,7 +794,6 @@ def _cleanup_records_by_region(cleanup_job_contracts: Any) -> dict[str, list[dic
 
 def _mask_records_by_region(
     cleanup_mask_contracts: Any,
-    cleanup_dense_mask_contracts: Any,
     cleanup_records_by_region: Mapping[str, Sequence[Mapping[str, Any]]],
 ) -> dict[str, list[dict[str, Any]]]:
     job_to_regions: dict[str, list[str]] = {}
@@ -807,9 +804,8 @@ def _mask_records_by_region(
                 job_to_regions.setdefault(job_id, []).append(region_id)
 
     output: dict[str, list[dict[str, Any]]] = {}
-    # Dense masks are diagnostic only. Production render eligibility may consume
-    # accepted CleanupMask records, but dense/local recovery artifacts must not
-    # prove cleanup authority or suppress cleanup obligations.
+    # Production render eligibility consumes accepted CleanupMask records only.
+    # Historical local recovery artifacts are no longer accepted here.
     for source_name, contracts in (
         ("cleanup_mask_contracts", cleanup_mask_contracts),
     ):
@@ -994,13 +990,13 @@ def _risky_caption_background_recovery_target(
     return any(marker in combined for marker in ("caption", "background", "side_caption"))
 
 
-def _caption_flat_dense_art_risk(
+def _caption_flat_cleanup_art_risk(
     cleanup_records: Sequence[Mapping[str, Any]],
     mask_records: Sequence[Mapping[str, Any]],
 ) -> bool:
     classes = _cleanup_classes(cleanup_records, mask_records)
     reasons = _record_reasons(mask_records)
-    return "caption_flat_background" in classes and "dense_background_not_flat_or_art_risk" in reasons
+    return "caption_flat_background" in classes and "cleanup_background_not_flat_or_art_risk" in reasons
 
 
 def _artifact_or_art_risk(
@@ -1082,8 +1078,8 @@ def _suppression_reason(hard_contradictions: Sequence[str]) -> str:
         return "source_present_cleanup_unproven"
     if "punctuation_only_source_meaningful_translation" in hard_contradictions:
         return "punctuation_only_source_meaningful_translation"
-    if "dense_background_not_flat_or_art_risk" in hard_contradictions:
-        return "dense_background_not_flat_or_art_risk"
+    if "cleanup_background_not_flat_or_art_risk" in hard_contradictions:
+        return "cleanup_background_not_flat_or_art_risk"
     if "source_glyph_missing_failed_or_quality_failed" in hard_contradictions:
         return "source_glyph_missing_failed_or_quality_failed"
     if hard_contradictions:

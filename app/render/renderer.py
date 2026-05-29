@@ -1029,21 +1029,11 @@ def render_translations(
     model_id: str = cleanup_execution.FIXED_CLEANUP_INPAINT_MODEL_ID,
     debug_context: dict | None = None,
     source_glyph_masks: object | None = None,
-    cleanup_pilot_contracts: object | None = None,
     render_eligibility: object | None = None,
     perf_telemetry_context: dict | None = None,
 ) -> None:
     if Image is None:
         raise RuntimeError("Pillow is not installed.")
-    if cleanup_pilot_contracts is not None:
-        if debug_context is not None:
-            debug_context["cleanup_pilot_status"] = {
-                "version": "cleanup_pilot_renderer_disabled",
-                "renderer_consumed": False,
-                "status": "disabled",
-                "failure_reason": "renderer_cleanup_pilot_disabled_pre_render_cleanup_required",
-            }
-        raise RuntimeError("renderer cleanup pilot execution is disabled; cleanup must be completed pre-render")
     micro_token = _renderer_micro_begin(debug_context, perf_telemetry_context)
     font_cache_token = _renderer_font_cache_begin()
     with _renderer_context_cleanup(micro_token, font_cache_token), Image.open(image_path) as img:
@@ -1098,124 +1088,6 @@ def render_translations(
         )
         source_glyph_masks_by_region = _source_glyph_masks_by_region(source_glyph_masks)
         render_eligibility_by_region = _render_eligibility_by_region(render_eligibility)
-        pilot_region_status_by_id: dict[str, dict[str, object]] = {}
-        pilot_passed_region_ids: set[str] = set()
-        pilot_blocked_region_ids: set[str] = set()
-        if False and cleanup_pilot_contracts:
-            try:
-                pilot_plan_contracts = _pilot_bundle_value(cleanup_pilot_contracts, "plan_contracts")
-                pilot_mask_contracts = _pilot_bundle_value(cleanup_pilot_contracts, "mask_contracts")
-                pilot_runtime = run_caption_flat_background_pilot(
-                    page_id=str(_pilot_bundle_value(cleanup_pilot_contracts, "page_id") or os.path.splitext(os.path.basename(image_path))[0]),
-                    image=working,
-                    source_image=img,
-                    plan_contracts=pilot_plan_contracts,
-                    mask_contracts=pilot_mask_contracts,
-                    use_gpu=use_gpu,
-                    model_id=model_id,
-                )
-                working = pilot_runtime.cleaned_image
-                if cv2 is not None and np is not None:
-                    img_np = np.array(working)
-                pilot_region_status_by_id = pilot_runtime.region_status_by_id()
-                pilot_passed_region_ids = pilot_runtime.committed_region_ids
-                pilot_blocked_region_ids = pilot_runtime.blocked_region_ids
-                if debug_context is not None:
-                    debug_context["cleanup_result_contracts"] = {
-                        "version": "cleanup_results_phase3_caption_flat_background",
-                        "page_id": debug_context.get("page_id"),
-                        "renderer_consumed": True,
-                        "results": [record.to_audit_dict() for record in pilot_runtime.result_records],
-                        "summary": {"result_count": len(pilot_runtime.result_records)},
-                    }
-                    debug_context["cleanup_proof_contracts"] = {
-                        "version": "cleanup_proofs_phase3_caption_flat_background",
-                        "page_id": debug_context.get("page_id"),
-                        "renderer_consumed": True,
-                        "proofs": [record.to_audit_dict() for record in pilot_runtime.proof_records],
-                        "summary": {"proof_count": len(pilot_runtime.proof_records)},
-                    }
-                    debug_context["cleanup_pilot_status"] = pilot_runtime.to_audit_dict()
-                    for status_record in pilot_runtime.status_records:
-                        for rid in status_record.get("target_region_ids", []):
-                            pilot_status = str(status_record.get("pilot_status") or "")
-                            mark_render_region(
-                                debug_context,
-                                str(rid),
-                                cleanup_pilot_class=status_record.get("cleanup_class"),
-                                cleanup_pilot_status=pilot_status,
-                                cleanup_pilot_failure_class=status_record.get("failure_class"),
-                                cleanup_pilot_plan_id=status_record.get("cleanup_plan_id"),
-                                cleanup_pilot_result_id=status_record.get("cleanup_result_id"),
-                                cleanup_pilot_proof_id=status_record.get("cleanup_proof_id"),
-                                cleanup_pilot_renderer_action=status_record.get("renderer_action"),
-                                cleanup_pilot_cleanup_committed=bool(status_record.get("pilot_cleanup_committed")),
-                                cleanup_pilot_allowed_area=status_record.get("allowed_area"),
-                                cleanup_pilot_erase_mask_bbox=status_record.get("erase_mask_bbox"),
-                                render_suppressed_by_cleanup_proof=bool(status_record.get("render_suppressed_by_cleanup_proof")),
-                                cleanup_applied=True if pilot_status == "passed" else None,
-                                cleanup_mode="caption_flat_background_pilot" if pilot_status == "passed" else None,
-                            )
-            except Exception as exc:
-                message = f"{type(exc).__name__}: {exc}"
-                if debug_context is not None:
-                    try:
-                        pilot_plan_contracts = _pilot_bundle_value(cleanup_pilot_contracts, "plan_contracts")
-                        pilot_runtime = build_inconclusive_pilot_runtime_result(
-                            page_id=str(
-                                _pilot_bundle_value(cleanup_pilot_contracts, "page_id")
-                                or os.path.splitext(os.path.basename(image_path))[0]
-                            ),
-                            image=working,
-                            plan_contracts=pilot_plan_contracts,
-                            detail=message,
-                        )
-                        pilot_region_status_by_id = pilot_runtime.region_status_by_id()
-                        pilot_passed_region_ids = pilot_runtime.committed_region_ids
-                        pilot_blocked_region_ids = pilot_runtime.blocked_region_ids
-                        debug_context["cleanup_result_contracts"] = {
-                            "version": "cleanup_results_phase3_caption_flat_background",
-                            "page_id": debug_context.get("page_id"),
-                            "renderer_consumed": True,
-                            "results": [],
-                            "summary": {"result_count": 0},
-                        }
-                        debug_context["cleanup_proof_contracts"] = {
-                            "version": "cleanup_proofs_phase3_caption_flat_background",
-                            "page_id": debug_context.get("page_id"),
-                            "renderer_consumed": True,
-                            "proofs": [],
-                            "summary": {"proof_count": 0},
-                        }
-                        debug_context["cleanup_pilot_status"] = pilot_runtime.to_audit_dict()
-                        for status_record in pilot_runtime.status_records:
-                            for rid in status_record.get("target_region_ids", []):
-                                mark_render_region(
-                                    debug_context,
-                                    str(rid),
-                                    cleanup_pilot_class=status_record.get("cleanup_class"),
-                                    cleanup_pilot_status=status_record.get("pilot_status"),
-                                    cleanup_pilot_failure_class=status_record.get("failure_class"),
-                                    cleanup_pilot_plan_id=status_record.get("cleanup_plan_id"),
-                                    cleanup_pilot_renderer_action=status_record.get("renderer_action"),
-                                    cleanup_pilot_cleanup_committed=False,
-                                    cleanup_pilot_allowed_area=status_record.get("allowed_area"),
-                                    cleanup_pilot_erase_mask_bbox=status_record.get("erase_mask_bbox"),
-                                    render_suppressed_by_cleanup_proof=True,
-                                    cleanup_applied=False,
-                                )
-                    except Exception as status_exc:
-                        debug_context["cleanup_pilot_status"] = {
-                            "version": "cleanup_pilot_phase3_caption_flat_background",
-                            "renderer_consumed": True,
-                            "errors": [message, f"{type(status_exc).__name__}: {status_exc}"],
-                            "summary": {
-                                "status_count": 0,
-                                "passed_count": 0,
-                                "failed_count": 0,
-                                "inconclusive_count": 1,
-                            },
-                        }
 
         mask_generation_start = time.time()
         renderer_region_loop_start = time.time()
@@ -1238,22 +1110,7 @@ def render_translations(
                     cleanup_applied=False,
                 )
                 continue
-            pilot_region_status = pilot_region_status_by_id.get(region_id)
-            pilot_status = str((pilot_region_status or {}).get("pilot_status") or "")
-            pilot_cleanup_passed = pilot_status == "passed"
-            if pilot_status in {"failed", "inconclusive"}:
-                mark_render_region(
-                    debug_context,
-                    region_id,
-                    cleanup_pilot_status=pilot_status,
-                    cleanup_pilot_failure_class=(pilot_region_status or {}).get("failure_class"),
-                    cleanup_pilot_renderer_action=(pilot_region_status or {}).get("renderer_action"),
-                    render_suppressed_by_cleanup_proof=True,
-                    cleanup_applied=False,
-                    translated_text_suppressed=True,
-                    translated_text_suppressed_reason="caption_flat_background_pilot_cleanup_proof_not_passed",
-                )
-                continue
+            pre_render_cleanup_already_committed = False
             raw_text = str(region.get("translation", "")).strip()
             text = _normalize_text(raw_text)
             flags = region.get("flags", {}) or {}
@@ -1694,7 +1551,7 @@ def render_translations(
                 render_box = _shrink_box(render_box, max(1, int(min(w, h) * 0.02)))
                 if (
                     renderer_cleanup_mutation_enabled
-                    and not pilot_cleanup_passed
+                    and not pre_render_cleanup_already_committed
                     and text_mask is not None
                     and img_np is not None
                 ):
@@ -1822,7 +1679,7 @@ def render_translations(
                 renderer_cleanup_mutation_enabled
                 and is_background
                 and cleanup_mode != "preserve"
-                and not pilot_cleanup_passed
+                and not pre_render_cleanup_already_committed
             ):
                 pad = max(1, int(min(w, h) * 0.04)) if region_type == "background_text" else max(1, int(min(w, h) * 0.02))
                 render_box = _shrink_box(render_box, pad)
@@ -2339,11 +2196,7 @@ def render_translations(
             and np is not None
             and source_np_for_erasure_proof is not None
         ):
-            legacy_proof_render_regions = [
-                entry
-                for entry in render_regions
-                if str(entry[0] or "") not in pilot_passed_region_ids
-            ]
+            legacy_proof_render_regions = list(render_regions)
         else:
             legacy_proof_render_regions = []
         if legacy_proof_render_regions and cv2 is not None and np is not None and source_np_for_erasure_proof is not None:
@@ -5098,16 +4951,6 @@ def _record_render_cleanup_operation(debug_context: dict | None, operation: dict
     debug_context.setdefault("render_cleanup_operations", []).append(operation)
 
 
-def _pilot_bundle_value(bundle: object | None, key: str):
-    if bundle is None:
-        return None
-    if isinstance(bundle, dict):
-        return bundle.get(key)
-    if hasattr(bundle, key):
-        return getattr(bundle, key)
-    return None
-
-
 def _render_eligibility_by_region(render_eligibility: object | None) -> dict[str, object]:
     if render_eligibility is None:
         return {}
@@ -5801,15 +5644,10 @@ def _apply_text_removal(
     model_id: str = cleanup_execution.FIXED_CLEANUP_INPAINT_MODEL_ID,
     debug_info: dict | None = None,
 ):
-    result = cleanup_execution.apply_text_removal(
-        image,
-        text_mask,
-        mode,
-        use_gpu,
-        model_id=model_id,
-        debug_info=debug_info,
+    raise RuntimeError(
+        "renderer cleanup mutation is disabled; cleanup must be completed by "
+        "app.pipeline cleanup runtime before render_translations()"
     )
-    return result.cleaned_image
 
 
 def _apply_local_text_removal(
@@ -5821,16 +5659,10 @@ def _apply_local_text_removal(
     cleanup_tag: str | None = None,
     debug_info: dict | None = None,
 ):
-    result = cleanup_execution.apply_local_text_removal(
-        image,
-        local_mask,
-        mode,
-        use_gpu,
-        model_id=model_id,
-        cleanup_tag=cleanup_tag,
-        debug_info=debug_info,
+    raise RuntimeError(
+        "renderer cleanup mutation is disabled; cleanup must be completed by "
+        "app.pipeline cleanup runtime before render_translations()"
     )
-    return result.cleaned_image
 
 
 def _refine_recovered_speech_cleanup_mask(mask):
@@ -6345,8 +6177,10 @@ def _expand_dark_box(img_np, box: Tuple[int, int, int, int]):
 
 
 def _apply_bubble_fill(image, bubble_mask, text_mask, reference_np):
-    result = cleanup_execution.apply_bubble_fill(image, bubble_mask, text_mask, reference_np)
-    return result.cleaned_image
+    raise RuntimeError(
+        "renderer cleanup mutation is disabled; cleanup must be completed by "
+        "app.pipeline cleanup runtime before render_translations()"
+    )
 
 
 def _resolve_text_color(image, box, default=(0, 0, 0)):

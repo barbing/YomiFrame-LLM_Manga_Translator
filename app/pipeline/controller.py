@@ -744,12 +744,10 @@ class PipelineWorker(QtCore.QThread):
 
                 cleanup_job_contract_result = None
                 cleanup_mask_contract_result = None
-                cleanup_dense_mask_contract_result = None
                 cleanup_plan_contract_result = None
                 cleanup_runtime_contract_result = None
                 cleanup_upstream_commit_result = None
                 render_eligibility_contract_result = None
-                cleanup_pilot_contract_bundle = None
                 render_input_path = source_path
                 cleanup_upstream_temp_path = ""
                 try:
@@ -836,7 +834,6 @@ class PipelineWorker(QtCore.QThread):
                         rejected_count=len(getattr(cleanup_mask_contract_result, "rejected_records", []) or []),
                         elapsed_ms=round((time.time() - cleanup_mask_start) * 1000.0, 3),
                     )
-                    cleanup_dense_mask_contract_result = None
                     render_eligibility_start = time.time()
                     _page014_timeout_checkpoint("render_eligibility_build", "start", page_id=page_id)
                     render_eligibility_contract_result = build_render_eligibility_decisions(
@@ -845,7 +842,6 @@ class PipelineWorker(QtCore.QThread):
                         source_glyph_masks=source_glyph_mask_result,
                         cleanup_job_contracts=cleanup_job_contract_result,
                         cleanup_mask_contracts=cleanup_mask_contract_result,
-                        cleanup_dense_mask_contracts=None,
                         source_image_path=source_path,
                         image_size=source_image_size,
                     )
@@ -882,8 +878,6 @@ class PipelineWorker(QtCore.QThread):
                         plan_count=len(getattr(cleanup_plan_contract_result, "plans", []) or []),
                         elapsed_ms=round((time.time() - cleanup_plan_start) * 1000.0, 3),
                     )
-                    # Phase 5 commits cleanup upstream; the legacy renderer pilot hook stays disabled.
-                    cleanup_pilot_contract_bundle = None
                     cleanup_runtime_start = time.time()
                     runtime_artifact_dir = None
                     upstream_commit_artifact_dir = None
@@ -1109,14 +1103,6 @@ class PipelineWorker(QtCore.QThread):
                         else:
                             debug_context["cleanup_job_contracts"] = cleanup_job_contract_result.to_audit_dict()
                             debug_context["cleanup_mask_contracts"] = cleanup_mask_contract_result.to_audit_dict()
-                            debug_context["cleanup_dense_mask_contracts"] = {
-                                "version": "cleanup_dense_masks_diagnostic_only",
-                                "page_id": page_id,
-                                "renderer_consumed": False,
-                                "production_execution_disabled": True,
-                                "summary": {"mask_count": 0, "renderer_consumed": False},
-                            }
-                            debug_context["cleanup_dense_contract_override_detected"] = False
                             debug_context["render_eligibility_contracts"] = render_eligibility_contract_result.to_audit_dict()
                             debug_context["cleanup_plan_contracts"] = cleanup_plan_contract_result.to_audit_dict()
                             debug_context["cleanup_backend_inventory"] = cleanup_plan_contract_result.backend_inventory
@@ -1124,7 +1110,6 @@ class PipelineWorker(QtCore.QThread):
                         set_timing(debug_context, "render_eligibility_contract_time", time.time() - render_eligibility_start)
                         set_count(debug_context, "cleanup_job_contract_count", len(cleanup_job_contract_result.jobs))
                         set_count(debug_context, "cleanup_mask_contract_count", len(cleanup_mask_contract_result.masks))
-                        set_count(debug_context, "cleanup_dense_mask_contract_count", 0)
                         set_count(debug_context, "render_eligibility_suppressed_count", len(render_eligibility_contract_result.suppressed_records))
                         set_count(debug_context, "cleanup_plan_contract_count", len(cleanup_plan_contract_result.plans))
                         set_count(debug_context, "cleanup_mask_rejected_count", len(cleanup_mask_contract_result.rejected_records))
@@ -1158,7 +1143,7 @@ class PipelineWorker(QtCore.QThread):
                             },
                         }
                         debug_context["cleanup_plan_contracts"] = {
-                            "version": "cleanup_plans_phase3c_caption_flat_background_dense_candidates",
+                            "version": "cleanup_plans_phase5_cleanup_mask_obligations",
                             "page_id": page_id,
                             "renderer_consumed": False,
                             "errors": [f"{type(exc).__name__}: {exc}"],
@@ -1167,20 +1152,6 @@ class PipelineWorker(QtCore.QThread):
                                 "rejected_record_count": 0,
                                 "protected_record_count": 0,
                                 "skipped_record_count": 0,
-                                "error_count": 1,
-                                "renderer_consumed": False,
-                            },
-                        }
-                        debug_context["cleanup_dense_mask_contracts"] = {
-                            "version": "cleanup_dense_masks_phase3c_caption_flat_background",
-                            "page_id": page_id,
-                            "renderer_consumed": False,
-                            "errors": [f"{type(exc).__name__}: {exc}"],
-                            "summary": {
-                                "mask_count": 0,
-                                "rejected_count": 0,
-                                "protected_count": 0,
-                                "skipped_count": 0,
                                 "error_count": 1,
                                 "renderer_consumed": False,
                             },
@@ -1214,7 +1185,6 @@ class PipelineWorker(QtCore.QThread):
                         model_id=self._settings.inpaint_model_id,
                         debug_context=debug_context if debug_artifacts_enabled else None,
                         source_glyph_masks=source_glyph_mask_result,
-                        cleanup_pilot_contracts=None,
                         render_eligibility=render_eligibility_contract_result,
                         perf_telemetry_context=debug_context if perf_telemetry_is_enabled else None,
                     )

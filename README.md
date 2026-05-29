@@ -30,7 +30,7 @@ YomiFrame currently targets Windows. The commands below use a standard Python vi
 - Windows 10 or newer
 - Python 3.10 recommended; newer Python versions may require dependency adjustments
 - Git
-- Enough disk space for OCR, detection, translation, and optional inpainting models
+- Enough disk space for OCR, detection, translation, and the fixed cleanup inpainting model
 - Optional NVIDIA GPU for faster OCR, detection, translation, and inpainting
 
 ### Install From Source
@@ -105,7 +105,7 @@ Run:
 dist/YomiFrame/YomiFrame.exe
 ```
 
-Large model files are not bundled into the executable folder automatically. For an offline package, copy the prepared `models` folder into `dist/YomiFrame/` and make sure any required Hugging Face, OCR, or inpainting caches are already available on the target machine.
+Large model files are not bundled into the executable folder automatically. For an offline package, copy the prepared `models` folder into `dist/YomiFrame/` and make sure any required Hugging Face, OCR, or cleanup inpainting caches are already available on the target machine.
 
 ## Current Architecture
 
@@ -155,7 +155,7 @@ The main asset families are:
 - bubble/text-area detection models
 - text detection and segmentation models
 - OCR models
-- optional inpainting models
+- the fixed cleanup inpainting model
 - optional NLP resources
 - user-selected local translation models
 

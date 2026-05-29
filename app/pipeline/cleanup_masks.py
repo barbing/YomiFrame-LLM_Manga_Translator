@@ -497,7 +497,7 @@ def build_cleanup_masks(
                         f"local_contrast_fallback_after_{effective.audit.get('segmentation_mask_status') or 'segmentation_unavailable'}"
                     ),
                     "clean_mask_authority": "diagnostic_non_segmentation_fallback",
-                    "dense_or_local_fallback_used": True,
+                    "non_segmentation_or_local_fallback_used": True,
                     "bbox_executable_foreground_detected": False,
                     "page_level_executable_foreground_detected": False,
                     "clean_mask_state": "cleanup_mask_unresolved_after_segmentation",
@@ -694,9 +694,13 @@ def build_cleanup_masks(
                 sourceglyph_executable_influence_detected=bool(
                     effective.audit.get("sourceglyph_executable_influence_detected", False)
                 ),
-                dense_contract_override_detected=bool(effective.audit.get("dense_contract_override_detected", False)),
+                segmentation_contract_override_detected=bool(
+                    effective.audit.get("segmentation_contract_override_detected", False)
+                ),
                 clean_mask_authority=effective.audit.get("clean_mask_authority", ""),
-                dense_or_local_fallback_used=bool(effective.audit.get("dense_or_local_fallback_used", False)),
+                non_segmentation_or_local_fallback_used=bool(
+                    effective.audit.get("non_segmentation_or_local_fallback_used", False)
+                ),
                 bbox_executable_foreground_detected=bool(effective.audit.get("bbox_executable_foreground_detected", False)),
                 page_level_executable_foreground_detected=bool(effective.audit.get("page_level_executable_foreground_detected", False)),
                 clean_mask_foreground_pixels=effective.audit.get("clean_mask_foreground_pixels"),
@@ -1283,7 +1287,7 @@ def _build_component_projected_text_mask(
         "owned_segmentation_to_commit_ratio": None,
         "ready_but_sparse_violation": ready_but_sparse_violation,
         "sourceglyph_executable_influence_detected": sourceglyph_executable_influence_detected,
-        "dense_contract_override_detected": False,
+        "segmentation_contract_override_detected": False,
         "cleanup_authorization": projection.get("cleanup_authorization", ""),
         "authorization_source_stage": projection.get("authorization_source_stage", ""),
         "semantic_authorization_state": projection.get("semantic_authorization_state", ""),
@@ -1299,7 +1303,7 @@ def _build_component_projected_text_mask(
         "green_to_foreground_component_coverage_ratio": owned_to_executable_ratio,
         "green_to_erase_component_coverage_ratio": green_to_erase_ratio,
         "clean_mask_authority": "text_area_component_authorization_map",
-        "dense_or_local_fallback_used": False,
+        "non_segmentation_or_local_fallback_used": False,
         "bbox_executable_foreground_detected": False,
         "page_level_executable_foreground_detected": False,
         "clean_mask_foreground_pixels": foreground_pixels,
@@ -1546,7 +1550,7 @@ def _build_segmentation_text_mask(
             "owned_segmentation_to_commit_ratio": None,
             "ready_but_sparse_violation": False,
             "sourceglyph_executable_influence_detected": False,
-            "dense_contract_override_detected": False,
+            "segmentation_contract_override_detected": False,
         },
         rejected=False,
     )

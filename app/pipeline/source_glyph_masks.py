@@ -2654,8 +2654,9 @@ def build_route_owned_caption_foreground_contract(
 ) -> dict[str, Any]:
     """Build review-only foreground/erase masks for route-owned captions.
 
-    The returned masks are for audit and offline benchmark use. Production
-    renderer cleanup continues to consume the existing SourceGlyphMask.mask.
+    The returned masks are for audit and offline benchmark use only.
+    Production cleanup consumes CleanupMask foreground/erase records before
+    rendering; SourceGlyphMask output is provenance, not renderer cleanup input.
     """
     fields = _empty_foreground_contract_fields("not_generated")
     result: dict[str, Any] = {"fields": fields, "foreground_mask": None, "erase_mask": None}

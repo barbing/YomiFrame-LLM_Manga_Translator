@@ -199,7 +199,7 @@ Main model families used by the pipeline include:
 - ComicTextDetector/TextForegroundSegmentation for text-pixel projection
 - OCR models for approved regions
 - local LLMs through Ollama-compatible translation paths
-- optional cleanup/inpainting backend models
+- the fixed cleanup inpainting backend model
 - optional NLP resources for glossary and name memory
 
 ## Performance Expectations

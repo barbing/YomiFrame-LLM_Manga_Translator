@@ -46,9 +46,8 @@ except Exception:  # pragma: no cover - optional dependency
     cv2 = None
 
 
-CLEANUP_PLAN_CONTRACT_VERSION = "cleanup_plans_phase3c_caption_flat_background_dense_candidates"
-PILOT_RUNTIME_VERSION = "cleanup_pilot_phase3c_caption_flat_background_dense_candidates"
-CLEANUP_RUNTIME_CONTRACT_VERSION = "cleanup_runtime_phase5_phase6_adaptive_cleanup_inpainting_migration"
+CLEANUP_PLAN_CONTRACT_VERSION = "cleanup_plans_phase5_cleanup_mask_obligations"
+CLEANUP_RUNTIME_CONTRACT_VERSION = "cleanup_runtime_phase5_cleanup_mask_obligations"
 CLEANUP_UPSTREAM_COMMIT_VERSION = "cleanup_upstream_commit_phase5_pre_render_working_image"
 
 MAX_PLAN_GROWTH_RATIO = 2.25
@@ -212,7 +211,7 @@ class CleanupPlanBuildResult:
             "skipped_records": _json_safe(self.skipped_records),
             "errors": list(self.errors),
             "summary": {
-                "pilot_class": CleanupClass.CAPTION_FLAT_BACKGROUND.value,
+                "cleanup_authority": "accepted_cleanup_mask_obligation",
                 "plan_count": len(self.plans),
                 "planned_cleanup_mask_count": len(self.plans_by_cleanup_mask_id),
                 "rejected_record_count": len(self.rejected_records),
@@ -222,69 +221,6 @@ class CleanupPlanBuildResult:
                 "renderer_consumed": False,
                 "backend_candidate_count": int(self.backend_inventory.get("candidate_count") or 0),
                 "backend_available_count": int(self.backend_inventory.get("available_count") or 0),
-            },
-        }
-
-
-@dataclass(frozen=True)
-class CaptionFlatPilotRuntimeResult:
-    """Renderer-facing decided pilot status and audit payloads."""
-
-    page_id: str
-    version: str
-    cleaned_image: Any = field(repr=False, compare=False)
-    status_records: list[dict[str, Any]] = field(default_factory=list)
-    result_records: list[CleanupResult] = field(default_factory=list)
-    proof_records: list[CleanupProof] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
-
-    @property
-    def committed_region_ids(self) -> set[str]:
-        return {
-            str(rid)
-            for record in self.status_records
-            if record.get("pilot_status") == "passed"
-            for rid in record.get("target_region_ids", [])
-        }
-
-    @property
-    def blocked_region_ids(self) -> set[str]:
-        return {
-            str(rid)
-            for record in self.status_records
-            if record.get("pilot_status") in {"failed", "inconclusive"}
-            for rid in record.get("target_region_ids", [])
-        }
-
-    def region_status_by_id(self) -> dict[str, dict[str, Any]]:
-        mapping: dict[str, dict[str, Any]] = {}
-        for record in self.status_records:
-            for rid in record.get("target_region_ids", []):
-                mapping[str(rid)] = record
-        return mapping
-
-    def to_audit_dict(self) -> dict[str, Any]:
-        passed = [record for record in self.status_records if record.get("pilot_status") == "passed"]
-        failed = [record for record in self.status_records if record.get("pilot_status") == "failed"]
-        inconclusive = [
-            record
-            for record in self.status_records
-            if record.get("pilot_status") == "inconclusive"
-        ]
-        return {
-            "version": self.version,
-            "page_id": self.page_id,
-            "renderer_consumed": True,
-            "pilot_class": CleanupClass.CAPTION_FLAT_BACKGROUND.value,
-            "status_records": _json_safe(self.status_records),
-            "errors": list(self.errors),
-            "summary": {
-                "status_count": len(self.status_records),
-                "passed_count": len(passed),
-                "failed_count": len(failed),
-                "inconclusive_count": len(inconclusive),
-                "committed_region_ids": sorted(self.committed_region_ids),
-                "blocked_region_ids": sorted(self.blocked_region_ids),
             },
         }
 
@@ -547,8 +483,8 @@ def build_cleanup_plans(
                     "sourceglyph_executable_influence_detected": bool(
                         getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)
                     ),
-                    "dense_contract_override_detected": bool(
-                        getattr(cleanup_mask, "dense_contract_override_detected", False)
+                    "segmentation_contract_override_detected": bool(
+                        getattr(cleanup_mask, "segmentation_contract_override_detected", False)
                     ),
                     "component_projection_method": str(
                         getattr(cleanup_mask, "component_projection_method", "") or ""
@@ -623,63 +559,6 @@ def build_cleanup_plans(
     )
 
 
-def execute_cleanup_plan(
-    *,
-    image: Any,
-    cleanup_plan: CleanupPlan,
-    cleanup_mask: CleanupMask,
-    use_gpu: bool,
-    model_id: str,
-) -> CleanupResult:
-    """Execute one already-eligible pilot plan on a scratch image."""
-
-    params = cleanup_plan.backend_parameters or {}
-    candidate = cleanup_backend_runner.LocalCleanupBackendCandidate(
-        candidate_id=str(params.get("backend_candidate_id") or cleanup_plan.selected_backend),
-        backend_family=str(params.get("backend_family") or ""),
-        model_path=str(params.get("backend_model_path") or ""),
-        adapter_path=str(params.get("backend_adapter_path") or ""),
-        available=bool(params.get("backend_candidate_available")),
-        unavailable_reason=str(params.get("backend_candidate_unavailable_reason") or ""),
-    )
-    candidate_result = cleanup_backend_runner.run_cleanup_backend_candidate(
-        image=image,
-        mask=cleanup_mask.erase_mask,
-        candidate=candidate,
-        use_gpu=use_gpu,
-    )
-    cleaned_image = candidate_result.cleaned_image or image
-    operation_bbox = _valid_bbox(candidate_result.crop_bbox) or _valid_bbox(cleanup_mask.erase_mask_bbox)
-    return CleanupResult(
-        cleanup_result_id=f"cres_{_safe_id(cleanup_plan.cleanup_plan_id)}",
-        cleanup_plan_id=str(cleanup_plan.cleanup_plan_id),
-        cleanup_job_id=str(cleanup_plan.cleanup_job_id),
-        cleanup_mask_id=str(cleanup_plan.cleanup_mask_id),
-        operation_bbox=operation_bbox,
-        mask_stats=mask_stats(cleanup_mask.erase_mask) or {},
-        backend_name=candidate_result.backend_name,
-        backend_parameters={
-            "backend_detail": candidate_result.detail,
-            "backend_candidate_id": candidate_result.candidate_id,
-            "backend_family": candidate_result.backend_family,
-            "backend_model_path": candidate_result.model_path,
-            "backend_adapter_path": candidate_result.adapter_path,
-            "candidate_status": candidate_result.status,
-            "load_time_ms": candidate_result.load_time_ms,
-            "cleanup_tag": "caption_flat_background_phase3c",
-            "crop_bbox": candidate_result.crop_bbox,
-            "crop_area": candidate_result.crop_area,
-            "mask_ratio": candidate_result.mask_ratio,
-            "mask_pixels": candidate_result.mask_pixels,
-        },
-        runtime_ms=candidate_result.runtime_ms,
-        fallback_status=candidate_result.status,
-        errors=list(candidate_result.errors or []),
-        cleaned_image=cleaned_image,
-        cleaned_crop=candidate_result.cleaned_crop,
-    )
-
-
 def prove_cleanup_result(
     *,
     source_image: Any,
@@ -688,7 +567,7 @@ def prove_cleanup_result(
     cleanup_plan: CleanupPlan,
     cleanup_mask: CleanupMask,
 ) -> CleanupProof:
-    """Proof one pilot cleanup before translated text drawing."""
+    """Proof one cleanup result before translated text drawing."""
 
     metrics: dict[str, Any] = {}
     failure_reason = "passed"
@@ -737,14 +616,17 @@ def prove_cleanup_result(
                 failure_reason="inconclusive_missing_evidence",
                 metrics={"missing": "source_foreground_evidence"},
             )
-        if erase is None or not np.any(erase) or allowed is None:
+        if erase is None or not np.any(erase):
             return _proof(
                 cleanup_result,
                 cleanup_plan,
                 status=ProofStatus.INCONCLUSIVE,
                 failure_reason="inconclusive_missing_evidence",
-                metrics={"missing": "erase_mask_or_allowed_area"},
+                metrics={"missing": "erase_mask"},
             )
+        allowed_present = allowed is not None and np.any(allowed > 0)
+        if allowed is None:
+            allowed = np.zeros(source_np.shape[:2], dtype=np.uint8)
 
         foreground_pixels = int(np.count_nonzero(foreground))
         erase_foreground_overlap = int(np.count_nonzero((erase > 0) & (foreground > 0)))
@@ -814,11 +696,16 @@ def prove_cleanup_result(
         outside_allowed = changed & ~(allowed > 0)
         changed_outside_allowed_pixels = int(np.count_nonzero(outside_allowed))
         changed_outside_allowed_ratio = changed_outside_allowed_pixels / max(1, int(source_np.shape[0] * source_np.shape[1]))
-        allowed_changed = changed & (allowed > 0)
+        outside_accepted_erase = changed & ~(erase > 0)
+        changed_outside_accepted_mask_pixels = int(np.count_nonzero(outside_accepted_erase))
+        changed_outside_accepted_mask_ratio = changed_outside_accepted_mask_pixels / max(1, int(source_np.shape[0] * source_np.shape[1]))
+        accepted_changed = changed & (erase > 0)
         outside_erase_inside_allowed = changed & (allowed > 0) & ~(erase > 0)
-        collateral_pixels = int(np.count_nonzero(outside_erase_inside_allowed))
-        collateral_ratio = collateral_pixels / max(1, int(np.count_nonzero(allowed_changed)))
-        changed_inside_erase = changed & (erase > 0) & (allowed > 0)
+        outside_erase_inside_allowed_pixels = int(np.count_nonzero(outside_erase_inside_allowed))
+        allowed_changed = changed & (allowed > 0)
+        outside_erase_inside_allowed_ratio = outside_erase_inside_allowed_pixels / max(1, int(np.count_nonzero(allowed_changed)))
+        collateral_ratio = changed_outside_accepted_mask_pixels / max(1, int(np.count_nonzero(changed)))
+        changed_inside_erase = accepted_changed
         changed_inside_erase_pixels = int(np.count_nonzero(changed_inside_erase))
         white_patch_candidate = changed_inside_erase & (cleaned_gray > 235) & (source_gray < 180)
         white_patch_pixels = int(np.count_nonzero(white_patch_candidate))
@@ -1018,11 +905,20 @@ def prove_cleanup_result(
             and residual_dark_reduction_ratio >= 0.55
             and residual_dark_ratio <= 0.42
             and not broad_white_patch_risk
-            and changed_outside_allowed_pixels <= PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS
-            and changed_outside_allowed_ratio <= PROOF_CHANGED_OUTSIDE_ALLOWED_RATIO
+            and changed_outside_accepted_mask_pixels <= PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS
+            and changed_outside_accepted_mask_ratio <= PROOF_CHANGED_OUTSIDE_ALLOWED_RATIO
             and collateral_ratio <= PROOF_COLLATERAL_INSIDE_ALLOWED_RATIO
         )
-        model_inpaint_acceptable_residual_commit = bool(model_inpaint_source_text_clearance_candidate)
+        actual_model_name = str(cleanup_result.actual_model_name or "")
+        actual_model_path = str(cleanup_result.actual_model_path or "").replace("\\", "/")
+        backend_method = str(cleanup_result.backend_method or "")
+        fixed_cleanup_model_backend = (
+            backend_method == "cleanup_owned_simple_lama_inpaint"
+            and (
+                "iopaint/anime-manga-big-lama" in actual_model_name
+                or "iopaint/anime-manga-big-lama" in actual_model_path
+            )
+        )
         executable_residual_mask = residual_dark | light_context_dark_shadow_residual
         if light_source_residual_remaining or cleaned_light_source_residual_remaining:
             executable_residual_mask = residual_dark | (legacy_residual & source_light_foreground)
@@ -1041,6 +937,11 @@ def prove_cleanup_result(
             bool(cleanup_result.errors)
             or backend_name in {"", "none", "error"}
             or candidate_status not in {"completed"}
+        )
+        model_inpaint_acceptable_residual_commit = (
+            bool(model_inpaint_source_text_clearance_candidate)
+            and fixed_cleanup_model_backend
+            and not backend_noop
         )
         metrics = {
             "source_foreground_pixels": foreground_pixels,
@@ -1073,17 +974,17 @@ def prove_cleanup_result(
                 model_inpaint_acceptable_residual_commit
             ),
             "model_inpaint_source_text_cleared": bool(
-                model_inpaint_acceptable_residual_commit
-                or (
-                    not dark_source_residual_remaining
-                    and not light_context_dark_shadow_remaining
-                    and not light_source_residual_remaining
-                    and not cleaned_light_source_residual_remaining
-                )
+                not dark_source_residual_remaining
+                and not light_context_dark_shadow_remaining
+                and not light_source_residual_remaining
+                and not cleaned_light_source_residual_remaining
             ),
-            "model_inpaint_clearance_override_disabled": False,
+            "model_inpaint_fixed_cleanup_backend": bool(fixed_cleanup_model_backend),
+            "model_inpaint_clearance_override_disabled": not bool(
+                model_inpaint_acceptable_residual_commit
+            ),
             "model_inpaint_clearance_acceptance_policy": (
-                "fixed_model_high_clearance_mask_contained_residual"
+                "fixed_model_mask_contained_background_caption_visual_clearance"
                 if model_inpaint_acceptable_residual_commit
                 else ""
             ),
@@ -1150,10 +1051,15 @@ def prove_cleanup_result(
                 4,
             ),
             "residual_source_pixel_limit": residual_pixel_limit,
+            "allowed_area_present": bool(allowed_present),
+            "allowed_area_is_audit_only": True,
             "changed_outside_allowed_pixels": changed_outside_allowed_pixels,
             "changed_outside_allowed_ratio": round(changed_outside_allowed_ratio, 6),
-            "changed_outside_erase_inside_allowed_pixels": collateral_pixels,
-            "changed_outside_erase_inside_allowed_ratio": round(collateral_ratio, 4),
+            "changed_outside_accepted_mask_pixels": changed_outside_accepted_mask_pixels,
+            "changed_outside_accepted_mask_ratio": round(changed_outside_accepted_mask_ratio, 6),
+            "changed_outside_erase_inside_allowed_pixels": outside_erase_inside_allowed_pixels,
+            "changed_outside_erase_inside_allowed_ratio": round(outside_erase_inside_allowed_ratio, 4),
+            "accepted_mask_collateral_ratio": round(collateral_ratio, 4),
             "changed_inside_erase_pixels": changed_inside_erase_pixels,
             "broad_white_patch_pixels": white_patch_pixels,
             "broad_white_patch_ratio": round(white_patch_ratio, 4),
@@ -1197,10 +1103,10 @@ def prove_cleanup_result(
         ) and not model_inpaint_acceptable_residual_commit:
             failure_reason = "source_residual_remaining"
         elif (
-            changed_outside_allowed_pixels > PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS
-            or changed_outside_allowed_ratio > PROOF_CHANGED_OUTSIDE_ALLOWED_RATIO
+            changed_outside_accepted_mask_pixels > PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS
+            or changed_outside_accepted_mask_ratio > PROOF_CHANGED_OUTSIDE_ALLOWED_RATIO
         ):
-            failure_reason = "changed_outside_allowed_area"
+            failure_reason = "changed_outside_accepted_mask"
         elif collateral_ratio > PROOF_COLLATERAL_INSIDE_ALLOWED_RATIO:
             failure_reason = "collateral_change_too_broad"
         elif broad_white_patch_risk:
@@ -1220,8 +1126,8 @@ def prove_cleanup_result(
             residual_dark_pixels > baseline_residual_dark_pixels + 4
         )
         allowed_area_safe = (
-            changed_outside_allowed_pixels <= PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS
-            and changed_outside_allowed_ratio <= PROOF_CHANGED_OUTSIDE_ALLOWED_RATIO
+            changed_outside_accepted_mask_pixels <= PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS
+            and changed_outside_accepted_mask_ratio <= PROOF_CHANGED_OUTSIDE_ALLOWED_RATIO
         )
         collateral_safe = collateral_ratio <= PROOF_COLLATERAL_INSIDE_ALLOWED_RATIO
         degraded_cleanup_diagnostic = (
@@ -1235,15 +1141,13 @@ def prove_cleanup_result(
             and not broad_white_patch_risk
             and mask_source_overlap_ratio >= PROOF_MASK_SOURCE_OVERLAP_RATIO
         )
-        if failure_reason == "passed":
-            proof_quality_state = (
-                "proof_passed_model_inpaint_residual_accepted"
-                if model_inpaint_acceptable_residual_commit
-                else "proof_passed_clean"
-            )
+        if failure_reason == "passed" and model_inpaint_acceptable_residual_commit:
+            proof_quality_state = "proof_passed_model_inpaint_residual_accepted"
+        elif failure_reason == "passed":
+            proof_quality_state = "proof_passed_clean"
         elif str(failure_reason or "").startswith("source_residual"):
             proof_quality_state = "proof_failed_residual_warning"
-        elif failure_reason in {"changed_outside_allowed_area", "collateral_change_too_broad"}:
+        elif failure_reason in {"changed_outside_accepted_mask", "changed_outside_allowed_area", "collateral_change_too_broad"}:
             proof_quality_state = "proof_failed_collateral_warning"
         else:
             proof_quality_state = "proof_failed_warning"
@@ -1325,149 +1229,6 @@ def _proof_scope_metadata(cleanup_plan: CleanupPlan, cleanup_mask: CleanupMask) 
         "source_glyph_erasure_bbox_input": source_bbox,
         "source_glyph_erasure_expected_area_bbox": expected_bbox,
     }
-
-
-def run_caption_flat_background_pilot(
-    *,
-    page_id: str,
-    image: Any,
-    source_image: Any,
-    plan_contracts: CleanupPlanBuildResult | Any,
-    mask_contracts: CleanupMaskBuildResult | Any,
-    use_gpu: bool,
-    model_id: str,
-) -> CaptionFlatPilotRuntimeResult:
-    """Run only already-decided caption-flat pilot plans."""
-
-    working = image
-    status_records: list[dict[str, Any]] = []
-    result_records: list[CleanupResult] = []
-    proof_records: list[CleanupProof] = []
-    parent_cleanup_unit_aggregate_records: list[dict[str, Any]] = []
-    errors: list[str] = []
-    plans = _extract_plans(plan_contracts)
-    masks_by_id = {str(mask.cleanup_mask_id): mask for mask in _extract_masks(mask_contracts)}
-    plans_by_job_id: dict[str, list[CleanupPlan]] = {}
-    for cleanup_plan in plans:
-        plans_by_job_id.setdefault(str(cleanup_plan.cleanup_job_id), []).append(cleanup_plan)
-
-    for cleanup_job_id, candidate_plans in plans_by_job_id.items():
-        cleanup_plan = candidate_plans[0]
-        target_region_ids = [
-            str(rid)
-            for rid in (cleanup_plan.backend_parameters or {}).get("target_region_ids", [])
-            if str(rid)
-        ]
-        cleanup_mask = masks_by_id.get(str(cleanup_plan.cleanup_mask_id))
-        if cleanup_mask is None:
-            status_records.append(
-                _status_record(
-                    cleanup_plan,
-                    target_region_ids=target_region_ids,
-                    status="inconclusive",
-                    failure_class="inconclusive_missing_evidence",
-                    renderer_action="suppress_translated_text_keep_source_visible",
-                    detail="cleanup_mask_contract_missing_at_runtime",
-                )
-            )
-            continue
-        before = working
-        job_results: list[CleanupResult] = []
-        job_proofs: list[CleanupProof] = []
-        try:
-            for candidate_plan in candidate_plans:
-                cleanup_result = execute_cleanup_plan(
-                    image=before,
-                    cleanup_plan=candidate_plan,
-                    cleanup_mask=cleanup_mask,
-                    use_gpu=use_gpu,
-                    model_id=model_id,
-                )
-                cleanup_proof = prove_cleanup_result(
-                    source_image=source_image,
-                    before_image=before,
-                    cleanup_result=cleanup_result,
-                    cleanup_plan=candidate_plan,
-                    cleanup_mask=cleanup_mask,
-                )
-                job_results.append(cleanup_result)
-                job_proofs.append(cleanup_proof)
-                result_records.append(cleanup_result)
-                proof_records.append(cleanup_proof)
-
-            selected_result, selected_proof = _select_best_passed_result(job_results, job_proofs)
-            if selected_result is not None and selected_proof is not None:
-                working = selected_result.cleaned_image
-                status = "passed"
-                renderer_action = "commit_pilot_cleanup_draw_translation"
-                failure_class = "passed"
-                status_plan = _plan_for_result(candidate_plans, selected_result) or cleanup_plan
-                cleanup_result_id = selected_result.cleanup_result_id
-                cleanup_proof_id = selected_proof.cleanup_proof_id
-                proof_metrics = selected_proof.metrics
-                selected_backend_candidate_id = (selected_result.backend_parameters or {}).get("backend_candidate_id")
-                detail = "selected_proof_passed_backend_candidate"
-            else:
-                selected_result, selected_proof = _best_failed_attempt(job_results, job_proofs)
-                status = "failed" if job_proofs else "inconclusive"
-                renderer_action = "discard_pilot_cleanup_suppress_translation"
-                failure_class = (
-                    selected_proof.failure_reason
-                    if selected_proof is not None and selected_proof.failure_reason
-                    else "inconclusive_missing_evidence"
-                )
-                status_plan = _plan_for_result(candidate_plans, selected_result) if selected_result is not None else cleanup_plan
-                if status_plan is None:
-                    status_plan = cleanup_plan
-                cleanup_result_id = selected_result.cleanup_result_id if selected_result is not None else None
-                cleanup_proof_id = selected_proof.cleanup_proof_id if selected_proof is not None else None
-                proof_metrics = selected_proof.metrics if selected_proof is not None else {}
-                selected_backend_candidate_id = (
-                    (selected_result.backend_parameters or {}).get("backend_candidate_id")
-                    if selected_result is not None
-                    else None
-                )
-                detail = "no_backend_candidate_proof_passed"
-            status_records.append(
-                _status_record(
-                    status_plan,
-                    target_region_ids=target_region_ids,
-                    status=status,
-                    failure_class=failure_class,
-                    renderer_action=renderer_action,
-                    cleanup_result_id=cleanup_result_id,
-                    cleanup_proof_id=cleanup_proof_id,
-                    allowed_area=cleanup_mask.allowed_area,
-                    erase_mask_bbox=cleanup_mask.erase_mask_bbox,
-                    proof_metrics=proof_metrics,
-                    detail=detail,
-                    candidate_result_count=len(job_results),
-                    selected_backend_candidate_id=selected_backend_candidate_id,
-                )
-            )
-        except Exception as exc:
-            message = f"{type(exc).__name__}: {exc}"
-            errors.append(message)
-            status_records.append(
-                _status_record(
-                    cleanup_plan,
-                    target_region_ids=target_region_ids,
-                    status="inconclusive",
-                    failure_class="inconclusive_missing_evidence",
-                    renderer_action="suppress_translated_text_keep_source_visible",
-                    detail=message,
-                )
-            )
-
-    return CaptionFlatPilotRuntimeResult(
-        page_id=page_id,
-        version=PILOT_RUNTIME_VERSION,
-        cleaned_image=working,
-        status_records=status_records,
-        result_records=result_records,
-        proof_records=proof_records,
-        errors=errors,
-    )
 
 
 def run_cleanup_runtime_contract(
@@ -2401,7 +2162,9 @@ def _upstream_commit_entry_for_result(
         "sourceglyph_executable_influence_detected": bool(
             result_backend_parameters.get("sourceglyph_executable_influence_detected", False)
         ),
-        "dense_contract_override_detected": bool(result_backend_parameters.get("dense_contract_override_detected", False)),
+        "segmentation_contract_override_detected": bool(
+            result_backend_parameters.get("segmentation_contract_override_detected", False)
+        ),
         "partitioned_cleanup": bool(status.get("partitioned_cleanup", False)),
         "partition_index": status.get("partition_index", ""),
         "partition_count": status.get("partition_count", ""),
@@ -2580,16 +2343,22 @@ def _upstream_commit_block_reason(
         return "source_glyph_removal_proof_failed"
     if proof.mask_containment_passed is False:
         return "mask_containment_proof_failed"
-    changed_outside = _int_or_none(proof.changed_outside_allowed_pixels)
+    changed_outside = None
+    if isinstance(proof.metrics, Mapping):
+        changed_outside = _int_or_none(proof.metrics.get("changed_outside_accepted_mask_pixels"))
+    if changed_outside is None:
+        changed_outside = _int_or_none(proof.changed_outside_allowed_pixels)
     if changed_outside is None and isinstance(proof.metrics, Mapping):
         changed_outside = _int_or_none(proof.metrics.get("changed_outside_allowed_pixels"))
     if changed_outside is not None and changed_outside > PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS:
-        return "changed_outside_allowed_area"
+        return "changed_outside_accepted_mask"
     changed_outside_ratio = None
     if isinstance(proof.metrics, Mapping):
-        changed_outside_ratio = _float_or_none(proof.metrics.get("changed_outside_allowed_ratio"))
+        changed_outside_ratio = _float_or_none(proof.metrics.get("changed_outside_accepted_mask_ratio"))
+        if changed_outside_ratio is None:
+            changed_outside_ratio = _float_or_none(proof.metrics.get("changed_outside_allowed_ratio"))
     if changed_outside_ratio is not None and changed_outside_ratio > PROOF_CHANGED_OUTSIDE_ALLOWED_RATIO:
-        return "changed_outside_allowed_ratio"
+        return "changed_outside_accepted_mask_ratio"
     decision = str(proof.render_consumption_decision_if_consumed or "")
     if decision and decision not in {
         "allow_stage6_consumption_candidate",
@@ -2950,7 +2719,9 @@ def execute_cleanup_runtime_plan(
             "sourceglyph_executable_influence_detected": bool(
                 getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)
             ),
-            "dense_contract_override_detected": bool(getattr(cleanup_mask, "dense_contract_override_detected", False)),
+            "segmentation_contract_override_detected": bool(
+                getattr(cleanup_mask, "segmentation_contract_override_detected", False)
+            ),
             "backend_context_mask_used": bool(backend_context_used),
             "backend_context_cleanup_mask_ids": backend_context_mask_ids,
             "backend_context_executable_input_used": False,
@@ -2967,46 +2738,6 @@ def execute_cleanup_runtime_plan(
     )
 
 
-def build_inconclusive_pilot_runtime_result(
-    *,
-    page_id: str,
-    image: Any,
-    plan_contracts: CleanupPlanBuildResult | Any,
-    detail: str,
-) -> CaptionFlatPilotRuntimeResult:
-    """Create visible-failure statuses if renderer pilot execution aborts."""
-
-    status_records: list[dict[str, Any]] = []
-    grouped: dict[str, CleanupPlan] = {}
-    for cleanup_plan in _extract_plans(plan_contracts):
-        grouped.setdefault(str(cleanup_plan.cleanup_job_id), cleanup_plan)
-    for cleanup_plan in grouped.values():
-        target_region_ids = [
-            str(rid)
-            for rid in (cleanup_plan.backend_parameters or {}).get("target_region_ids", [])
-            if str(rid)
-        ]
-        status_records.append(
-            _status_record(
-                cleanup_plan,
-                target_region_ids=target_region_ids,
-                status="inconclusive",
-                failure_class="inconclusive_missing_evidence",
-                renderer_action="discard_pilot_cleanup_suppress_translation",
-                detail=detail,
-            )
-        )
-    return CaptionFlatPilotRuntimeResult(
-        page_id=page_id,
-        version=PILOT_RUNTIME_VERSION,
-        cleaned_image=image,
-        status_records=status_records,
-        result_records=[],
-        proof_records=[],
-        errors=[detail] if detail else [],
-    )
-
-
 def _proof(
     cleanup_result: CleanupResult,
     cleanup_plan: CleanupPlan,
@@ -3020,6 +2751,12 @@ def _proof(
         pass_residual_ratio = _float_or_none(metrics.get("residual_source_ratio"))
     degraded_cleanup_diagnostic = bool(metrics.get("degraded_cleanup_diagnostic"))
     proof_quality_state = str(metrics.get("proof_quality_state") or "")
+    containment_pixels = _int_or_none(metrics.get("changed_outside_accepted_mask_pixels"))
+    if containment_pixels is None:
+        containment_pixels = _int_or_none(metrics.get("changed_outside_allowed_pixels"))
+    collateral_score = _float_or_none(metrics.get("accepted_mask_collateral_ratio"))
+    if collateral_score is None:
+        collateral_score = _float_or_none(metrics.get("changed_outside_erase_inside_allowed_ratio"))
     render_decision = (
         "allow_stage6_consumption_candidate"
         if status == ProofStatus.PASSED
@@ -3034,7 +2771,7 @@ def _proof(
         source_glyph_removal_passed=status == ProofStatus.PASSED,
         source_residual_ratio=pass_residual_ratio,
         changed_outside_allowed_pixels=_int_or_none(metrics.get("changed_outside_allowed_pixels")),
-        collateral_damage_score=_float_or_none(metrics.get("changed_outside_erase_inside_allowed_ratio")),
+        collateral_damage_score=collateral_score,
         mask_containment_ratio=_float_or_none(metrics.get("mask_source_overlap_ratio")),
         render_consumption_decision_if_consumed=render_decision,
         residual_source_text_risk=(
@@ -3043,8 +2780,8 @@ def _proof(
             else ("diagnostic_residual_not_committable" if degraded_cleanup_diagnostic else "visible_or_unknown")
         ),
         mask_containment_passed=(
-            metrics.get("changed_outside_allowed_pixels", 0) <= PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS
-            if metrics
+            containment_pixels <= PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS
+            if containment_pixels is not None
             else None
         ),
         collateral_damage_risk=(
@@ -3176,44 +2913,6 @@ def _plan_for_result(
         if plan.cleanup_plan_id == cleanup_result.cleanup_plan_id:
             return plan
     return None
-
-
-def _status_record(
-    cleanup_plan: CleanupPlan,
-    *,
-    target_region_ids: Sequence[str],
-    status: str,
-    failure_class: str,
-    renderer_action: str,
-    cleanup_result_id: str | None = None,
-    cleanup_proof_id: str | None = None,
-    allowed_area: Sequence[int] | None = None,
-    erase_mask_bbox: Sequence[int] | None = None,
-    proof_metrics: Mapping[str, Any] | None = None,
-    detail: str = "",
-    candidate_result_count: int = 0,
-    selected_backend_candidate_id: Any | None = None,
-) -> dict[str, Any]:
-    return {
-        "cleanup_plan_id": cleanup_plan.cleanup_plan_id,
-        "cleanup_job_id": cleanup_plan.cleanup_job_id,
-        "cleanup_mask_id": cleanup_plan.cleanup_mask_id,
-        "cleanup_result_id": cleanup_result_id,
-        "cleanup_proof_id": cleanup_proof_id,
-        "target_region_ids": list(target_region_ids),
-        "cleanup_class": _enum_value(cleanup_plan.cleanup_class),
-        "pilot_status": status,
-        "failure_class": failure_class,
-        "renderer_action": renderer_action,
-        "render_suppressed_by_cleanup_proof": status in {"failed", "inconclusive"},
-        "pilot_cleanup_committed": status == "passed",
-        "allowed_area": list(allowed_area or []),
-        "erase_mask_bbox": list(erase_mask_bbox or []),
-        "proof_metrics": _json_safe(proof_metrics or {}),
-        "detail": detail,
-        "candidate_result_count": int(candidate_result_count),
-        "selected_backend_candidate_id": selected_backend_candidate_id,
-    }
 
 
 def _runtime_base_record(
@@ -3446,7 +3145,9 @@ def _effective_mask_kwargs(cleanup_mask: CleanupMask) -> dict[str, Any]:
         "sourceglyph_executable_influence_detected": bool(
             getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)
         ),
-        "dense_contract_override_detected": bool(getattr(cleanup_mask, "dense_contract_override_detected", False)),
+        "segmentation_contract_override_detected": bool(
+            getattr(cleanup_mask, "segmentation_contract_override_detected", False)
+        ),
     }
 
 
@@ -3723,7 +3424,12 @@ def _runtime_glyph_precision_mask(
     source_image: Any,
     cleanup_class: CleanupClass | None,
 ) -> CleanupMask:
-    """Build runtime geometry from the completed CleanupMask foreground."""
+    """Build runtime geometry from the completed CleanupMask foreground.
+
+    Accepted cleanup masks are already page-space obligations. Runtime may use
+    allowed/container boxes for audit and dilation safety, but it must not crop
+    accepted foreground or erase pixels back to those boxes.
+    """
 
     if np is None:
         return cleanup_mask
@@ -3741,6 +3447,7 @@ def _runtime_glyph_precision_mask(
             foreground=cleanup_mask.foreground_mask,
             erase=cleanup_mask.erase_mask,
         )
+    accepted = _accepted_executable_cleanup_mask(cleanup_mask)
     allowed = _valid_bbox(cleanup_mask.allowed_area)
     foreground = _binary_cleanup_mask_array(cleanup_mask.foreground_mask)
     if foreground is None:
@@ -3753,9 +3460,10 @@ def _runtime_glyph_precision_mask(
             reason="segmentation_foreground_contract_defect",
             method_suffix="missing_foreground_or_allowed_area",
         )
-    foreground = _clip_mask_to_valid_bbox(foreground, allowed)
+    if not accepted:
+        foreground = _clip_mask_to_valid_bbox(foreground, allowed)
     defect = ""
-    if not _accepted_executable_cleanup_mask(cleanup_mask):
+    if not accepted:
         # Geometry guards are diagnostic for non-accepted masks; accepted
         # component-projected masks are the cleanup obligation.
         defect = _glyph_foreground_geometry_defect_reason(
@@ -3773,8 +3481,10 @@ def _runtime_glyph_precision_mask(
     erase = _binary_cleanup_mask_array(cleanup_mask.erase_mask)
     if erase is None or not np.any(erase > 0):
         erase = _glyph_local_erase_from_foreground(foreground, allowed, cleanup_class)
-    else:
+    elif not accepted:
         erase = _clip_mask_to_valid_bbox(erase, allowed)
+    else:
+        erase = np.maximum((erase > 0).astype(np.uint8), (foreground > 0).astype(np.uint8))
     foreground_pixels = int(np.count_nonzero(foreground))
     erase_pixels = int(np.count_nonzero(erase))
     foreground_bbox = _mask_bbox(foreground)
@@ -3959,8 +3669,9 @@ def _glyph_local_erase_from_foreground(
     allowed: Sequence[int],
     cleanup_class: CleanupClass | None,
 ) -> Any:
+    foreground_u8 = (foreground > 0).astype(np.uint8)
     if cv2 is None:
-        return _clip_mask_to_valid_bbox(foreground, allowed)
+        return np.maximum(foreground_u8, _clip_mask_to_valid_bbox(foreground_u8, allowed))
     cleanup_value = _enum_value(cleanup_class)
     speech_like = cleanup_value in {
         CleanupClass.SPEECH_FLAT_BUBBLE.value,
@@ -3969,8 +3680,10 @@ def _glyph_local_erase_from_foreground(
     }
     kernel = np.ones((3, 3), dtype=np.uint8)
     iterations = 2 if speech_like and int(np.count_nonzero(foreground > 0)) < 1200 else 1
-    erase = cv2.dilate((foreground > 0).astype(np.uint8), kernel, iterations=iterations)
-    return _clip_mask_to_valid_bbox(erase, allowed)
+    erase = cv2.dilate(foreground_u8, kernel, iterations=iterations)
+    # Allowed-area constrains only the dilation halo. The accepted text
+    # foreground itself remains executable even when upstream boxes are stale.
+    return np.maximum(foreground_u8, _clip_mask_to_valid_bbox(erase, allowed))
 
 
 def _runtime_speech_flat_plan(
@@ -6128,10 +5841,7 @@ def _residual_retry_cleanup_mask(
     residual = (residual > 0) & (foreground > 0)
     if erase is not None and erase.shape == foreground.shape and np.any(erase > 0):
         residual = residual & (erase > 0)
-    allowed = _valid_bbox(cleanup_mask.allowed_area) or _mask_bbox(foreground)
-    if allowed is None:
-        return None, "residual_retry_skipped_missing_allowed_area"
-    residual_u8 = _clip_mask_to_valid_bbox(residual.astype(np.uint8), allowed)
+    residual_u8 = residual.astype(np.uint8)
     residual_pixels = int(np.count_nonzero(residual_u8))
     if residual_pixels <= 0:
         return None, "residual_retry_skipped_no_executable_text_residual"
@@ -6183,7 +5893,11 @@ def _should_run_residual_retry(proof: CleanupProof) -> bool:
         return False
     changed_outside = _int_or_none(metrics.get("changed_outside_allowed_pixels")) or 0
     changed_outside_ratio = _float_or_none(metrics.get("changed_outside_allowed_ratio")) or 0.0
-    collateral = _float_or_none(metrics.get("changed_outside_erase_inside_allowed_ratio")) or 0.0
+    collateral = (
+        _float_or_none(metrics.get("accepted_mask_collateral_ratio"))
+        or _float_or_none(metrics.get("changed_outside_erase_inside_allowed_ratio"))
+        or 0.0
+    )
     return (
         changed_outside <= PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS
         and changed_outside_ratio <= PROOF_CHANGED_OUTSIDE_ALLOWED_RATIO
@@ -6201,12 +5915,24 @@ def _first_metric_int(metrics: Mapping[str, Any], *keys: str, default: int) -> i
 
 def _should_run_restoration_retry(proof: CleanupProof) -> bool:
     reason = str(proof.failure_reason or "")
-    if reason in {"changed_outside_allowed_area", "collateral_change_too_broad"}:
+    if reason in {"changed_outside_accepted_mask", "changed_outside_allowed_area", "collateral_change_too_broad"}:
         return True
     metrics = proof.metrics or {}
-    changed_outside = _int_or_none(metrics.get("changed_outside_allowed_pixels")) or 0
-    changed_outside_ratio = _float_or_none(metrics.get("changed_outside_allowed_ratio")) or 0.0
-    collateral = _float_or_none(metrics.get("changed_outside_erase_inside_allowed_ratio")) or 0.0
+    changed_outside = (
+        _int_or_none(metrics.get("changed_outside_accepted_mask_pixels"))
+        or _int_or_none(metrics.get("changed_outside_allowed_pixels"))
+        or 0
+    )
+    changed_outside_ratio = (
+        _float_or_none(metrics.get("changed_outside_accepted_mask_ratio"))
+        or _float_or_none(metrics.get("changed_outside_allowed_ratio"))
+        or 0.0
+    )
+    collateral = (
+        _float_or_none(metrics.get("accepted_mask_collateral_ratio"))
+        or _float_or_none(metrics.get("changed_outside_erase_inside_allowed_ratio"))
+        or 0.0
+    )
     return (
         changed_outside > PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS
         or changed_outside_ratio > PROOF_CHANGED_OUTSIDE_ALLOWED_RATIO
@@ -6408,10 +6134,18 @@ def _white_patch_context_metrics(
 
 def _collateral_status(metrics: Mapping[str, Any], proof: CleanupProof) -> str:
     reason = str(proof.failure_reason or "")
-    if reason in {"changed_outside_allowed_area", "collateral_change_too_broad"}:
+    if reason in {"changed_outside_accepted_mask", "changed_outside_allowed_area", "collateral_change_too_broad"}:
         return "failed"
-    changed_outside = _int_or_none(metrics.get("changed_outside_allowed_pixels")) or 0
-    collateral = _float_or_none(metrics.get("changed_outside_erase_inside_allowed_ratio")) or 0.0
+    changed_outside = (
+        _int_or_none(metrics.get("changed_outside_accepted_mask_pixels"))
+        or _int_or_none(metrics.get("changed_outside_allowed_pixels"))
+        or 0
+    )
+    collateral = (
+        _float_or_none(metrics.get("accepted_mask_collateral_ratio"))
+        or _float_or_none(metrics.get("changed_outside_erase_inside_allowed_ratio"))
+        or 0.0
+    )
     if changed_outside > PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS or collateral > PROOF_COLLATERAL_INSIDE_ALLOWED_RATIO:
         return "failed"
     return "passed_or_not_primary"
@@ -6648,7 +6382,7 @@ def _job_exclusion_reason(job: CleanupJob) -> str:
         "source_ungrounded",
     ):
         if blocked in combined:
-            return f"pilot_excludes_{blocked}"
+            return f"cleanup_excludes_{blocked}"
     return ""
 
 
@@ -6689,8 +6423,8 @@ def _mask_exclusion_reason(cleanup_mask: CleanupMask, image_size: tuple[int, int
         return "erase_mask_bbox_missing_or_invalid"
     if bool(getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)):
         return "sourceglyph_executable_influence_detected"
-    if bool(getattr(cleanup_mask, "dense_contract_override_detected", False)):
-        return "dense_contract_override_detected"
+    if bool(getattr(cleanup_mask, "segmentation_contract_override_detected", False)):
+        return "segmentation_contract_override_detected"
     if bool(getattr(cleanup_mask, "ready_but_sparse_violation", False)):
         return "ready_but_sparse_violation"
     rejection_reason = str(getattr(cleanup_mask, "rejection_reason", "") or "")
@@ -6780,8 +6514,8 @@ def _runtime_structural_mask_error(cleanup_mask: CleanupMask) -> str:
         return "erase_mask_bbox_missing_or_invalid"
     if bool(getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)):
         return "sourceglyph_executable_influence_detected"
-    if bool(getattr(cleanup_mask, "dense_contract_override_detected", False)):
-        return "dense_contract_override_detected"
+    if bool(getattr(cleanup_mask, "segmentation_contract_override_detected", False)):
+        return "segmentation_contract_override_detected"
     if bool(getattr(cleanup_mask, "ready_but_sparse_violation", False)):
         return "ready_but_sparse_violation"
     if int(cleanup_mask.erase_mask_pixels or 0) <= 0:
@@ -6811,7 +6545,7 @@ def _accepted_executable_cleanup_mask(cleanup_mask: CleanupMask) -> bool:
         return False
     if bool(getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)):
         return False
-    if bool(getattr(cleanup_mask, "dense_contract_override_detected", False)):
+    if bool(getattr(cleanup_mask, "segmentation_contract_override_detected", False)):
         return False
     if bool(getattr(cleanup_mask, "bbox_executable_foreground_detected", False)):
         return False
@@ -6842,8 +6576,8 @@ def _cleanup_mask_non_executable_defect(cleanup_mask: CleanupMask) -> str:
         return f"mask_rejected_{rejection_reason}"
     if bool(getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)):
         return "sourceglyph_executable_influence_detected"
-    if bool(getattr(cleanup_mask, "dense_contract_override_detected", False)):
-        return "dense_contract_override_detected"
+    if bool(getattr(cleanup_mask, "segmentation_contract_override_detected", False)):
+        return "segmentation_contract_override_detected"
     if bool(getattr(cleanup_mask, "bbox_executable_foreground_detected", False)):
         return "bbox_executable_foreground_detected"
     if bool(getattr(cleanup_mask, "page_level_executable_foreground_detected", False)):
@@ -6957,10 +6691,10 @@ def _flat_background_pre_execution_rejection(
     source_error: str,
 ) -> tuple[str, dict[str, Any]]:
     if source_np is None:
-        return "pilot_source_image_evidence_unavailable", {"source_image_error": source_error}
+        return "cleanup_source_image_evidence_unavailable", {"source_image_error": source_error}
     metrics = _background_flatness_metrics(source_np, cleanup_mask.allowed_area)
     if metrics.get("error"):
-        return "pilot_source_image_evidence_unavailable", metrics
+        return "cleanup_source_image_evidence_unavailable", metrics
 
     allowed_area = int(metrics.get("allowed_area") or 0)
     edge_density = float(metrics.get("edge_density") or 0.0)
@@ -6972,7 +6706,7 @@ def _flat_background_pre_execution_rejection(
     page_broad_textured = page_ratio > 0.025 and edge_density >= 0.20 and luma_span >= 180.0
     very_broad_variable = allowed_area > 120_000 and (edge_density >= 0.12 or luma_std >= 45.0)
     if broad_textured or page_broad_textured or very_broad_variable:
-        return "pilot_background_not_flat_or_art_risk", metrics
+        return "cleanup_background_not_flat_or_art_risk", metrics
     return "", metrics
 
 

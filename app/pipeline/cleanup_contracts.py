@@ -237,9 +237,9 @@ class CleanupMask:
     owned_segmentation_to_commit_ratio: float | None = None
     ready_but_sparse_violation: bool = False
     sourceglyph_executable_influence_detected: bool = False
-    dense_contract_override_detected: bool = False
+    segmentation_contract_override_detected: bool = False
     clean_mask_authority: str = ""
-    dense_or_local_fallback_used: bool = False
+    non_segmentation_or_local_fallback_used: bool = False
     bbox_executable_foreground_detected: bool = False
     page_level_executable_foreground_detected: bool = False
     clean_mask_foreground_pixels: int | None = None
@@ -744,7 +744,7 @@ def build_cleanup_job_candidates(
                 skip_record.update(
                     {
                         "unsupported_future_cleanup_class": CleanupClass.ART_ENTANGLED_AMBIGUOUS.value,
-                        "non_pilot_reason": "artifact_risk_or_non_flat_background_not_caption_flat_background",
+                        "unsupported_cleanup_reason": "artifact_risk_or_non_flat_background_not_caption_flat_background",
                     }
                 )
             if predicate_class == "accepted_translated_render_obligation" and cleanup_class != CleanupClass.PRESERVE_SFX_DECORATIVE:
