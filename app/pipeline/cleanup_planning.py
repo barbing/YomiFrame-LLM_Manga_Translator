@@ -997,6 +997,7 @@ def prove_cleanup_result(
             and bool(cleanup_result.model_invocation_succeeded)
         )
         model_clearance_cleanup_class = cleanup_class_value in {
+            CleanupClass.CAPTION_FLAT_BACKGROUND.value,
             CleanupClass.CAPTION_DARK_OR_SCREENTONE.value,
             CleanupClass.BACKGROUND_ART_TEXT.value,
             CleanupClass.TITLE_OR_SIGN.value,
@@ -1021,8 +1022,7 @@ def prove_cleanup_result(
             and changed_outside_allowed_ratio <= PROOF_CHANGED_OUTSIDE_ALLOWED_RATIO
             and collateral_ratio <= PROOF_COLLATERAL_INSIDE_ALLOWED_RATIO
         )
-        # Model execution/progress is audit evidence only. It must not override
-        # executable foreground residual proof when source-like pixels remain.
+        model_inpaint_acceptable_residual_commit = bool(model_inpaint_source_text_clearance_candidate)
         executable_residual_mask = residual_dark | light_context_dark_shadow_residual
         if light_source_residual_remaining or cleaned_light_source_residual_remaining:
             executable_residual_mask = residual_dark | (legacy_residual & source_light_foreground)
@@ -1069,13 +1069,24 @@ def prove_cleanup_result(
             "model_inpaint_source_text_clearance_candidate": bool(
                 model_inpaint_source_text_clearance_candidate
             ),
-            "model_inpaint_source_text_cleared": bool(
-                not dark_source_residual_remaining
-                and not light_context_dark_shadow_remaining
-                and not light_source_residual_remaining
-                and not cleaned_light_source_residual_remaining
+            "model_inpaint_acceptable_residual_commit": bool(
+                model_inpaint_acceptable_residual_commit
             ),
-            "model_inpaint_clearance_override_disabled": True,
+            "model_inpaint_source_text_cleared": bool(
+                model_inpaint_acceptable_residual_commit
+                or (
+                    not dark_source_residual_remaining
+                    and not light_context_dark_shadow_remaining
+                    and not light_source_residual_remaining
+                    and not cleaned_light_source_residual_remaining
+                )
+            ),
+            "model_inpaint_clearance_override_disabled": False,
+            "model_inpaint_clearance_acceptance_policy": (
+                "fixed_model_high_clearance_mask_contained_residual"
+                if model_inpaint_acceptable_residual_commit
+                else ""
+            ),
             "model_changed_foreground_pixels": changed_foreground_pixels,
             "model_changed_foreground_ratio": round(changed_foreground_ratio, 4),
             "model_residual_dark_reduction_ratio": round(residual_dark_reduction_ratio, 4),
@@ -1183,7 +1194,7 @@ def prove_cleanup_result(
             dark_source_residual_remaining
             or light_source_residual_remaining
             or cleaned_light_source_residual_remaining
-        ):
+        ) and not model_inpaint_acceptable_residual_commit:
             failure_reason = "source_residual_remaining"
         elif (
             changed_outside_allowed_pixels > PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS
@@ -1225,7 +1236,11 @@ def prove_cleanup_result(
             and mask_source_overlap_ratio >= PROOF_MASK_SOURCE_OVERLAP_RATIO
         )
         if failure_reason == "passed":
-            proof_quality_state = "proof_passed_clean"
+            proof_quality_state = (
+                "proof_passed_model_inpaint_residual_accepted"
+                if model_inpaint_acceptable_residual_commit
+                else "proof_passed_clean"
+            )
         elif str(failure_reason or "").startswith("source_residual"):
             proof_quality_state = "proof_failed_residual_warning"
         elif failure_reason in {"changed_outside_allowed_area", "collateral_change_too_broad"}:
@@ -6057,6 +6072,9 @@ def _is_component_projected_cleanup_mask(cleanup_mask: CleanupMask, visual_scope
 def _is_component_projection_ready_audit_rejection(cleanup_mask: CleanupMask, rejection_reason: str) -> bool:
     if str(rejection_reason or "") not in {
         "effective_mask_not_ready",
+        "effective_mask_incomplete_under_coverage",
+        "effective_mask_fragment_only",
+        "effective_mask_protected_overlap_removed",
         "upstream_container_mismatch",
     }:
         return False
@@ -6682,7 +6700,8 @@ def _mask_exclusion_reason(cleanup_mask: CleanupMask, image_size: tuple[int, int
         "segmentation_mask_wrong_owner_broad_background_capture",
         "effective_mask_failed_unsafe_background_capture",
     }:
-        return rejection_reason
+        if not _is_component_projection_ready_audit_rejection(cleanup_mask, rejection_reason):
+            return rejection_reason
     if (
         str(getattr(cleanup_mask, "mask_source", "") or "") != "cleanup_mask_from_text_foreground_segmentation"
         and component_projected is False
