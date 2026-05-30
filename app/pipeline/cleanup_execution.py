@@ -261,7 +261,13 @@ def apply_text_removal(
             )
             from app.pipeline.cleanup_inpainting import ai_inpaint_cleanup
             ai_mask = (np.asarray(text_mask) > 0).astype(np.uint8) * 255
-            result = ai_inpaint_cleanup(image, ai_mask, use_gpu=use_gpu, model_id=model_id)
+            result = ai_inpaint_cleanup(
+                image,
+                ai_mask,
+                use_gpu=use_gpu,
+                model_id=model_id,
+                mask_prepared=bool((debug_info or {}).get("model_inpaint_mask_prepared")),
+            )
             print("[TextRemoval] AI INPAINT Success")
             _set_cleanup_backend(
                 debug_info,

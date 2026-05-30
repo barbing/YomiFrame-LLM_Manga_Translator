@@ -186,6 +186,7 @@ def ai_inpaint_cleanup(
     mask,
     use_gpu: bool = True,
     model_id: str = FIXED_CLEANUP_INPAINT_MODEL_ID,
+    mask_prepared: bool = False,
 ):
     """Perform cleanup-owned AI inpainting using LaMa."""
 
@@ -211,9 +212,12 @@ def ai_inpaint_cleanup(
     if cv2 is None or np is None:
         raise RuntimeError("cv2 and numpy are required for AI inpainting")
 
-    kernel_size = max(5, int(max(mask.shape) * 0.005))
-    kernel = np.ones((kernel_size, kernel_size), np.uint8)
-    dilated_mask = cv2.dilate(mask, kernel, iterations=2)
+    if mask_prepared:
+        dilated_mask = (np.asarray(mask) > 0).astype(np.uint8) * 255
+    else:
+        kernel_size = max(5, int(max(mask.shape) * 0.005))
+        kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        dilated_mask = cv2.dilate(mask, kernel, iterations=2)
 
     device = "cuda" if use_gpu else "cpu"
     model_info = resolve_cleanup_inpaint_model(model_id)
@@ -291,7 +295,14 @@ def ai_inpaint(
     mask,
     use_gpu: bool = True,
     model_id: str = FIXED_CLEANUP_INPAINT_MODEL_ID,
+    mask_prepared: bool = False,
 ):
     """Compatibility alias for cleanup-owned callers."""
 
-    return ai_inpaint_cleanup(image, mask, use_gpu=use_gpu, model_id=model_id)
+    return ai_inpaint_cleanup(
+        image,
+        mask,
+        use_gpu=use_gpu,
+        model_id=model_id,
+        mask_prepared=mask_prepared,
+    )

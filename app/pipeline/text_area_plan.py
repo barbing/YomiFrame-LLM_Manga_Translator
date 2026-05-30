@@ -134,6 +134,7 @@ WEAK_BACKGROUND_AUTHORITY_REASON_TOKENS = (
     "typed_deterministic_side_narration_background_authority",
     "typed_side_narration_background_authority",
     "typed_deterministic_top_band_background_authority",
+    "deterministic_top_band_background_authority",
     "typed_text_free_background_model_authority",
     "deterministic_side_narration_background_authority",
     "side_narration_background_authority",
@@ -145,6 +146,17 @@ WEAK_SIDE_BACKGROUND_AUTHORITY_REASON_TOKENS = (
     "deterministic_side_narration_background_authority",
     "side_narration_background_authority",
 )
+
+PROTECTED_BLOCKING_COMPONENT_DEFECT_CODES = {
+    "sfx_group_conflicts_with_cleanup_authorization",
+    "large_decorative_component_conflicts_with_cleanup_authority",
+}
+
+REVIEW_BLOCKING_COMPONENT_DEFECT_CODES = {
+    "large_review_only_caption_component_conflicts_with_cleanup_authority",
+    "large_review_only_caption_group_conflicts_with_cleanup_authority",
+    "unowned_display_neighbor_conflicts_with_cleanup_authority",
+}
 
 OGKALU_ONLY_SPEECH_AUTHORITY_REASON_TOKENS = (
     "typed_bright_ogkalu_bubble_speech_authority",
@@ -650,6 +662,7 @@ def build_text_area_component_authorization_map(
     _component_auth_apply_unowned_display_neighbor_conflicts(components)
     _component_auth_apply_protected_sfx_grouping(components)
     _component_auth_apply_review_only_caption_guard(components)
+    _component_auth_apply_terminal_authority_guards(components)
     _component_auth_assign_groups(str(page_id), components)
     state_counts: Dict[str, int] = {}
     for record in components:
@@ -1283,14 +1296,15 @@ def _component_auth_record(
         )
     ]
     explicit_units = cleanup_candidates + protected_candidates + ambiguous_candidates
-    explicit_projection_states = sorted(
-        {
-            str(item.get("authorization_state") or "")
-            for item in explicit_projection_candidates
-            if str(item.get("authorization_state") or "")
-        }
+    explicit_projection_families = {
+        _component_auth_family(str(item.get("authorization_state") or ""))
+        for item in explicit_projection_candidates
+        if str(item.get("authorization_state") or "")
+    }
+    has_projection_authority_conflict = bool(
+        "cleanup" in explicit_projection_families
+        and "protected" in explicit_projection_families
     )
-    has_projection_authority_conflict = len(explicit_projection_states) > 1
     best_cleanup = cleanup_candidates[0] if cleanup_candidates else None
     best_protected = protected_candidates[0] if protected_candidates else None
     ambiguity_reasons: List[str] = []
@@ -2166,6 +2180,10 @@ def _component_auth_set_state(
     if family != "cleanup":
         record.job_binding_state = "not_applicable_semantic_conflict" if state == AUTH_AMBIGUOUS_COMPONENT_OWNER else "not_applicable_non_cleanup"
         record.job_binding_failure_reason = ""
+        record.owner_cleanup_job_id = ""
+        record.scope_cleanup_job_ids = []
+        record.mask_readiness_state = MASK_NOT_APPLICABLE
+        record.mask_readiness_failure_reason = ""
         record.reason_codes = [
             item
             for item in record.reason_codes
@@ -2175,6 +2193,80 @@ def _component_auth_set_state(
         record.reason_codes.append(reason)
     if ambiguity and reason and reason not in record.ambiguity_reasons:
         record.ambiguity_reasons.append(reason)
+
+
+def _component_auth_apply_terminal_authority_guards(records: Sequence[TextAreaComponentAuthorizationRecord]) -> None:
+    """Resolve blocking contract defects before CleanupMask consumption.
+
+    Orange/debug ambiguity is useful during review, but green/executable is not
+    allowed to survive a proven protected/decorative conflict on the same
+    component. A sibling/root-level protected conflict is audit evidence only;
+    it must not demote otherwise authorized text in the same cleanup task.
+    """
+
+    for record in records:
+        if _component_auth_family(record.authorization_state) != "cleanup":
+            continue
+        defect_codes = set(record.component_contract_defect_codes or [])
+        if defect_codes & PROTECTED_BLOCKING_COMPONENT_DEFECT_CODES:
+            if _component_auth_is_speech_record(record) and not _component_auth_is_weak_background_authority_record(record):
+                continue
+            if _component_auth_record_has_protected_conflict(record):
+                _component_auth_set_state(
+                    record,
+                    AUTH_PROTECT_SFX_DECORATIVE,
+                    reason="component_authority_blocked_by_protected_conflict",
+                )
+                record.explicit_cleanup_authority = False
+                record.explicit_protected_authority = True
+                record.protection_owner_ids = list(record.protection_container_ids or record.protection_owner_ids or [])
+                record.protected_reason_codes = list(record.reason_codes)
+                continue
+            _component_auth_set_state(
+                record,
+                AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+                reason="component_authority_blocked_by_unresolved_protected_conflict",
+            )
+            record.explicit_cleanup_authority = False
+            continue
+        if defect_codes & REVIEW_BLOCKING_COMPONENT_DEFECT_CODES and _component_auth_is_weak_background_authority_record(record):
+            _component_auth_set_state(
+                record,
+                AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+                reason="component_authority_blocked_by_contract_defect",
+            )
+            record.explicit_cleanup_authority = False
+            continue
+
+
+def _component_auth_record_has_protected_conflict(record: TextAreaComponentAuthorizationRecord) -> bool:
+    if record.protection_container_ids or record.protection_owner_ids:
+        return True
+    if record.explicit_protected_authority:
+        return True
+    if any(_component_auth_family(state) == "protected" for state in record.semantic_unit_states or []):
+        return True
+    if any("protect_" in str(reason) or "sfx" in str(reason).lower() for reason in record.protected_reason_codes or []):
+        return True
+    return False
+
+
+def _component_auth_is_weak_background_authority_record(record: TextAreaComponentAuthorizationRecord) -> bool:
+    if record.authorization_state not in {
+        AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+        AUTH_CLEANUP_TRANSLATE_CAPTION,
+        AUTH_AMBIGUOUS_COMPONENT_OWNER,
+    }:
+        return False
+    marker = " ".join(
+        [
+            str(record.confidence_tier or ""),
+            " ".join(record.reason_codes or []),
+            " ".join(record.semantic_evidence_providers or []),
+            " ".join(record.semantic_unit_states or []),
+        ]
+    )
+    return any(token in marker for token in WEAK_BACKGROUND_AUTHORITY_REASON_TOKENS)
 
 
 def _component_auth_add_contract_diagnostic(
@@ -6559,6 +6651,16 @@ def _looks_like_dark_unlinked_ogkalu_sfx_or_decorative(
         return False
     role_classes = set(_semantic_role_values(semantic_role_evidence, "ogkalu_class_names"))
     if not (role_classes & {"bubble", "text_bubble"}):
+        return False
+    conflict_evidence = set(_semantic_role_values(semantic_role_evidence, "conflict_evidence"))
+    has_typed_sfx_conflict = bool(
+        _has_recognized_sfx_or_decorative_evidence(semantic_role_evidence)
+        or any(
+            any(token in str(conflict).lower() for token in ("sfx", "decorative", "art", "non_text", "non-text"))
+            for conflict in conflict_evidence
+        )
+    )
+    if not has_typed_sfx_conflict:
         return False
     x, y, w, h = _coerce_xywh(bbox)
     width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
