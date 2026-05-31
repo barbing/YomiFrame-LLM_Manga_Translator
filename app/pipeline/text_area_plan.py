@@ -1611,7 +1611,7 @@ def _component_auth_apply_protected_sfx_grouping(records: Sequence[TextAreaCompo
     seeds = [
         record
         for record in records
-        if record.authorization_state == AUTH_PROTECT_SFX_DECORATIVE and record.component_pixel_count >= 20
+        if _component_auth_is_protected_sfx_group_seed(record)
     ]
     if not seeds:
         return
@@ -1626,7 +1626,8 @@ def _component_auth_apply_protected_sfx_grouping(records: Sequence[TextAreaCompo
             matching_seeds[0],
         )
         is_local_sfx_continuation = _component_auth_is_local_sfx_continuation(record, matching_seed)
-        if _component_auth_is_speech_record(record) and not is_local_sfx_continuation:
+        protected_seed_overlap = _component_auth_component_inside_protected_seed(record, matching_seed)
+        if _component_auth_is_speech_record(record) and not (is_local_sfx_continuation or protected_seed_overlap):
             continue
         if record.authorization_state in {
             AUTH_CLEANUP_TRANSLATE_SPEECH,
@@ -1636,6 +1637,7 @@ def _component_auth_apply_protected_sfx_grouping(records: Sequence[TextAreaCompo
             if not (
                 _component_auth_has_decorative_evidence(record)
                 or is_local_sfx_continuation
+                or protected_seed_overlap
             ):
                 continue
             _component_auth_add_contract_diagnostic(
@@ -1652,9 +1654,78 @@ def _component_auth_apply_protected_sfx_grouping(records: Sequence[TextAreaCompo
                 warning=True,
                 visual_review=True,
             )
-        for container_id in matching_seed.protection_container_ids:
+        for container_id in _component_auth_protected_seed_owner_ids(matching_seed):
             if container_id and container_id not in record.protection_container_ids:
                 record.protection_container_ids.append(container_id)
+
+
+def _component_auth_is_protected_sfx_group_seed(record: TextAreaComponentAuthorizationRecord) -> bool:
+    if record.component_pixel_count < 20:
+        return False
+    if record.authorization_state == AUTH_PROTECT_SFX_DECORATIVE:
+        return True
+    if set(record.component_contract_defect_codes or []) & PROTECTED_BLOCKING_COMPONENT_DEFECT_CODES:
+        return True
+    marker = _component_auth_record_marker(record)
+    if not any(
+        token in marker
+        for token in (
+            "deterministic_large_sfx",
+            "semantic_sfx_decorative_authority",
+            "explicit_sfx_decorative_authorization",
+            "protect_sfx_decorative",
+            "sfx_decorative",
+        )
+    ):
+        return False
+    if record.authorization_state == AUTH_AMBIGUOUS_COMPONENT_OWNER:
+        return True
+    if record.explicit_protected_authority:
+        return True
+    return AUTH_PROTECT_SFX_DECORATIVE in set(record.semantic_unit_states or [])
+
+
+def _component_auth_protected_seed_owner_ids(record: TextAreaComponentAuthorizationRecord) -> List[str]:
+    ids: List[str] = []
+    for source, force_include in (
+        (record.protection_container_ids, True),
+        (record.protection_owner_ids, True),
+        (record.candidate_container_ids, False),
+        (record.owning_container_ids, False),
+    ):
+        for item in source or []:
+            value = str(item or "")
+            marker = value.lower()
+            if not value:
+                continue
+            if value in ids:
+                continue
+            if force_include or "sfx" in marker or "decorative" in marker:
+                ids.append(value)
+    if not ids and _component_auth_is_protected_sfx_group_seed(record):
+        ids.append(str(record.component_id or "protected_sfx_component"))
+    return ids
+
+
+def _component_auth_component_inside_protected_seed(
+    record: TextAreaComponentAuthorizationRecord,
+    seed: TextAreaComponentAuthorizationRecord,
+) -> bool:
+    if len(record.component_bbox) < 4 or len(seed.component_bbox) < 4:
+        return False
+    ax0, ay0, ax1, ay1 = [int(item) for item in record.component_bbox[:4]]
+    bx0, by0, bx1, by1 = [int(item) for item in seed.component_bbox[:4]]
+    if ax1 <= ax0 or ay1 <= ay0 or bx1 <= bx0 or by1 <= by0:
+        return False
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    overlap_area = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+    area = max(1, (ax1 - ax0) * (ay1 - ay0))
+    if overlap_area / float(area) >= 0.35:
+        return True
+    cx = (ax0 + ax1) / 2.0
+    cy = (ay0 + ay1) / 2.0
+    return bool(bx0 <= cx < bx1 and by0 <= cy < by1)
 
 
 def _component_auth_apply_vertical_review_text_groups(records: Sequence[TextAreaComponentAuthorizationRecord]) -> None:
@@ -2452,7 +2523,11 @@ def _component_auth_apply_terminal_authority_guards(records: Sequence[TextAreaCo
             continue
         defect_codes = set(record.component_contract_defect_codes or [])
         if defect_codes & PROTECTED_BLOCKING_COMPONENT_DEFECT_CODES:
-            if _component_auth_is_speech_record(record) and not _component_auth_is_weak_background_authority_record(record):
+            if (
+                _component_auth_is_speech_record(record)
+                and not _component_auth_is_weak_background_authority_record(record)
+                and _component_auth_is_strong_speech_authority_record(record)
+            ):
                 continue
             if _component_auth_record_has_protected_conflict(record):
                 _component_auth_set_state(
@@ -2480,6 +2555,26 @@ def _component_auth_apply_terminal_authority_guards(records: Sequence[TextAreaCo
             )
             record.explicit_cleanup_authority = False
             continue
+
+
+def _component_auth_is_strong_speech_authority_record(record: TextAreaComponentAuthorizationRecord) -> bool:
+    marker = _component_auth_record_marker(record)
+    if any(
+        token in marker
+        for token in (
+            "kitsumed_mask_primary_geometry",
+            "speech_mask_container",
+            "speech_bubble_mask_evidence",
+            "kitsumed_speech_mask_evidence",
+            "current_region_speech_authority",
+        )
+    ):
+        return True
+    if "ogkalu_text_bubble_without_kitsumed_mask" in marker:
+        return False
+    if "ogkalu_bubble_without_kitsumed_mask" in marker:
+        return False
+    return False
 
 
 def _component_auth_record_has_protected_conflict(record: TextAreaComponentAuthorizationRecord) -> bool:
