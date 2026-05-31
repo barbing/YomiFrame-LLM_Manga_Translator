@@ -840,9 +840,12 @@ def prove_cleanup_result(
             and light_context_median_luma is not None
             and source_dark_foreground_pixels > 0
         ):
+            # A model may restore screentone or panel lines inside the original
+            # glyph footprint. Treat only source-like dark pixels as proof
+            # residual; absolute darkness in a light neighborhood is audit
+            # evidence, not source text by itself.
             light_context_dark_shadow_residual = (
-                (foreground > 0)
-                & source_dark_foreground
+                residual_dark
                 & (cleaned_gray < max(0.0, light_context_median_luma - 10.0))
             )
             light_context_dark_shadow_pixels = int(
@@ -974,6 +977,28 @@ def prove_cleanup_result(
             )
             and model_white_patch_non_destructive
         )
+        model_restored_background_texture_acceptance = (
+            model_inpaint_source_text_clearance_base
+            and fixed_cleanup_model_backend
+            and model_white_patch_non_destructive
+            and not light_source_residual_remaining
+            and not cleaned_light_source_residual_remaining
+            and residual_dark_reduction_ratio >= 0.60
+            and changed_foreground_ratio >= 0.70
+            and (
+                (
+                    residual_component_count >= 3
+                    and residual_largest_component_ratio <= 0.35
+                )
+                or (
+                    residual_dark_pixels <= max(
+                        160,
+                        int(source_dark_foreground_pixels * 0.25),
+                    )
+                    and residual_dark_reduction_ratio >= 0.75
+                )
+            )
+        )
         model_light_text_dark_context_acceptance = (
             fixed_cleanup_model_backend
             and source_light_text_on_dark_context
@@ -1002,15 +1027,6 @@ def prove_cleanup_result(
             and white_patch_ratio <= 0.25
             and model_white_patch_non_destructive
         )
-        if model_light_text_dark_context_acceptance or model_fragmented_texture_acceptance:
-            # For light glyphs over dark/screentone backgrounds, a successful
-            # fixed-model inpaint should restore dark texture where the glyph
-            # interior used to be. Treating that restored texture as residual
-            # text blocks valid background and side-caption cleanup.
-            dark_source_residual_remaining = False
-            light_context_dark_shadow_remaining = False
-        if model_light_text_white_patch_acceptance:
-            broad_white_patch_risk = False
         executable_residual_mask = preliminary_executable_residual_mask
         executable_residual_pixels = int(np.count_nonzero(executable_residual_mask))
         executable_residual_ratio = executable_residual_pixels / max(1, foreground_pixels)
@@ -1026,11 +1042,7 @@ def prove_cleanup_result(
             or backend_name in {"", "none", "error"}
             or candidate_status not in {"completed"}
         )
-        model_inpaint_acceptable_residual_commit = bool(
-            model_light_text_dark_context_acceptance
-            or model_fragmented_texture_acceptance
-            or model_light_text_white_patch_acceptance
-        )
+        model_inpaint_acceptable_residual_commit = False
         metrics = {
             "source_foreground_pixels": foreground_pixels,
             "erase_foreground_overlap_pixels": erase_foreground_overlap,
@@ -1092,17 +1104,7 @@ def prove_cleanup_result(
             "model_inpaint_clearance_override_disabled": not bool(
                 model_inpaint_acceptable_residual_commit
             ),
-            "model_inpaint_clearance_acceptance_policy": (
-                "fixed_model_low_absolute_residual"
-                if model_low_absolute_residual_acceptance
-                else "fixed_model_fragmented_texture_residual"
-                if model_fragmented_texture_acceptance
-                else "fixed_model_light_text_dark_context"
-                if model_light_text_dark_context_acceptance
-                else "fixed_model_non_destructive_white_patch"
-                if model_light_text_white_patch_acceptance
-                else ""
-            ),
+            "model_inpaint_clearance_acceptance_policy": "",
             "model_inpaint_light_text_dark_context_acceptance": bool(
                 model_light_text_dark_context_acceptance
             ),
@@ -1111,6 +1113,9 @@ def prove_cleanup_result(
             ),
             "model_inpaint_fragmented_texture_acceptance": bool(
                 model_fragmented_texture_acceptance
+            ),
+            "model_inpaint_restored_background_texture_acceptance": bool(
+                model_restored_background_texture_acceptance
             ),
             "model_changed_foreground_pixels": changed_foreground_pixels,
             "model_changed_foreground_ratio": round(changed_foreground_ratio, 4),
@@ -1224,7 +1229,10 @@ def prove_cleanup_result(
             dark_source_residual_remaining
             or light_source_residual_remaining
             or cleaned_light_source_residual_remaining
-        ) and not model_inpaint_acceptable_residual_commit:
+        ) and not (
+            model_inpaint_acceptable_residual_commit
+            or model_restored_background_texture_acceptance
+        ):
             failure_reason = "source_residual_remaining"
         elif (
             changed_outside_accepted_mask_pixels > PROOF_CHANGED_OUTSIDE_ALLOWED_PIXELS
@@ -1265,7 +1273,9 @@ def prove_cleanup_result(
             and not broad_white_patch_risk
             and mask_source_overlap_ratio >= PROOF_MASK_SOURCE_OVERLAP_RATIO
         )
-        if failure_reason == "passed" and model_inpaint_acceptable_residual_commit:
+        if failure_reason == "passed" and model_restored_background_texture_acceptance:
+            proof_quality_state = "proof_passed_model_inpaint_restored_background_texture"
+        elif failure_reason == "passed" and model_inpaint_acceptable_residual_commit:
             proof_quality_state = "proof_passed_model_inpaint_residual_accepted"
         elif failure_reason == "passed":
             proof_quality_state = "proof_passed_clean"

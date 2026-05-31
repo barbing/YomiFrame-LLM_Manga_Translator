@@ -541,6 +541,7 @@ def build_cleanup_masks(
             if erase_bbox is None:
                 rejected_records.append({**base, "reason": "erase_mask_bbox_empty"})
                 continue
+            mask_allowed_area = _valid_bbox(effective.audit.get("component_projected_execution_scope_bbox")) or allowed
 
             growth_ratio = _growth_ratio(erase_pixels, foreground_pixels)
             artifact_risk = (
@@ -566,7 +567,7 @@ def build_cleanup_masks(
             ):
                 exception_reason = "text_area_component_authorization_map_growth_exception"
             broad_rejection = _broad_mask_rejection(
-                allowed=allowed,
+                allowed=mask_allowed_area,
                 erase_bbox=erase_bbox,
                 erase_pixels=erase_pixels,
                 growth_ratio=growth_ratio,
@@ -621,7 +622,7 @@ def build_cleanup_masks(
                 foreground_mask_pixels=foreground_pixels,
                 erase_mask_bbox=erase_bbox,
                 erase_mask_pixels=erase_pixels,
-                allowed_area=allowed,
+                allowed_area=mask_allowed_area,
                 growth_ratio=growth_ratio,
                 mask_source=mask_source,
                 mask_method=mask_method,
@@ -1167,7 +1168,13 @@ def _build_component_projected_text_mask(
         for component_id in owned_ids
         if not _component_by_id(component_projection, component_id).get("sourceglyph_overlap_pixels", 0)
     ]
-    coverage_ratio = _text_block_coverage_estimate(bbox, allowed) if bbox is not None else 0.0
+    execution_allowed = _component_projected_execution_allowed_area(
+        source_allowed=allowed,
+        foreground_bbox=bbox,
+        mask_shape=foreground.shape if foreground is not None else segmentation_mask.shape,
+    )
+    component_analysis_scope = bbox or execution_allowed
+    coverage_ratio = _text_block_coverage_estimate(bbox, component_analysis_scope) if bbox is not None else 0.0
     stats = _component_stats(foreground) if foreground is not None else {"component_count": 0, "largest_component_pixels": 0}
     status = "cleanup_mask_ready_from_owned_segmentation_components"
     failure_reason = ""
@@ -1189,7 +1196,7 @@ def _build_component_projected_text_mask(
     else:
         coverage_reason = _segmentation_effective_coverage_reason(
             foreground=foreground,
-            analysis_scope=allowed,
+            analysis_scope=component_analysis_scope,
             job=job,
             protected_overlap_pixels=int(projection["protected_component_pixel_count"]),
             owner_pixels=max(1, int(projection["owned_component_pixel_count"]) + int(projection["protected_component_pixel_count"])),
@@ -1200,24 +1207,22 @@ def _build_component_projected_text_mask(
             foreground_pixels=foreground_pixels,
             job=job,
         )
-        unsafe_reason = _segmentation_foreground_unsafe_reason(foreground, allowed, job)
-        mismatch_reason = "upstream_container_mismatch" if foreground_outside_allowed_pixels > 0 else ""
-        if coverage_reason or owned_ratio_reason or unsafe_reason or mismatch_reason or ambiguous_ids or unowned_ids:
+        unsafe_reason = _segmentation_foreground_unsafe_reason(foreground, execution_allowed, job)
+        if coverage_reason or owned_ratio_reason or unsafe_reason or ambiguous_ids or unowned_ids:
             status = "cleanup_mask_partial_owned_components"
             failure_reason = (
-                mismatch_reason
-                or coverage_reason
+                coverage_reason
                 or owned_ratio_reason
                 or unsafe_reason
                 or ("effective_mask_not_ready" if ambiguous_ids else "")
                 or "cleanup_mask_partial_owned_components"
             )
-            rejected = bool(mismatch_reason or coverage_reason or owned_ratio_reason or unsafe_reason or ambiguous_ids)
+            rejected = bool(coverage_reason or owned_ratio_reason or unsafe_reason or ambiguous_ids)
 
     seed_pixels = int(np.count_nonzero(seed_foreground > 0)) if seed_foreground is not None else 0
     erase = None
     if foreground is not None and foreground_pixels > 0:
-        erase = _effective_erase_from_foreground(foreground, allowed, job)
+        erase = _effective_erase_from_foreground(foreground, execution_allowed, job)
     erase_pixels = int(np.count_nonzero(erase > 0)) if erase is not None else 0
     erase_to_foreground_ratio = round(float(erase_pixels) / float(max(1, foreground_pixels)), 4) if foreground_pixels > 0 else 0.0
     green_to_erase_ratio = 0.0
@@ -1248,6 +1253,9 @@ def _build_component_projected_text_mask(
         "bbox_fill_ratio_before": 0.0,
         "bbox_fill_ratio_after": _mask_fill_ratio(foreground) if foreground is not None else 0.0,
         "analysis_scope_bbox": allowed,
+        "component_projected_analysis_scope_bbox": component_analysis_scope,
+        "component_projected_execution_scope_bbox": execution_allowed,
+        "component_projected_execution_scope_source": "text_area_component_authorization_map_owned_component_union",
         "executable_erase_bbox": _mask_bbox(erase) if erase is not None else None,
         "mask_completion_method": "text_area_component_authorization_map_projection",
         "polarity_mode": "segmentation",
@@ -2411,6 +2419,30 @@ def _component_mask_from_ids(
     if not labels:
         return None
     return np.isin(component_projection.labels, labels).astype(np.uint8)
+
+
+def _component_projected_execution_allowed_area(
+    *,
+    source_allowed: Sequence[int],
+    foreground_bbox: Sequence[int] | None,
+    mask_shape: Sequence[int],
+) -> list[int]:
+    base = _valid_bbox(source_allowed)
+    foreground_box = _valid_bbox(foreground_bbox)
+    if foreground_box is None:
+        return base or [0, 0, int(mask_shape[1]), int(mask_shape[0])]
+    # Component authorization is the cleanup-owned page-space surface. The
+    # source/job box remains provenance, but it must not clip explicitly bound
+    # components that TextAreaPlan has already authorized.
+    execution_box = _union_bboxes([box for box in (base, _expand_bbox(foreground_box, 8)) if box is not None])
+    if execution_box is None:
+        execution_box = foreground_box
+    height = int(mask_shape[0]) if len(mask_shape) >= 1 else 0
+    width = int(mask_shape[1]) if len(mask_shape) >= 2 else 0
+    if width <= 0 or height <= 0:
+        return execution_box
+    x0, y0, x1, y1 = _clip_bbox_to_size(execution_box, width, height)
+    return [x0, y0, x1, y1]
 
 
 def _component_by_id(component_projection: _ComponentOwnershipProjection, component_id: str) -> dict[str, Any]:

@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 
-BUBBLE_DETECTION_VERSION = "phase4b21_bubble_detection_semantic_authority_contract_v2"
-BUBBLE_DETECTION_CACHE_VERSION = "phase4b21_bubble_detection_semantic_authority_cache_v2"
+BUBBLE_DETECTION_VERSION = "phase4b21_bubble_detection_semantic_authority_contract_v3"
+BUBBLE_DETECTION_CACHE_VERSION = "phase4b21_bubble_detection_semantic_authority_cache_v3"
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = ROOT / "scripts"
@@ -1447,6 +1447,8 @@ def _annotate_fused_container_semantic_role_evidence(
         cleanup_candidate_states: set[str] = set()
         protected_authority_states: set[str] = set()
         protected_candidate_states: set[str] = set()
+        neighboring_speech_context_ids: set[str] = set()
+        model_confidences: list[float] = []
         model_evidence_bboxes: list[Dict[str, Any]] = []
         text_unit_evidence_bboxes: list[Dict[str, Any]] = []
         speech_mask_polygons: list[Dict[str, Any]] = []
@@ -1477,6 +1479,9 @@ def _annotate_fused_container_semantic_role_evidence(
                             "confidence": entry.get("confidence"),
                         }
                     )
+                    confidence = _safe_float(entry.get("confidence"))
+                    if confidence is not None:
+                        model_confidences.append(confidence)
             for entry in role.get("speech_mask_polygons") or []:
                 if not isinstance(entry, Mapping):
                     continue
@@ -1506,11 +1511,24 @@ def _annotate_fused_container_semantic_role_evidence(
                 seen_record_keys.add(key)
                 semantic_evidence_records.append(dict(entry))
 
+        def add_role_contract_context(role: Mapping[str, Any]) -> None:
+            neighboring_speech_context_ids.update(
+                str(item)
+                for item in (role.get("neighboring_speech_context_ids") or [])
+                if str(item)
+            )
+            confidence = _safe_float(role.get("model_confidence"))
+            if confidence is None:
+                confidence = _safe_float(role.get("confidence"))
+            if confidence is not None:
+                model_confidences.append(confidence)
+
         for evidence_id in [str(item) for item in container.get("linked_kitsumed_mask_ids") or [] if str(item)]:
             model_ids.append(evidence_id)
             evidence = bubble_by_id.get(evidence_id, {})
             role = evidence.get("semantic_role_evidence") if isinstance(evidence.get("semantic_role_evidence"), Mapping) else {}
             add_role_bboxes(role)
+            add_role_contract_context(role)
             role_signals.update(str(item) for item in (role.get("role_signals") or []) if str(item))
             evidence_source_list.update(str(item) for item in (role.get("evidence_source_list") or []) if str(item))
             candidate_roles.update(str(item) for item in (role.get("candidate_roles") or []) if str(item))
@@ -1524,6 +1542,7 @@ def _annotate_fused_container_semantic_role_evidence(
             evidence = text_by_id.get(evidence_id, {})
             role = evidence.get("semantic_role_evidence") if isinstance(evidence.get("semantic_role_evidence"), Mapping) else {}
             add_role_bboxes(role)
+            add_role_contract_context(role)
             role_signals.update(str(item) for item in (role.get("role_signals") or []) if str(item))
             evidence_source_list.update(str(item) for item in (role.get("evidence_source_list") or []) if str(item))
             candidate_roles.update(str(item) for item in (role.get("candidate_roles") or []) if str(item))
@@ -1621,6 +1640,8 @@ def _annotate_fused_container_semantic_role_evidence(
             "cleanup_candidate_states": sorted(cleanup_candidate_states),
             "protected_authority_states": sorted(protected_authority_states),
             "protected_candidate_states": sorted(protected_candidate_states),
+            "neighboring_speech_context_ids": sorted(neighboring_speech_context_ids),
+            "model_confidence": max(model_confidences) if model_confidences else None,
             "authority_evidence_kind": "typed_fused_bubble_detection_role_evidence",
             "semantic_evidence_records": semantic_evidence_records,
             "confidence": container.get("confidence"),

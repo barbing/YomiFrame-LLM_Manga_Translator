@@ -656,6 +656,7 @@ def build_text_area_component_authorization_map(
 
     _component_auth_apply_vertical_review_text_groups(components)
     _component_auth_apply_orphan_text_near_cleanup_groups(components)
+    _component_auth_apply_ogkalu_speech_text_group_completion(components)
     _component_auth_apply_protected_sfx_grouping(components)
     _component_auth_apply_large_decorative_review_rule(components)
     _component_auth_apply_large_decorative_review_groups(components)
@@ -1834,6 +1835,248 @@ def _component_auth_cleanup_anchor_for_orphan_group(
         return None
     anchors.sort(key=lambda item: _component_auth_bbox_gap(group_box, item.component_bbox))
     return anchors[0]
+
+
+def _component_auth_apply_ogkalu_speech_text_group_completion(records: Sequence[TextAreaComponentAuthorizationRecord]) -> None:
+    """Complete plan-bound Ogkalu speech text groups at the component boundary.
+
+    Ogkalu-only text-bubble authority is a text-unit authority, not permission
+    to wipe an entire detected container. Once one projected component is bound
+    to that formal speech obligation, adjacent character-sized components in
+    the same text run must follow that obligation unless they carry strong
+    protected/SFX authority.
+    """
+
+    anchors = [
+        record
+        for record in records
+        if _component_auth_is_ogkalu_speech_text_anchor(record)
+    ]
+    if not anchors:
+        return
+    candidates = [
+        record
+        for record in records
+        if _component_auth_is_ogkalu_speech_text_completion_candidate(record)
+    ]
+    for anchor in anchors:
+        group: List[TextAreaComponentAuthorizationRecord] = [anchor]
+        changed = True
+        while changed:
+            changed = False
+            for candidate in candidates:
+                if candidate in group:
+                    continue
+                if _component_auth_text_component_adjacent_to_group(candidate, group):
+                    group.append(candidate)
+                    changed = True
+        if len(group) < 2 or not _component_auth_group_forms_text_run(group):
+            continue
+        for item in group:
+            _component_auth_promote_to_anchor_cleanup(
+                item,
+                anchor,
+                reason="ogkalu_speech_text_group_completion",
+            )
+
+
+def _component_auth_is_ogkalu_speech_text_anchor(record: TextAreaComponentAuthorizationRecord) -> bool:
+    if record.authorization_state != AUTH_CLEANUP_TRANSLATE_SPEECH:
+        return False
+    if str(record.route_intent or "") != ROUTE_TRANSLATE_SPEECH:
+        return False
+    if record.job_binding_state != "bound_unique" or not record.owner_cleanup_job_id:
+        return False
+    marker = _component_auth_record_marker(record)
+    if "ogkalu_text_bubble_without_kitsumed_mask" not in marker:
+        return False
+    if "kitsumed_mask_primary_geometry" in marker or "speech_mask_container" in marker:
+        return False
+    if _component_auth_has_strong_protected_text_group_block(record):
+        return False
+    return _component_auth_is_character_sized_text_component(record)
+
+
+def _component_auth_is_ogkalu_speech_text_completion_candidate(record: TextAreaComponentAuthorizationRecord) -> bool:
+    if _component_auth_family(record.authorization_state) == "cleanup":
+        return False
+    if record.authorization_state in {AUTH_AMBIGUOUS_COMPONENT_OWNER, AUTH_OUTSIDE_CLEANUP_SCOPE}:
+        return False
+    if not _component_auth_is_character_sized_text_component(record):
+        return False
+    if _component_auth_has_strong_protected_text_group_block(record):
+        return False
+    marker = _component_auth_record_marker(record)
+    if any(
+        token in marker
+        for token in (
+            "ogkalu_text_bubble_without_kitsumed_mask",
+            "ogkalu_bubble_without_kitsumed_mask",
+            "no_upstream_text_area_authorization",
+            "ogkalu_text_free_without_kitsumed_mask",
+        )
+    ):
+        return True
+    return False
+
+
+def _component_auth_record_marker(record: TextAreaComponentAuthorizationRecord) -> str:
+    return " ".join(
+        [
+            str(record.route_intent or ""),
+            str(record.confidence_tier or ""),
+            " ".join(record.reason_codes or []),
+            " ".join(record.conflict_flags or []),
+            " ".join(record.owning_container_ids or []),
+            " ".join(record.candidate_container_ids or []),
+            " ".join(record.protection_container_ids or []),
+            " ".join(record.semantic_unit_states or []),
+            " ".join(record.protected_reason_codes or []),
+            " ".join(record.semantic_evidence_providers or []),
+        ]
+    ).lower()
+
+
+def _component_auth_has_strong_protected_text_group_block(record: TextAreaComponentAuthorizationRecord) -> bool:
+    marker = _component_auth_record_marker(record)
+    strong_tokens = (
+        "deterministic_large_sfx",
+        "recognized_sfx_decorative_typed_evidence",
+        "typed_ogkalu_sfx_decorative",
+        "explicit_sfx_decorative_authorization",
+        "protect_art_or_non_text",
+        "art_or_non_text",
+        "non_text",
+        "non-text",
+    )
+    if any(token in marker for token in strong_tokens):
+        weak_text_free_only = (
+            "ogkalu_text_free_without_kitsumed_mask" in marker
+            and "deterministic_large_sfx" not in marker
+            and "typed_ogkalu_sfx_decorative" not in marker
+            and "recognized_sfx_decorative_typed_evidence" not in marker
+        )
+        if not weak_text_free_only:
+            return True
+    return False
+
+
+def _component_auth_is_character_sized_text_component(record: TextAreaComponentAuthorizationRecord) -> bool:
+    if len(record.component_bbox) < 4:
+        return False
+    x0, y0, x1, y1 = [int(item) for item in record.component_bbox[:4]]
+    width = max(1, x1 - x0)
+    height = max(1, y1 - y0)
+    area = width * height
+    pixels = int(record.component_pixel_count or 0)
+    if pixels < 12 or pixels > 1600:
+        return False
+    if width < 4 or height < 6 or width > 64 or height > 92:
+        return False
+    density = pixels / float(max(1, area))
+    if density < 0.035 or density > 0.88:
+        return False
+    if width >= 58 and width >= height * 2.6:
+        return False
+    if height <= 6 and width >= 18:
+        return False
+    return True
+
+
+def _component_auth_text_component_adjacent_to_group(
+    record: TextAreaComponentAuthorizationRecord,
+    group: Sequence[TextAreaComponentAuthorizationRecord],
+) -> bool:
+    return any(_component_auth_text_components_adjacent(record, item) for item in group)
+
+
+def _component_auth_text_components_adjacent(
+    a: TextAreaComponentAuthorizationRecord,
+    b: TextAreaComponentAuthorizationRecord,
+) -> bool:
+    if len(a.component_bbox) < 4 or len(b.component_bbox) < 4:
+        return False
+    ax0, ay0, ax1, ay1 = [int(item) for item in a.component_bbox[:4]]
+    bx0, by0, bx1, by1 = [int(item) for item in b.component_bbox[:4]]
+    aw, ah = max(1, ax1 - ax0), max(1, ay1 - ay0)
+    bw, bh = max(1, bx1 - bx0), max(1, by1 - by0)
+    acx, acy = (ax0 + ax1) / 2.0, (ay0 + ay1) / 2.0
+    bcx, bcy = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
+    x_gap = max(0, max(ax0, bx0) - min(ax1, bx1))
+    y_gap = max(0, max(ay0, by0) - min(ay1, by1))
+    x_overlap = max(0, min(ax1, bx1) - max(ax0, bx0))
+    y_overlap = max(0, min(ay1, by1) - max(ay0, by0))
+    x_overlap_ratio = x_overlap / float(max(1, min(aw, bw)))
+    y_overlap_ratio = y_overlap / float(max(1, min(ah, bh)))
+    vertical_column = (
+        abs(acx - bcx) <= max(24.0, min(aw, bw) * 1.25)
+        and y_gap <= max(34, int(max(ah, bh) * 1.25))
+    )
+    horizontal_run = (
+        abs(acy - bcy) <= max(22.0, min(ah, bh) * 1.25)
+        and x_gap <= max(34, int(max(aw, bw) * 1.25))
+    )
+    return bool(vertical_column or horizontal_run or (x_overlap_ratio >= 0.35 and y_gap <= 42) or (y_overlap_ratio >= 0.35 and x_gap <= 42))
+
+
+def _component_auth_group_forms_text_run(group: Sequence[TextAreaComponentAuthorizationRecord]) -> bool:
+    if len(group) < 2:
+        return False
+    x0 = min(int(item.component_bbox[0]) for item in group)
+    y0 = min(int(item.component_bbox[1]) for item in group)
+    x1 = max(int(item.component_bbox[2]) for item in group)
+    y1 = max(int(item.component_bbox[3]) for item in group)
+    width = max(1, x1 - x0)
+    height = max(1, y1 - y0)
+    if width > 180 and height > 180:
+        return False
+    centers_x = [(int(item.component_bbox[0]) + int(item.component_bbox[2])) / 2.0 for item in group]
+    centers_y = [(int(item.component_bbox[1]) + int(item.component_bbox[3])) / 2.0 for item in group]
+    vertical = height >= width * 1.15 and (max(centers_x) - min(centers_x)) <= max(42.0, width * 0.72)
+    horizontal = width >= height * 1.15 and (max(centers_y) - min(centers_y)) <= max(36.0, height * 0.72)
+    compact = width <= 96 and height <= 140
+    return bool(vertical or horizontal or compact)
+
+
+def _component_auth_promote_to_anchor_cleanup(
+    record: TextAreaComponentAuthorizationRecord,
+    anchor: TextAreaComponentAuthorizationRecord,
+    *,
+    reason: str,
+) -> None:
+    _component_auth_set_state(record, anchor.authorization_state, reason=reason)
+    record.route_intent = anchor.route_intent
+    record.source_stage = anchor.source_stage
+    record.confidence_tier = anchor.confidence_tier
+    record.owning_container_ids = list(anchor.owning_container_ids or anchor.candidate_container_ids or [])
+    record.cleanup_owner_ids = list(anchor.cleanup_owner_ids or anchor.owning_container_ids or anchor.candidate_container_ids or [])
+    record.owner_cleanup_job_id = str(anchor.owner_cleanup_job_id or "")
+    job_ids = list(anchor.scope_cleanup_job_ids or anchor.candidate_cleanup_job_ids or [])
+    if anchor.owner_cleanup_job_id and anchor.owner_cleanup_job_id not in job_ids:
+        job_ids.append(anchor.owner_cleanup_job_id)
+    record.scope_cleanup_job_ids = [str(item) for item in job_ids if str(item)]
+    record.candidate_cleanup_job_ids = list(record.scope_cleanup_job_ids)
+    record.job_binding_state = anchor.job_binding_state or "bound_unique"
+    record.job_binding_failure_reason = ""
+    record.projection_quality_state = PROJECTION_READY
+    record.projection_quality_reasons = []
+    record.mask_readiness_state = MASK_READY
+    record.mask_readiness_failure_reason = ""
+    record.semantic_unit_ids = list(anchor.semantic_unit_ids or [])
+    record.semantic_unit_states = list(anchor.semantic_unit_states or [anchor.authorization_state])
+    record.semantic_kind = anchor.semantic_kind
+    record.semantic_kinds = list(anchor.semantic_kinds or [anchor.semantic_kind])
+    record.source_evidence_ids = list(anchor.source_evidence_ids or [])
+    record.semantic_evidence_providers = list(anchor.semantic_evidence_providers or [])
+    record.semantic_evidence_ids = list(anchor.semantic_evidence_ids or [])
+    record.semantic_evidence_trace = list(anchor.semantic_evidence_trace or [])
+    record.semantic_authority_owner = anchor.semantic_authority_owner
+    record.projection_owner = anchor.projection_owner
+    record.authorization_basis = anchor.authorization_basis
+    record.authorization_explicit = anchor.authorization_explicit
+    record.authorization_field_origin = anchor.authorization_field_origin
+    record.explicit_cleanup_authority = True
+    record.explicit_protected_authority = False
 
 
 def _component_auth_bbox_gap(a: Sequence[int], b: Sequence[int]) -> int:
@@ -5648,13 +5891,11 @@ def _demote_ogkalu_speech_authority_overlapping_protected(
     for container in containers:
         if not _is_ogkalu_only_speech_authority_container(container):
             continue
-        bbox = _normalize_xywh(container.bbox, image_size)
-        if not bbox:
+        speech_evidence_boxes = _ogkalu_speech_text_evidence_boxes_xyxy(container, image_size)
+        if not speech_evidence_boxes:
             continue
-        bbox_xyxy = [bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]]
-        inside_protected = _max_inside_ratio_xyxy(bbox_xyxy, protected_boxes)
-        protected_coverage = _max_coverage_of_boxes_xyxy(bbox_xyxy, protected_boxes)
-        if inside_protected < 0.16 and protected_coverage < 0.25:
+        text_inside_protected = max(_max_inside_ratio_xyxy(box, protected_boxes) for box in speech_evidence_boxes)
+        if text_inside_protected < 0.16:
             continue
 
         role_evidence = _container_semantic_role_evidence(container)
@@ -5682,6 +5923,49 @@ def _demote_ogkalu_speech_authority_overlapping_protected(
         container.ocr_eligibility_reason = "blocked_ogkalu_speech_authority_overlaps_protected"
         if "text_area_plan:ogkalu_speech_authority_blocked_by_protected" not in container.evidence_reason_codes:
             container.evidence_reason_codes.append("text_area_plan:ogkalu_speech_authority_blocked_by_protected")
+
+
+def _ogkalu_speech_text_evidence_boxes_xyxy(
+    container: TextAreaContainer,
+    image_size: Tuple[int, int],
+) -> List[List[int]]:
+    role_evidence = _container_semantic_role_evidence(container)
+    boxes: List[List[int]] = []
+    for entry in role_evidence.get("text_unit_evidence_bboxes") or []:
+        if not isinstance(entry, Mapping):
+            continue
+        if str(entry.get("class_name") or "") != "text_bubble":
+            continue
+        xyxy = _semantic_evidence_bbox_xyxy(entry.get("bbox"), image_size)
+        if xyxy:
+            boxes.append(xyxy)
+    if boxes:
+        return boxes
+    bbox = _normalize_xywh(container.bbox, image_size)
+    if not bbox:
+        return []
+    return [[bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]]]
+
+
+def _semantic_evidence_bbox_xyxy(value: Any, image_size: Tuple[int, int]) -> Optional[List[int]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or len(value) < 4:
+        return None
+    try:
+        x0, y0, v2, v3 = [float(item) for item in value[:4]]
+    except Exception:
+        return None
+    width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    if v2 > x0 and v3 > y0:
+        x1, y1 = v2, v3
+    else:
+        x1, y1 = x0 + max(0.0, v2), y0 + max(0.0, v3)
+    x0_i = max(0, min(width, int(round(x0))))
+    y0_i = max(0, min(height, int(round(y0))))
+    x1_i = max(0, min(width, int(round(x1))))
+    y1_i = max(0, min(height, int(round(y1))))
+    if x1_i <= x0_i or y1_i <= y0_i:
+        return None
+    return [x0_i, y0_i, x1_i, y1_i]
 
 
 def _deterministic_large_sfx_component_bboxes(
@@ -6540,13 +6824,6 @@ def _looks_like_side_narration_background_bbox(
         return False
     bright = _optional_float(visual.get("bright_ratio"))
     dark = _optional_float(visual.get("dark_ratio"))
-    dark_unlinked_context = (
-        fused_type == "ambiguous"
-        and any(token in reason_text for token in ("ogkalu_bubble_without_kitsumed_mask", "ogkalu_text_bubble_without_kitsumed_mask"))
-        and (dark is not None and dark >= 0.16 or bright is not None and bright < 0.62)
-    )
-    if dark_unlinked_context:
-        return False
     x, y, w, h = _coerce_xywh(bbox)
     width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
     if w <= 0 or h <= 0:
@@ -6952,7 +7229,14 @@ def _looks_like_standalone_ogkalu_speech_bubble(
         return False
     role_classes = set(_semantic_role_values(semantic_role_evidence, "ogkalu_class_names"))
     role_signals = set(_semantic_role_values(semantic_role_evidence, "role_signals"))
-    if not (role_classes & {"bubble", "text_bubble"}):
+    if "text_bubble" not in role_classes:
+        return False
+    text_unit_entries = [
+        entry
+        for entry in (semantic_role_evidence.get("text_unit_evidence_bboxes") or [])
+        if isinstance(entry, Mapping) and str(entry.get("class_name") or "") == "text_bubble"
+    ]
+    if not text_unit_entries:
         return False
     if "speech_bubble_mask_evidence" in role_signals:
         return False
@@ -6962,21 +7246,21 @@ def _looks_like_standalone_ogkalu_speech_bubble(
     conflicts = set(_semantic_role_values(semantic_role_evidence, "conflict_evidence"))
     if any(any(token in conflict.lower() for token in ("sfx", "decorative", "preserve", "art")) for conflict in conflicts):
         return False
-    confidence = _optional_float(semantic_role_evidence.get("confidence")) or 0.0
+    confidence = _semantic_role_model_confidence(semantic_role_evidence)
     neighbor_ids = _semantic_role_values(semantic_role_evidence, "neighboring_speech_context_ids")
-    edge_or_clip_supported_by_context = bool(
+    supported_by_context = bool(
         confidence >= OGKALU_SINGLE_MODEL_AUTHORITY_CONFIDENCE
         and neighbor_ids
-        and role_classes & {"bubble", "text_bubble"}
+        and "text_bubble" in role_classes
     )
-    if clipped and not edge_or_clip_supported_by_context:
+    if clipped and not supported_by_context:
         return False
     x, y, w, h = _coerce_xywh(bbox)
     width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
     if w <= 0 or h <= 0:
         return False
     page_edge_touching = x <= 1 or y <= 1 or x + w >= width - 1 or y + h >= height - 1
-    if page_edge_touching and not edge_or_clip_supported_by_context:
+    if page_edge_touching and not supported_by_context:
         return False
     if w < width * 0.08 or h < height * 0.06:
         return False
@@ -6987,11 +7271,45 @@ def _looks_like_standalone_ogkalu_speech_bubble(
     bright = _optional_float(visual.get("bright_ratio"))
     if area_ratio > 0.08:
         return False
-    if dark is not None and dark >= 0.15:
+    if _looks_like_side_narration_background_bbox(
+        fused_type=fused_type,
+        reasons=reasons,
+        bbox=bbox,
+        visual=visual,
+        image_size=image_size,
+        semantic_role_evidence=semantic_role_evidence,
+    ):
         return False
-    if bright is not None and bright < 0.62:
+    dark_or_art_context = bool(
+        (dark is not None and dark >= 0.15)
+        or (bright is not None and bright < 0.62)
+    )
+    if not supported_by_context:
+        return False
+    if not (clipped or page_edge_touching or dark_or_art_context):
         return False
     return True
+
+
+def _semantic_role_model_confidence(role_evidence: Mapping[str, Any]) -> float:
+    confidence = _optional_float(role_evidence.get("model_confidence"))
+    if confidence is not None:
+        return confidence
+    confidence = _optional_float(role_evidence.get("confidence"))
+    if confidence is not None:
+        return confidence
+    values: List[float] = []
+    for field_name in ("text_unit_evidence_bboxes", "model_evidence_bboxes"):
+        entries = role_evidence.get(field_name) or []
+        if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+            continue
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            value = _optional_float(entry.get("confidence"))
+            if value is not None:
+                values.append(value)
+    return max(values) if values else 0.0
 
 
 def _safe_unknown_ocr_fallback(
