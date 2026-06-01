@@ -1618,20 +1618,33 @@ def _component_auth_apply_protected_sfx_grouping(records: Sequence[TextAreaCompo
     for record in records:
         if record.authorization_state == AUTH_PROTECT_SFX_DECORATIVE:
             continue
-        matching_seeds = [seed for seed in seeds if _component_auth_same_sfx_band(record, seed)]
+        is_speech_record = _component_auth_is_speech_record(record)
+        matching_seeds = [
+            seed
+            for seed in seeds
+            if _component_auth_same_sfx_band(record, seed)
+            or (
+                not is_speech_record
+                and _component_auth_component_inside_protected_seed(record, seed)
+            )
+        ]
         if not matching_seeds:
             continue
-        matching_seed = next(
-            (seed for seed in matching_seeds if _component_auth_is_local_sfx_continuation(record, seed)),
-            matching_seeds[0],
-        )
-        is_local_sfx_continuation = _component_auth_is_local_sfx_continuation(record, matching_seed)
-        protected_seed_overlap = (
-            not _component_auth_is_speech_record(record)
-            and _component_auth_component_inside_protected_seed(record, matching_seed)
-        )
+        contained_protected_seeds = [
+            seed
+            for seed in matching_seeds
+            if not is_speech_record and _component_auth_component_inside_protected_seed(record, seed)
+        ]
+        local_sfx_seeds = [
+            seed
+            for seed in matching_seeds
+            if _component_auth_is_local_sfx_continuation(record, seed)
+        ]
+        matching_seed = (contained_protected_seeds or local_sfx_seeds or matching_seeds)[0]
+        is_local_sfx_continuation = bool(local_sfx_seeds)
+        protected_seed_overlap = bool(contained_protected_seeds)
         if (
-            _component_auth_is_speech_record(record)
+            is_speech_record
             and not _component_auth_has_decorative_evidence(record)
             and not (_component_auth_is_large_display_fragment(record) and is_local_sfx_continuation)
         ):
@@ -1661,9 +1674,18 @@ def _component_auth_apply_protected_sfx_grouping(records: Sequence[TextAreaCompo
                 warning=True,
                 visual_review=True,
             )
-        for container_id in _component_auth_protected_seed_owner_ids(matching_seed):
-            if container_id and container_id not in record.protection_container_ids:
-                record.protection_container_ids.append(container_id)
+        owner_seed_keys: set[str] = set()
+        owner_seed_candidates: List[TextAreaComponentAuthorizationRecord] = []
+        for seed in [*contained_protected_seeds, *local_sfx_seeds, matching_seed]:
+            key = str(seed.component_id or id(seed))
+            if key in owner_seed_keys:
+                continue
+            owner_seed_keys.add(key)
+            owner_seed_candidates.append(seed)
+        for seed in owner_seed_candidates:
+            for container_id in _component_auth_protected_seed_owner_ids(seed):
+                if container_id and container_id not in record.protection_container_ids:
+                    record.protection_container_ids.append(container_id)
 
 
 def _component_auth_is_protected_sfx_group_seed(record: TextAreaComponentAuthorizationRecord) -> bool:
