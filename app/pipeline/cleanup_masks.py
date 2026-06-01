@@ -1,8 +1,9 @@
 """Output-neutral CleanupMask contract builder.
 
-This module turns existing CleanupJob candidates and SourceGlyphMask evidence
-into CleanupMask contract records. It does not execute cleanup, choose a
-backend, run proof, or feed masks into the renderer.
+This module turns CleanupJob candidates, CTD foreground pixels, and canonical
+TextAreaPlan component authorization into CleanupMask contract records.
+SourceGlyphMask evidence is provenance only. This module does not execute
+cleanup, choose a backend, run proof, or feed masks into the renderer.
 """
 
 from __future__ import annotations
@@ -54,12 +55,7 @@ MIN_OWNED_SEGMENTATION_TO_EXECUTABLE_SMALL_RATIO = 0.55
 FRAGMENT_ONLY_MAX_PIXELS = 320
 FRAGMENT_ONLY_MAX_COVERAGE_RATIO = 0.025
 PROTECTED_DOMINANT_OVERLAP_RATIO = 0.35
-COMPONENT_OWNER_MIN_RATIO = 0.10
-COMPONENT_OWNER_MIN_PIXELS = 8
 COMPONENT_OWNER_STRONG_PIXELS = 64
-COMPONENT_PROTECTED_MIN_RATIO = 0.15
-COMPONENT_PROTECTED_DOMINANT_RATIO = 0.35
-COMPONENT_MULTI_OWNER_DOMINANCE_RATIO = 0.60
 AUTH_CLEANUP_COMPONENT_STATES = {
     "cleanup_translate_speech",
     "cleanup_translate_background",
@@ -440,10 +436,7 @@ def build_cleanup_masks(
                 missing_source_glyph_mask_ids=missing_required_ids,
             )
             if effective.foreground is None:
-                if str(effective.audit.get("component_projection_method") or "") in {
-                    "segmentation_component_ownership_projection",
-                    "text_area_component_authorization_map",
-                }:
+                if str(effective.audit.get("component_projection_method") or "") == "text_area_component_authorization_map":
                     rejected_records.append(
                         {
                             **base,
@@ -498,6 +491,12 @@ def build_cleanup_masks(
                     ),
                     "clean_mask_authority": "diagnostic_non_segmentation_fallback",
                     "non_segmentation_or_local_fallback_used": True,
+                    "projection_quality_state": "diagnostic_non_segmentation_fallback",
+                    "projection_quality_reasons": [
+                        "diagnostic_non_segmentation_fallback_not_executable"
+                    ],
+                    "mask_readiness_state": "mask_not_ready",
+                    "mask_readiness_failure_reason": "diagnostic_non_segmentation_fallback_not_executable",
                     "bbox_executable_foreground_detected": False,
                     "page_level_executable_foreground_detected": False,
                     "clean_mask_state": "cleanup_mask_unresolved_after_segmentation",
@@ -593,13 +592,18 @@ def build_cleanup_masks(
                 )
                 continue
 
-            mask_source = (
-                "cleanup_mask_from_text_foreground_segmentation"
-                if str(effective.audit.get("mask_completion_method") or "").startswith("text_foreground_segmentation")
-                else "cleanup_mask_diagnostic_non_segmentation_fallback"
-            )
-            seed_method = _mask_method_union(matched, erase_source_keys or foreground_source_keys)
             completion_method = str(effective.audit.get("mask_completion_method") or "")
+            clean_authority = str(effective.audit.get("clean_mask_authority") or "")
+            if completion_method.startswith("text_foreground_segmentation"):
+                mask_source = "cleanup_mask_from_text_foreground_segmentation"
+            elif (
+                completion_method == "text_area_component_authorization_map_projection"
+                or clean_authority == "text_area_component_authorization_map"
+            ):
+                mask_source = "cleanup_mask_from_text_area_component_authorization_map"
+            else:
+                mask_source = "cleanup_mask_diagnostic_non_segmentation_fallback"
+            seed_method = _mask_method_union(matched, erase_source_keys or foreground_source_keys)
             mask_method = (
                 f"{completion_method}|seed:{seed_method}"
                 if completion_method
@@ -609,8 +613,6 @@ def build_cleanup_masks(
                 required_source_ids=required_source_ids,
                 consumed_source_ids=consumed_source_ids,
             )
-            if str(effective.audit.get("component_projection_method") or "") == "segmentation_component_ownership_projection":
-                visual_scope = "segmentation_component"
             cleanup_mask = CleanupMask(
                 cleanup_mask_id=f"cmask_{_safe_id(page_id)}_{_safe_id(job.cleanup_job_id)}",
                 cleanup_job_id=str(job.cleanup_job_id),
@@ -1844,158 +1846,6 @@ def _authorization_state_to_ownership_state(authorization_state: str) -> str:
     return "review_unknown_not_cleanup"
 
 
-def _build_component_ownership_projection(
-    *,
-    page_id: str,
-    segmentation_mask: np.ndarray | None,
-    job_candidates: Sequence[CleanupJob],
-    region_records: Mapping[str, Mapping[str, Any]],
-    evidence_records: Sequence[_SourceEvidence],
-) -> _ComponentOwnershipProjection:
-    if segmentation_mask is None:
-        return _ComponentOwnershipProjection(labels=None, components=[], component_label_by_id={})
-    binary = (segmentation_mask > 0).astype(np.uint8)
-    if int(np.count_nonzero(binary)) <= 0:
-        return _ComponentOwnershipProjection(labels=np.zeros_like(binary, dtype=np.int32), components=[], component_label_by_id={})
-    if cv2 is not None:
-        label_count, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
-    else:
-        label_count = 2
-        labels = np.where(binary > 0, 1, 0).astype(np.int32)
-        ys, xs = np.where(binary > 0)
-        stats = np.array([[0, 0, 0, 0, 0], [int(xs.min()), int(ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1), int(xs.size)]])
-        centroids = np.array([[0.0, 0.0], [float(xs.mean()), float(ys.mean())]])
-    shape = binary.shape
-    job_scopes = _job_ownership_scope_masks(job_candidates, region_records, shape)
-    protected_scopes = _protected_region_scope_masks(region_records, shape)
-    sourceglyph_masks = _sourceglyph_projection_masks(evidence_records, shape)
-    components: list[dict[str, Any]] = []
-    label_by_id: dict[str, int] = {}
-    for label in range(1, int(label_count)):
-        pixel_count = int(stats[label, cv2.CC_STAT_AREA] if cv2 is not None else stats[label, 4])
-        if pixel_count <= 0:
-            continue
-        x = int(stats[label, cv2.CC_STAT_LEFT] if cv2 is not None else stats[label, 0])
-        y = int(stats[label, cv2.CC_STAT_TOP] if cv2 is not None else stats[label, 1])
-        w = int(stats[label, cv2.CC_STAT_WIDTH] if cv2 is not None else stats[label, 2])
-        h = int(stats[label, cv2.CC_STAT_HEIGHT] if cv2 is not None else stats[label, 3])
-        centroid_x = float(centroids[label][0])
-        centroid_y = float(centroids[label][1])
-        component_id = f"segcomp_{_safe_id(page_id)}_{len(components):04d}"
-        component_mask = labels == label
-        owner_candidates = _component_owner_candidates(component_mask, pixel_count, job_scopes)
-        protected_candidates = _component_protected_candidates(
-            component_mask=component_mask,
-            pixel_count=pixel_count,
-            centroid=(centroid_x, centroid_y),
-            protected_scopes=protected_scopes,
-        )
-        sourceglyph_overlap_pixels, sourceglyph_ids = _component_sourceglyph_overlap(component_mask, sourceglyph_masks)
-        ownership_state, owner_job_id, ambiguity_reasons = _component_ownership_state(
-            owner_candidates=owner_candidates,
-            protected_candidates=protected_candidates,
-            pixel_count=pixel_count,
-        )
-        protected_reason = _protected_component_reason(protected_candidates)
-        if ownership_state == "protected_sfx_decorative" and protected_reason:
-            ambiguity_reasons = [protected_reason] + [item for item in ambiguity_reasons if item != protected_reason]
-        scope_job_ids = [item["cleanup_job_id"] for item in owner_candidates if item.get("overlap_pixels", 0) > 0]
-        components.append(
-            {
-                "component_id": component_id,
-                "label": int(label),
-                "ownership_state": ownership_state,
-                "owner_cleanup_job_id": owner_job_id,
-                "owner_region_ids": _component_owner_region_ids(owner_candidates, owner_job_id),
-                "scope_cleanup_job_ids": scope_job_ids,
-                "candidate_cleanup_job_ids": [item["cleanup_job_id"] for item in owner_candidates],
-                "cleanup_authorizations": sorted(
-                    {
-                        str(auth)
-                        for item in owner_candidates
-                        for auth in (item.get("cleanup_authorizations") or [])
-                        if str(auth)
-                    }
-                ),
-                "authorization_source_stages": sorted(
-                    {
-                        str(stage)
-                        for item in owner_candidates
-                        for stage in (item.get("authorization_source_stages") or [])
-                        if str(stage)
-                    }
-                ),
-                "protected_region_ids": [item["region_id"] for item in protected_candidates],
-                "protected_reason": protected_reason,
-                "bbox": [x, y, x + w, y + h],
-                "pixel_count": pixel_count,
-                "centroid": [round(centroid_x, 3), round(centroid_y, 3)],
-                "owner_overlap_pixels": _best_overlap(owner_candidates),
-                "owner_overlap_ratio": round(_best_overlap(owner_candidates) / float(max(1, pixel_count)), 4),
-                "protected_overlap_pixels": _best_overlap(protected_candidates),
-                "protected_overlap_ratio": round(_best_overlap(protected_candidates) / float(max(1, pixel_count)), 4),
-                "sourceglyph_overlap_pixels": sourceglyph_overlap_pixels,
-                "sourceglyph_overlap_ratio": round(sourceglyph_overlap_pixels / float(max(1, pixel_count)), 4),
-                "sourceglyph_overlap_ids": sourceglyph_ids,
-                "sourceglyph_missing": not bool(sourceglyph_ids),
-                "ambiguity_reasons": ambiguity_reasons,
-            }
-        )
-        label_by_id[component_id] = int(label)
-    return _ComponentOwnershipProjection(labels=labels.astype(np.int32), components=components, component_label_by_id=label_by_id)
-
-
-def _job_ownership_scope_masks(
-    job_candidates: Sequence[CleanupJob],
-    region_records: Mapping[str, Mapping[str, Any]],
-    shape: tuple[int, int],
-) -> list[dict[str, Any]]:
-    scopes: list[dict[str, Any]] = []
-    for job in job_candidates or []:
-        if _job_protection_reason(job):
-            continue
-        job_id = str(getattr(job, "cleanup_job_id", "") or "")
-        if not job_id:
-            continue
-        mask = np.zeros(shape, dtype=np.uint8)
-        region_ids: list[str] = []
-        cleanup_authorizations: list[str] = []
-        source_stages: list[str] = []
-        for region_id in getattr(job, "target_region_ids", []) or []:
-            region = region_records.get(str(region_id))
-            bbox = _region_bbox(region) if isinstance(region, Mapping) else None
-            if bbox is None:
-                continue
-            auth = _region_cleanup_authorization(region)
-            if auth in {
-                "protect_sfx_decorative",
-                "protect_art_or_non_text",
-                "review_unknown_not_cleanup",
-                "outside_cleanup_scope",
-            }:
-                continue
-            mask = np.maximum(mask, _bbox_mask(shape, bbox))
-            region_ids.append(str(region_id))
-            if auth and auth not in cleanup_authorizations:
-                cleanup_authorizations.append(auth)
-            stage = str(region.get("source_stage") or region.get("text_area_authorization_source_stage") or "")
-            if stage and stage not in source_stages:
-                source_stages.append(stage)
-        if int(np.count_nonzero(mask)) <= 0:
-            continue
-        scopes.append(
-            {
-                "cleanup_job_id": job_id,
-                "region_ids": region_ids,
-                "mask": mask,
-                "job": job,
-                "cleanup_authorizations": cleanup_authorizations,
-                "authorization_source_stages": source_stages,
-            }
-        )
-    return scopes
-
-
 def _region_cleanup_authorization(region: Mapping[str, Any] | None) -> str:
     if not isinstance(region, Mapping):
         return ""
@@ -2009,191 +1859,6 @@ def _region_cleanup_authorization(region: Mapping[str, Any] | None) -> str:
     if auth in AUTH_CLEANUP_COMPONENT_STATES | AUTH_PROTECTED_COMPONENT_STATES | AUTH_REVIEW_COMPONENT_STATES | {AUTH_AMBIGUOUS_COMPONENT_STATE}:
         return auth
     return ""
-
-
-def _protected_region_scope_masks(
-    region_records: Mapping[str, Mapping[str, Any]],
-    shape: tuple[int, int],
-) -> list[dict[str, Any]]:
-    scopes: list[dict[str, Any]] = []
-    for region_id, region in (region_records or {}).items():
-        reason = _region_protection_reason(region)
-        if not reason:
-            continue
-        bbox = _region_bbox(region)
-        if bbox is None:
-            continue
-        scopes.append(
-            {
-                "region_id": str(region_id),
-                "reason": reason,
-                "bbox": bbox,
-                "mask": _bbox_mask(shape, bbox),
-            }
-        )
-    return scopes
-
-
-def _sourceglyph_projection_masks(
-    evidence_records: Sequence[_SourceEvidence],
-    shape: tuple[int, int],
-) -> list[dict[str, Any]]:
-    masks: list[dict[str, Any]] = []
-    for evidence in evidence_records or []:
-        foreground, _source = _binary_mask_from_evidence(evidence, keys=("foreground_mask", "mask"))
-        if foreground is None:
-            continue
-        foreground = _coerce_mask_shape(foreground, shape)
-        if int(np.count_nonzero(foreground)) <= 0:
-            continue
-        masks.append(
-            {
-                "source_glyph_mask_id": evidence.mask_id or evidence.region_id or "unknown_sourceglyph",
-                "mask": foreground.astype(np.uint8),
-            }
-        )
-    return masks
-
-
-def _component_owner_candidates(
-    component_mask: np.ndarray,
-    pixel_count: int,
-    job_scopes: Sequence[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    min_pixels = max(COMPONENT_OWNER_MIN_PIXELS, int(pixel_count * COMPONENT_OWNER_MIN_RATIO))
-    for scope in job_scopes:
-        mask = scope.get("mask")
-        if mask is None:
-            continue
-        overlap = int(np.count_nonzero(component_mask & (mask > 0)))
-        if overlap <= 0:
-            continue
-        eligible = overlap >= min_pixels
-        candidates.append(
-            {
-                "cleanup_job_id": str(scope.get("cleanup_job_id") or ""),
-                "region_ids": list(scope.get("region_ids") or []),
-                "overlap_pixels": overlap,
-                "overlap_ratio": overlap / float(max(1, pixel_count)),
-                "eligible": eligible,
-                "cleanup_authorizations": list(scope.get("cleanup_authorizations") or []),
-                "authorization_source_stages": list(scope.get("authorization_source_stages") or []),
-            }
-        )
-    candidates.sort(key=lambda item: int(item.get("overlap_pixels") or 0), reverse=True)
-    return candidates
-
-
-def _component_protected_candidates(
-    *,
-    component_mask: np.ndarray,
-    pixel_count: int,
-    centroid: tuple[float, float],
-    protected_scopes: Sequence[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    for scope in protected_scopes:
-        mask = scope.get("mask")
-        bbox = scope.get("bbox")
-        if mask is None:
-            continue
-        overlap = int(np.count_nonzero(component_mask & (mask > 0)))
-        centroid_inside = bool(_point_in_bbox(centroid, bbox)) if isinstance(bbox, Sequence) else False
-        eligible = overlap / float(max(1, pixel_count)) >= COMPONENT_PROTECTED_MIN_RATIO or centroid_inside
-        if overlap <= 0 and not centroid_inside:
-            continue
-        candidates.append(
-            {
-                "region_id": str(scope.get("region_id") or ""),
-                "reason": str(scope.get("reason") or "protected"),
-                "overlap_pixels": overlap,
-                "overlap_ratio": overlap / float(max(1, pixel_count)),
-                "centroid_inside": centroid_inside,
-                "eligible": eligible,
-            }
-        )
-    candidates.sort(key=lambda item: int(item.get("overlap_pixels") or 0), reverse=True)
-    return candidates
-
-
-def _component_sourceglyph_overlap(component_mask: np.ndarray, sourceglyph_masks: Sequence[dict[str, Any]]) -> tuple[int, list[str]]:
-    total = 0
-    ids: list[str] = []
-    for item in sourceglyph_masks:
-        mask = item.get("mask")
-        if mask is None:
-            continue
-        overlap = int(np.count_nonzero(component_mask & (mask > 0)))
-        if overlap <= 0:
-            continue
-        total += overlap
-        mask_id = str(item.get("source_glyph_mask_id") or "")
-        if mask_id and mask_id not in ids:
-            ids.append(mask_id)
-    return total, ids
-
-
-def _component_ownership_state(
-    *,
-    owner_candidates: Sequence[dict[str, Any]],
-    protected_candidates: Sequence[dict[str, Any]],
-    pixel_count: int,
-) -> tuple[str, str, list[str]]:
-    eligible_owners = [item for item in owner_candidates if item.get("eligible")]
-    eligible_protected = [item for item in protected_candidates if item.get("eligible")]
-    ambiguity: list[str] = []
-    best_owner = eligible_owners[0] if eligible_owners else None
-    best_protected = eligible_protected[0] if eligible_protected else None
-    if best_owner and best_protected:
-        protected_ratio = float(best_protected.get("overlap_pixels") or 0) / float(max(1, pixel_count))
-        if protected_ratio >= COMPONENT_PROTECTED_DOMINANT_RATIO or bool(best_protected.get("centroid_inside")):
-            return _protected_ownership_state(best_protected), "", [str(best_protected.get("reason") or "protected")]
-        return "ambiguous_multi_owner", "", ["cleanup_owned_and_protected_overlap"]
-    if best_protected:
-        return _protected_ownership_state(best_protected), "", [str(best_protected.get("reason") or "protected")]
-    if len(eligible_owners) > 1:
-        best_ratio = float(best_owner.get("overlap_pixels") or 0) / float(max(1, pixel_count)) if best_owner else 0.0
-        if best_ratio < COMPONENT_MULTI_OWNER_DOMINANCE_RATIO:
-            return "ambiguous_multi_owner", "", ["multiple_cleanup_owner_candidates"]
-    if best_owner:
-        return "cleanup_owned", str(best_owner.get("cleanup_job_id") or ""), []
-    if owner_candidates:
-        return "unowned_visible_text", "", ["upstream_container_mismatch_or_below_cleanup_owner_overlap_threshold"]
-    return "review_unknown_not_cleanup", "", ["no_upstream_cleanup_authorization"]
-
-
-def _protected_ownership_state(candidate: Mapping[str, Any]) -> str:
-    reason = str(candidate.get("reason") or "").lower()
-    if "art" in reason or "non_text" in reason:
-        return "protected_art_or_non_text"
-    return "protected_sfx_decorative"
-
-
-def _protected_component_reason(candidates: Sequence[dict[str, Any]]) -> str:
-    for item in candidates:
-        if item.get("eligible") and item.get("reason"):
-            return str(item.get("reason"))
-    return ""
-
-
-def _component_owner_region_ids(candidates: Sequence[dict[str, Any]], owner_job_id: str) -> list[str]:
-    for item in candidates:
-        if str(item.get("cleanup_job_id") or "") == owner_job_id:
-            return list(item.get("region_ids") or [])
-    return []
-
-
-def _best_overlap(candidates: Sequence[dict[str, Any]]) -> int:
-    return max([int(item.get("overlap_pixels") or 0) for item in candidates] or [0])
-
-
-def _point_in_bbox(point: tuple[float, float], bbox: Sequence[int] | None) -> bool:
-    box = _valid_bbox(bbox)
-    if box is None:
-        return False
-    x, y = point
-    return box[0] <= x < box[2] and box[1] <= y < box[3]
 
 
 def _component_projection_for_job(
@@ -3559,10 +3224,7 @@ def _effective_uses_component_projection(effective: _EffectiveMaskBuild) -> bool
             "clean_mask_authority",
         )
     )
-    return (
-        "text_area_component_authorization_map" in joined
-        or "segmentation_component_ownership_projection" in joined
-    )
+    return "text_area_component_authorization_map" in joined
 
 
 def _component_authorized_growth_exception_applies(effective: _EffectiveMaskBuild) -> bool:

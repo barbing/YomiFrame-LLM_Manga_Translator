@@ -34,8 +34,9 @@ dist/
 !app/models/
 !app/models/*.py
 
-# Local test code
-tests/
+# Private project test code
+app/tests/*
+!app/tests/__init__.py
 
 # Local scripts
 Scripts/

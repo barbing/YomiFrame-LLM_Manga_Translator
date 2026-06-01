@@ -1,9 +1,9 @@
 """Cleanup planning, execution, and proof contracts.
 
-This module consumes SourceGlyph-derived cleanup contracts and keeps cleanup as
-the pre-render production owner for source-text removal. Runtime execution uses
-glyph-local cleanup geometry from CleanupMask foreground evidence; renderer code
-remains text/layout only.
+This module consumes accepted CleanupMask records as the pre-render production
+obligations for source-text removal. SourceGlyph/root/bbox metadata remains
+provenance and audit scope; executable cleanup pixels come from accepted
+page-space foreground/erase masks, and renderer code remains text/layout only.
 """
 
 from __future__ import annotations
@@ -90,10 +90,8 @@ LEGACY_CLEANUP_VISUAL_SCOPE_MAP = {
 ARTIFACT_RISK_PARTITION_REQUIRED_REASON = "artifact_risk_partition_required"
 MAX_PARTITION_COMPONENTS = 32
 CANONICAL_COMPONENT_PROJECTION_METHOD = "text_area_component_authorization_map"
-LEGACY_COMPONENT_PROJECTION_METHOD = "segmentation_component_ownership_projection"
 COMPONENT_PROJECTION_METHODS = {
     CANONICAL_COMPONENT_PROJECTION_METHOD,
-    LEGACY_COMPONENT_PROJECTION_METHOD,
 }
 
 
@@ -978,6 +976,10 @@ def prove_cleanup_result(
             and model_white_patch_non_destructive
         )
         model_restored_background_texture_acceptance = (
+            # Policy note: this is not semantic authorization and does not
+            # broaden cleanup pixels. It allows fixed-model cleanup to pass
+            # when remaining foreground residual has been reduced to bounded
+            # fragmented texture inside the already accepted mask.
             model_inpaint_source_text_clearance_base
             and fixed_cleanup_model_backend
             and model_white_patch_non_destructive
@@ -6703,6 +6705,8 @@ def _job_exclusion_reason(job: CleanupJob) -> str:
 def _mask_exclusion_reason(cleanup_mask: CleanupMask, image_size: tuple[int, int] | None) -> str:
     if cleanup_mask.protected:
         return cleanup_mask.protection_reason or "mask_protected"
+    if _is_diagnostic_non_segmentation_cleanup_mask(cleanup_mask):
+        return "diagnostic_non_segmentation_fallback_not_executable"
     protected_conflict = _mask_protected_conflict_reason(cleanup_mask)
     if protected_conflict:
         return protected_conflict
@@ -6794,6 +6798,8 @@ def _runtime_structural_mask_error(cleanup_mask: CleanupMask) -> str:
 
     if cleanup_mask.protected:
         return cleanup_mask.protection_reason or "mask_protected"
+    if _is_diagnostic_non_segmentation_cleanup_mask(cleanup_mask):
+        return "diagnostic_non_segmentation_fallback_not_executable"
     protected_conflict = _mask_protected_conflict_reason(cleanup_mask)
     if protected_conflict:
         return protected_conflict
@@ -6842,6 +6848,8 @@ def _accepted_executable_cleanup_mask(cleanup_mask: CleanupMask) -> bool:
         return False
     if bool(getattr(cleanup_mask, "protected", False)):
         return False
+    if _is_diagnostic_non_segmentation_cleanup_mask(cleanup_mask):
+        return False
     if getattr(cleanup_mask, "foreground_mask", None) is None or getattr(cleanup_mask, "erase_mask", None) is None:
         return False
     if int(getattr(cleanup_mask, "foreground_mask_pixels", 0) or 0) <= 0:
@@ -6873,6 +6881,8 @@ def _cleanup_mask_non_executable_defect(cleanup_mask: CleanupMask) -> str:
         return "cleanup_mask_missing"
     if bool(getattr(cleanup_mask, "protected", False)):
         return getattr(cleanup_mask, "protection_reason", "") or "cleanup_mask_protected"
+    if _is_diagnostic_non_segmentation_cleanup_mask(cleanup_mask):
+        return "diagnostic_non_segmentation_fallback_not_executable"
     if getattr(cleanup_mask, "foreground_mask", None) is None or getattr(cleanup_mask, "erase_mask", None) is None:
         return "mask_raw_arrays_missing"
     if int(getattr(cleanup_mask, "foreground_mask_pixels", 0) or 0) <= 0:
@@ -6897,6 +6907,22 @@ def _cleanup_mask_non_executable_defect(cleanup_mask: CleanupMask) -> str:
     if bool(getattr(cleanup_mask, "page_level_executable_foreground_detected", False)):
         return "page_level_executable_foreground_detected"
     return "cleanup_mask_not_executable"
+
+
+def _is_diagnostic_non_segmentation_cleanup_mask(cleanup_mask: CleanupMask) -> bool:
+    """Diagnostic/local reconstruction evidence must never become executable authority."""
+
+    if cleanup_mask is None:
+        return False
+    if bool(getattr(cleanup_mask, "non_segmentation_or_local_fallback_used", False)):
+        return True
+    clean_authority = str(getattr(cleanup_mask, "clean_mask_authority", "") or "").lower()
+    if clean_authority == "diagnostic_non_segmentation_fallback":
+        return True
+    completion_method = str(getattr(cleanup_mask, "mask_completion_method", "") or "").lower()
+    if completion_method.startswith("local_contrast_fallback_after_"):
+        return True
+    return False
 
 
 def _is_artifact_risk_partition_reason(reason: str) -> bool:

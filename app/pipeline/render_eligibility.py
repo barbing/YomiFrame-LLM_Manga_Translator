@@ -13,7 +13,7 @@ from typing import Any, Mapping, Sequence
 import unicodedata
 
 
-RENDER_ELIGIBILITY_CONTRACT_VERSION = "render_eligibility_phase3c_source_grounding"
+RENDER_ELIGIBILITY_CONTRACT_VERSION = "render_eligibility_source_grounding_v1"
 UNSAFE_CLEANUP_RENDER_CONTRACT_VERSION = "render_eligibility_unsafe_cleanup_render_v1"
 
 LOW_CONFIDENCE_THRESHOLD = 0.35
@@ -31,25 +31,6 @@ LOW_CONFIDENCE_TIER_MARKERS = {
     "low_confidence",
     "review_only",
     "text_free_review_only",
-}
-
-EXPLICIT_PRESERVE_REGIONS = {
-    ("008", "r000"),
-    ("022", "r002"),
-    ("022", "r009"),
-    ("034", "r000"),
-    ("034", "r005"),
-    ("034", "r006"),
-}
-
-CONFIRMED_SOURCE_UNGROUNDED_REGIONS = {
-    ("020", "r000"),
-    ("020", "r010"),
-    ("023", "r000"),
-    ("023", "r004"),
-    ("024", "r001"),
-    ("030", "r002"),
-    ("034", "r007"),
 }
 
 RAW_AUDIT_KEYS = {
@@ -202,13 +183,13 @@ def build_render_eligibility_decisions(
             decision = RenderEligibilityDecision(
                 page_id=str(page_id or ""),
                 region_id=rid,
-                status=RenderEligibilityStatus.ELIGIBLE,
-                reason="render_eligibility_error_fail_open",
+                status=RenderEligibilityStatus.REVIEW_ALLOWED,
+                reason="render_eligibility_error_review_degraded",
                 evidence={"error": f"{type(exc).__name__}: {exc}"},
             )
             decisions.append(decision)
             decisions_by_region_id[decision.region_id] = decision
-            eligible_records.append(decision.to_audit_dict())
+            review_allowed_records.append(decision.to_audit_dict())
 
     return RenderEligibilityResult(
         page_id=str(page_id or ""),
@@ -358,7 +339,11 @@ def _decision_for_region(
 
     preserve_reason = _preservation_reason(page_id, rid, semantic_class, source_text, low_confidence, cleanup_classes)
     if preserve_reason:
-        status = RenderEligibilityStatus.REVIEW_ALLOWED if "022:" in preserve_reason else RenderEligibilityStatus.ELIGIBLE
+        status = (
+            RenderEligibilityStatus.ELIGIBLE
+            if preserve_reason == "normal_high_confidence_speech_preserved"
+            else RenderEligibilityStatus.REVIEW_ALLOWED
+        )
         return RenderEligibilityDecision(
             page_id=page_id,
             region_id=rid,
@@ -555,7 +540,6 @@ def _should_suppress(
 ) -> bool:
     if not hard_contradictions or not _meaningful_text(translated_text):
         return False
-    bounded_review_target = (str(page_id), str(region_id)) in CONFIRMED_SOURCE_UNGROUNDED_REGIONS
     contradictions = set(hard_contradictions)
     source_erasure_block = bool(
         contradictions
@@ -564,12 +548,6 @@ def _should_suppress(
             "source_present_cleanup_unproven",
         }
     )
-    if (
-        not bounded_review_target
-        and "punctuation_only_source_meaningful_translation" not in contradictions
-        and not source_erasure_block
-    ):
-        return False
     if source_erasure_block and risky_source and low_confidence:
         return True
     if risky_source and low_confidence:
@@ -746,14 +724,10 @@ def _preservation_reason(
     low_confidence: bool,
     cleanup_classes: Sequence[str],
 ) -> str:
-    if (str(page_id), str(region_id)) in EXPLICIT_PRESERVE_REGIONS:
-        if str(page_id) == "022":
-            return f"explicit_preserve_{page_id}:{region_id}_art_entangled_source_backed"
-        return f"explicit_preserve_{page_id}:{region_id}"
     if _high_confidence_source_backed_speech(semantic_class, source_text, low_confidence):
         return "normal_high_confidence_speech_preserved"
-    if "art_entangled_ambiguous" in cleanup_classes and str(page_id) == "022":
-        return "known_art_entangled_source_text_preserved"
+    if "art_entangled_ambiguous" in cleanup_classes:
+        return "art_entangled_source_text_preserved_for_review"
     return ""
 
 

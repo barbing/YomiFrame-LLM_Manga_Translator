@@ -1157,7 +1157,7 @@ class PipelineWorker(QtCore.QThread):
                             },
                         }
                         debug_context["render_eligibility_contracts"] = {
-                            "version": "render_eligibility_phase3c_source_grounding",
+                            "version": "render_eligibility_source_grounding_v1",
                             "page_id": page_id,
                             "renderer_consumed": False,
                             "decisions": [],

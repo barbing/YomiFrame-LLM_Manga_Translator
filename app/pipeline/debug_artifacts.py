@@ -15,20 +15,8 @@ except Exception:  # pragma: no cover - optional runtime dependency
     ImageDraw = None
     ImageFont = None
 
-_PHASE2E_TARGET_ROOT_IDS = {
-    "tbr_008_det_top_caption_far_right": "008:tbr_008_det_top_caption_far_right",
-    "tbr_020_det_top_caption_day_center": "020:tbr_020_det_top_caption_day_center",
-    "tbr_022_f011": "022:tbr_022_f011",
-    "tbr_022_det_top_caption_day_center": "022:tbr_022_det_top_caption_day_center",
-    "tbr_030_det_top_caption_day_center": "030:tbr_030_det_top_caption_day_center",
-}
-_PHASE2E_TARGET_REGION_IDS = {
-    ("008", "r000"): "008:tbr_008_det_top_caption_far_right",
-    ("020", "r010"): "020:tbr_020_det_top_caption_day_center",
-    ("022", "r002"): "022:tbr_022_f011",
-    ("022", "r009"): "022:tbr_022_det_top_caption_day_center",
-    ("030", "r002"): "030:tbr_030_det_top_caption_day_center",
-}
+_PHASE2E_TARGET_ROOT_IDS: dict[str, str] = {}
+_PHASE2E_TARGET_REGION_IDS: dict[tuple[str, str], str] = {}
 
 
 def debug_enabled(settings=None) -> bool:
@@ -458,11 +446,7 @@ def _sha256_file(path: str) -> str:
 
 def _perf_watch_regions(context: dict[str, Any], regions: list[dict]) -> dict[str, Any]:
     page_id = str(context.get("page_id") or "")
-    watch_by_page = {
-        "008": {"r000"},
-        "014": {"r016", "r022"},
-        "020": {"r000", "r010"},
-    }
+    watch_by_page: dict[str, set[str]] = {}
     watch_ids = watch_by_page.get(page_id, set())
     if not watch_ids:
         return {}
@@ -2054,9 +2038,11 @@ def _maybe_add_model_fusion_assist(audit: dict[str, Any], page_dir: str) -> dict
     except Exception as exc:  # pragma: no cover - diagnostic isolation
         enriched = dict(audit)
         enriched["regions"] = [dict(region) for region in audit.get("regions", []) or []]
-        high_accuracy_enabled = os.environ.get("MT_HIGH_ACCURACY_BUBBLE_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+        legacy_enabled = os.environ.get("MT_LEGACY_PAGE_SPECIFIC_ASSIST", "").strip().lower() in {"1", "true", "yes", "on"}
+        assist_enabled = legacy_enabled and os.environ.get("MT_MODEL_FUSION_ASSIST", "").strip().lower() in {"1", "true", "yes", "on"}
+        high_accuracy_enabled = legacy_enabled and os.environ.get("MT_HIGH_ACCURACY_BUBBLE_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
         enriched["model_fusion_assist_version"] = globals().get("MODEL_FUSION_ASSIST_VERSION", "phase4b6_model_fusion_assist_v1")
-        enriched["model_fusion_assist_enabled"] = True
+        enriched["model_fusion_assist_enabled"] = assist_enabled or high_accuracy_enabled
         enriched["model_fusion_assist_generated"] = False
         enriched["model_fusion_assist_error"] = f"{type(exc).__name__}: {exc}"
         enriched["model_fusion_assist_runtime_sec"] = 0.0
@@ -2580,7 +2566,11 @@ def _build_audit(context: dict[str, Any], regions: list[dict]) -> dict[str, Any]
         and region.get("source_child_cleanup_covered") is not True
     )
     set_count(context, "uncleaned_source_child_count", uncleaned_source_child_count)
-    model_fusion_proof_enabled = os.environ.get("MT_MODEL_FUSION_MUTATION_PROOF", "").strip().lower() in {"1", "true", "yes", "on"}
+    legacy_page_specific_enabled = os.environ.get("MT_LEGACY_PAGE_SPECIFIC_ASSIST", "").strip().lower() in {"1", "true", "yes", "on"}
+    model_fusion_proof_enabled = (
+        legacy_page_specific_enabled
+        and os.environ.get("MT_MODEL_FUSION_MUTATION_PROOF", "").strip().lower() in {"1", "true", "yes", "on"}
+    )
     model_fusion_proof_applied = any(bool(region.get("model_fusion_mutation_proof_applied")) for region in audit_regions)
     return {
         "page_id": context.get("page_id"),

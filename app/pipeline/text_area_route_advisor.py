@@ -19,6 +19,7 @@ ROUTE_CONSUMPTION_PROOF_VERSION = "phase4b18_route_consumption_proof_v1"
 ROUTE_CONSUMPTION_PROOF_FLAG = "MT_MODEL_FUSION_ROUTE_CONSUMPTION_PROOF"
 MODEL_FUSION_ASSIST_FLAG = "MT_MODEL_FUSION_ASSIST"
 HIGH_ACCURACY_BUBBLE_MODE_FLAG = "MT_HIGH_ACCURACY_BUBBLE_MODE"
+LEGACY_PAGE_SPECIFIC_ASSIST_FLAG = "MT_LEGACY_PAGE_SPECIFIC_ASSIST"
 PHASE2_STATUS = "advisory_only"
 
 SPEECH_REASONS = {
@@ -92,7 +93,11 @@ def route_assist_enabled() -> bool:
 def route_consumption_proof_enabled() -> bool:
     """Return whether Phase 4b-18 dry-run proof metadata should be generated."""
     return _truthy_env(ROUTE_CONSUMPTION_PROOF_FLAG) and (
-        _truthy_env(MODEL_FUSION_ASSIST_FLAG) or _truthy_env(HIGH_ACCURACY_BUBBLE_MODE_FLAG)
+        _truthy_env(LEGACY_PAGE_SPECIFIC_ASSIST_FLAG)
+        and (
+            _truthy_env(MODEL_FUSION_ASSIST_FLAG)
+            or _truthy_env(HIGH_ACCURACY_BUBBLE_MODE_FLAG)
+        )
     )
 
 
@@ -410,7 +415,9 @@ def summarize_route_suggestions(suggestions: list[dict[str, Any]]) -> dict[str, 
 def _attach_route_consumption_proof(audit: dict[str, Any], suggestions: list[dict[str, Any]]) -> None:
     start = time.time()
     requested = _truthy_env(ROUTE_CONSUMPTION_PROOF_FLAG)
-    source_enabled = _truthy_env(MODEL_FUSION_ASSIST_FLAG) or _truthy_env(HIGH_ACCURACY_BUBBLE_MODE_FLAG)
+    source_enabled = _truthy_env(LEGACY_PAGE_SPECIFIC_ASSIST_FLAG) and (
+        _truthy_env(MODEL_FUSION_ASSIST_FLAG) or _truthy_env(HIGH_ACCURACY_BUBBLE_MODE_FLAG)
+    )
     enabled = requested and source_enabled
     audit["model_fusion_route_consumption_proof_version"] = ROUTE_CONSUMPTION_PROOF_VERSION
     audit["model_fusion_route_consumption_proof_enabled"] = enabled
@@ -435,7 +442,8 @@ def _attach_route_consumption_proof(audit: dict[str, Any], suggestions: list[dic
     if not source_enabled:
         audit["model_fusion_route_consumption_proof_error"] = (
             "MT_MODEL_FUSION_ROUTE_CONSUMPTION_PROOF requires "
-            "MT_MODEL_FUSION_ASSIST=1 or MT_HIGH_ACCURACY_BUBBLE_MODE=1"
+            "MT_LEGACY_PAGE_SPECIFIC_ASSIST=1 plus MT_MODEL_FUSION_ASSIST=1 "
+            "or MT_HIGH_ACCURACY_BUBBLE_MODE=1"
         )
         audit["route_consumption_proof_status"] = "failed_closed_missing_bubble_evidence_mode"
         audit["model_fusion_route_consumption_proof_runtime_sec"] = round(time.time() - start, 6)

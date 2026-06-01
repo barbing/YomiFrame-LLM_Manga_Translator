@@ -199,8 +199,17 @@ Main model families used by the pipeline include:
 - ComicTextDetector/TextForegroundSegmentation for text-pixel projection
 - OCR models for approved regions
 - local LLMs through Ollama-compatible translation paths
-- the fixed cleanup inpainting backend model
+- the fixed iopaint Anime Manga Big LaMA cleanup inpainting backend model
 - optional NLP resources for glossary and name memory
+
+Cleanup production code must not select among arbitrary `models/inpaint`
+contents. The configured cleanup model id is provenance; the actual cleanup
+backend resolves to the fixed iopaint model unless a future roadmap explicitly
+changes the policy.
+
+Historical page-specific model-fusion/debug assists are not part of the
+default pipeline. They must remain disabled unless
+`MT_LEGACY_PAGE_SPECIFIC_ASSIST` and the specific diagnostic flag are both set.
 
 ## Performance Expectations
 

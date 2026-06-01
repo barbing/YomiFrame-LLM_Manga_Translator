@@ -21,11 +21,6 @@ from app.pipeline.cleanup_inpainting import (
     FIXED_CLEANUP_INPAINT_MODEL_RELATIVE_PATH,
 )
 
-PHASE3C_LOCAL_CANDIDATE_IDS = (
-    "iopaint_anime_manga_big_lama",
-)
-
-
 @dataclass(frozen=True)
 class LocalCleanupBackendCandidate:
     candidate_id: str
@@ -107,7 +102,7 @@ def inventory_local_cleanup_backends(
 def inventory_to_audit_dict(candidates: list[LocalCleanupBackendCandidate]) -> dict[str, Any]:
     available = [candidate for candidate in candidates if candidate.available]
     return {
-        "version": "cleanup_backend_candidates_phase3c_fixed_local",
+        "version": "cleanup_backend_candidates_fixed_local",
         "candidate_count": len(candidates),
         "available_count": len(available),
         "candidates": [candidate.to_audit_dict() for candidate in candidates],

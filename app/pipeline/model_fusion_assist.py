@@ -1,9 +1,8 @@
 """Debug-only Phase 4 model-fusion assist enrichment.
 
-This module is deliberately side-effect free for production behavior. It only
-builds diagnostic evidence and candidate records for debug audit artifacts when
-``MT_MODEL_FUSION_ASSIST=1`` or the high-accuracy bubble diagnostic mode is
-enabled by the caller.
+This module is quarantined from production behavior. Historical page-specific
+diagnostic helpers remain importable only when both the legacy quarantine flag
+and the requested diagnostic flag are enabled.
 """
 
 from __future__ import annotations
@@ -44,6 +43,7 @@ MODEL_FUSION_CLEANUP_BOUNDARY_CALIBRATION_VERSION = "phase4b13_model_fusion_clea
 MODEL_FUSION_CLEANUP_BOUNDARY_CALIBRATION_FLAG = "MT_MODEL_FUSION_CLEANUP_BOUNDARY_CALIBRATION"
 HIGH_ACCURACY_BUBBLE_MODE_VERSION = "phase4b14_high_accuracy_bubble_mode_v1"
 HIGH_ACCURACY_BUBBLE_MODE_FLAG = "MT_HIGH_ACCURACY_BUBBLE_MODE"
+LEGACY_PAGE_SPECIFIC_ASSIST_FLAG = "MT_LEGACY_PAGE_SPECIFIC_ASSIST"
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = ROOT / "scripts"
@@ -175,11 +175,15 @@ _CALIBRATION_MODULE_CACHE: Optional[Any] = None
 
 
 def model_fusion_assist_enabled() -> bool:
-    return os.environ.get(MODEL_FUSION_ASSIST_FLAG, "").strip().lower() in {"1", "true", "yes", "on"}
+    return _legacy_page_specific_assist_enabled() and os.environ.get(MODEL_FUSION_ASSIST_FLAG, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def high_accuracy_bubble_mode_enabled() -> bool:
-    return os.environ.get(HIGH_ACCURACY_BUBBLE_MODE_FLAG, "").strip().lower() in {"1", "true", "yes", "on"}
+    return _legacy_page_specific_assist_enabled() and os.environ.get(HIGH_ACCURACY_BUBBLE_MODE_FLAG, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _legacy_page_specific_assist_enabled() -> bool:
+    return os.environ.get(LEGACY_PAGE_SPECIFIC_ASSIST_FLAG, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def effective_model_fusion_assist_enabled() -> bool:

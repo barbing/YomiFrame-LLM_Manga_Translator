@@ -26,13 +26,7 @@ from app.pipeline.text_block_root_graph import (
 
 TEXT_BLOCK_HIERARCHY_VERSION = "text_block_hierarchy_v1"
 
-_PHASE2E_TARGET_ROOT_IDS = {
-    "tbr_008_det_top_caption_far_right": "008:tbr_008_det_top_caption_far_right",
-    "tbr_020_det_top_caption_day_center": "020:tbr_020_det_top_caption_day_center",
-    "tbr_022_f011": "022:tbr_022_f011",
-    "tbr_022_det_top_caption_day_center": "022:tbr_022_det_top_caption_day_center",
-    "tbr_030_det_top_caption_day_center": "030:tbr_030_det_top_caption_day_center",
-}
+_PHASE2E_TARGET_ROOT_IDS: dict[str, str] = {}
 
 ROOT_SPEECH = "speech_bubble"
 ROOT_CAPTION = "caption_background"

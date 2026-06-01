@@ -19,20 +19,8 @@ _TOP_ROW_CAPTION_REASONS = {
 }
 _SOURCE_ERASURE_CONTRACT_COVERAGE_THRESHOLD = 0.90
 _SOURCE_ERASURE_CONTRACT_RESIDUAL_THRESHOLD = 0.12
-_PHASE2E_TARGET_ROOT_IDS = {
-    "tbr_008_det_top_caption_far_right": "008:tbr_008_det_top_caption_far_right",
-    "tbr_020_det_top_caption_day_center": "020:tbr_020_det_top_caption_day_center",
-    "tbr_022_f011": "022:tbr_022_f011",
-    "tbr_022_det_top_caption_day_center": "022:tbr_022_det_top_caption_day_center",
-    "tbr_030_det_top_caption_day_center": "030:tbr_030_det_top_caption_day_center",
-}
-_PHASE2E_TARGET_REGION_IDS = {
-    ("008", "r000"): "008:tbr_008_det_top_caption_far_right",
-    ("020", "r010"): "020:tbr_020_det_top_caption_day_center",
-    ("022", "r002"): "022:tbr_022_f011",
-    ("022", "r009"): "022:tbr_022_det_top_caption_day_center",
-    ("030", "r002"): "030:tbr_030_det_top_caption_day_center",
-}
+_PHASE2E_TARGET_ROOT_IDS: dict[str, str] = {}
+_PHASE2E_TARGET_REGION_IDS: dict[tuple[str, str], str] = {}
 _RENDERER_REGION_LOOP_TELEMETRY_FLAG = "MT_RENDERER_REGION_LOOP_TELEMETRY"
 _RENDERER_LAYOUT_TELEMETRY_FLAG = "MT_RENDERER_LAYOUT_TELEMETRY"
 _RENDERER_CANDIDATE_SHADOW_FLAG = "MT_RENDERER_CANDIDATE_SHADOW"
@@ -2433,48 +2421,13 @@ def render_translations(
         else:
             working.save(output_path)
 
-_RENDER_CONSTRAINT_ASSIST_VERSION = "text_area_render_constraint_assist_phase3c_v1"
+_RENDER_CONSTRAINT_ASSIST_VERSION = "text_area_render_constraint_assist_legacy_quarantined_v1"
 _RENDER_CONSTRAINT_ASSIST_STATUS = "experimental_opt_in_allowlisted"
 _MODEL_FUSION_MUTATION_PROOF_VERSION = "model_fusion_mutation_proof_phase4b7_v1"
 _MODEL_FUSION_MUTATION_PROOF_FLAG = "MT_MODEL_FUSION_MUTATION_PROOF"
 
-_PHASE3C_RENDER_CONSTRAINT_ALLOWLIST = (
-    {
-        "allowlist_id": "014_r011_current_equivalent",
-        "page_id": "014",
-        "region_ids": {"r011", "r013"},
-        "ocr_contains": ("キャンプファイア", "涼んで", "熱かった"),
-        "source_bbox_xyxy": (165, 307, 317, 535),
-        "source_bbox_tolerance": 48,
-        "candidate_id": "phase3c_014_r011_current_equivalent_speech_container_clamp",
-        "suggestion_type": "speech_render_outside_container",
-        "confidence": "high",
-        "severity": "serious",
-        "proposed_action": "clamp_to_container",
-        "container_type": "speech_bubble",
-        "inferred_container_id": "c011",
-        "inferred_container_bbox": (133, 275, 349, 567),
-        "proposed_allowed_area": (133, 275, 349, 567),
-        "planner_suggestion_id": "phase3a_reference_014_r011_current_equivalent",
-    },
-)
-
-_MODEL_FUSION_MUTATION_PROOF_ALLOWLIST = (
-    {
-        "allowlist_id": "phase4b7_014_r011_model_fusion_render_constraint_proof",
-        "page_id": "014",
-        "region_ids": {"r011", "r013"},
-        "ocr_contains": ("キャンプファイア", "涼んで", "熱かった"),
-        "source_bbox_xyxy": (165, 307, 317, 535),
-        "source_bbox_tolerance": 48,
-        "candidate_class": "safe_future_render_constraint_hint",
-        "suggestion_type": "speech_render_outside_container",
-        "confidence": "high",
-        "severity": "serious",
-        "proposed_action": "clamp_to_container",
-        "container_type": "speech_bubble",
-    },
-)
+_PHASE3C_RENDER_CONSTRAINT_ALLOWLIST: tuple[dict[str, object], ...] = ()
+_MODEL_FUSION_MUTATION_PROOF_ALLOWLIST: tuple[dict[str, object], ...] = ()
 
 
 def _build_model_fusion_mutation_proof_candidates(
@@ -2818,7 +2771,7 @@ def _render_constraint_candidates_from_allowlist(
     outside_ratio = _outside_ratio(previous, allowed_area)
     source_inside_ratio = _inside_ratio(source, allowed_area)
     reason_codes = [
-        "phase3c_temporary_allowlist",
+        "legacy_render_constraint_allowlist",
         f"allowlist:{entry['allowlist_id']}",
         f"page:{entry['page_id']}",
         "planner_reconstructed_from_phase3a_reference",
@@ -3000,9 +2953,10 @@ def _render_constraint_assist_enabled() -> bool:
 
 
 def _model_fusion_mutation_proof_enabled() -> bool:
+    legacy = os.getenv("MT_LEGACY_PAGE_SPECIFIC_ASSIST", "").strip().lower() in {"1", "true", "yes", "on"}
     assist = os.getenv("MT_MODEL_FUSION_ASSIST", "").strip().lower() in {"1", "true", "yes", "on"}
     proof = os.getenv(_MODEL_FUSION_MUTATION_PROOF_FLAG, "").strip().lower() in {"1", "true", "yes", "on"}
-    return assist and proof
+    return legacy and assist and proof
 
 
 def _model_fusion_mutation_proof_fallback_adjustment(
