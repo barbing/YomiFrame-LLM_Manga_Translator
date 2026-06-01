@@ -1626,8 +1626,15 @@ def _component_auth_apply_protected_sfx_grouping(records: Sequence[TextAreaCompo
             matching_seeds[0],
         )
         is_local_sfx_continuation = _component_auth_is_local_sfx_continuation(record, matching_seed)
-        protected_seed_overlap = _component_auth_component_inside_protected_seed(record, matching_seed)
-        if _component_auth_is_speech_record(record) and not (is_local_sfx_continuation or protected_seed_overlap):
+        protected_seed_overlap = (
+            not _component_auth_is_speech_record(record)
+            and _component_auth_component_inside_protected_seed(record, matching_seed)
+        )
+        if (
+            _component_auth_is_speech_record(record)
+            and not _component_auth_has_decorative_evidence(record)
+            and not (_component_auth_is_large_display_fragment(record) and is_local_sfx_continuation)
+        ):
             continue
         if record.authorization_state in {
             AUTH_CLEANUP_TRANSLATE_SPEECH,
@@ -2518,16 +2525,16 @@ def _component_auth_apply_terminal_authority_guards(records: Sequence[TextAreaCo
     it must not demote otherwise authorized text in the same cleanup task.
     """
 
+    _component_auth_apply_ogkalu_speech_unit_protected_blocks(records)
     for record in records:
+        if record.authorization_state == AUTH_AMBIGUOUS_COMPONENT_OWNER:
+            _component_auth_resolve_ambiguous_component(record)
+            continue
         if _component_auth_family(record.authorization_state) != "cleanup":
             continue
         defect_codes = set(record.component_contract_defect_codes or [])
         if defect_codes & PROTECTED_BLOCKING_COMPONENT_DEFECT_CODES:
-            if (
-                _component_auth_is_speech_record(record)
-                and not _component_auth_is_weak_background_authority_record(record)
-                and _component_auth_is_strong_speech_authority_record(record)
-            ):
+            if _component_auth_cleanup_overrides_protected_conflict(record):
                 continue
             if _component_auth_record_has_protected_conflict(record):
                 _component_auth_set_state(
@@ -2555,6 +2562,215 @@ def _component_auth_apply_terminal_authority_guards(records: Sequence[TextAreaCo
             )
             record.explicit_cleanup_authority = False
             continue
+
+
+def _component_auth_resolve_ambiguous_component(record: TextAreaComponentAuthorizationRecord) -> None:
+    """Resolve orange/debug ownership before CleanupMask consumption.
+
+    Orange is a review/debug signal for a component-level conflict, not a
+    stable production state. Before the cleanup contract consumes the map, a
+    component must either be a cleanup obligation, a protected component, or a
+    review-only component. Cleanup may win only when the record carries a
+    bounded text-unit authority that is already job-bindable; otherwise
+    protected conflicts fail closed as protected SFX/decorative.
+    """
+
+    if _component_auth_is_completed_ogkalu_speech_text_run_record(record):
+        cleanup_state = _component_auth_cleanup_state_for_record(record)
+        _component_auth_set_state(
+            record,
+            cleanup_state,
+            reason="ambiguous_component_resolved_to_cleanup_text_authority",
+        )
+        _component_auth_bind_cleanup_job_from_candidates(record)
+        record.explicit_cleanup_authority = True
+        record.explicit_protected_authority = False
+        return
+
+    if _component_auth_record_has_protected_conflict(record) or _component_auth_has_decorative_evidence(record):
+        _component_auth_set_state(
+            record,
+            AUTH_PROTECT_SFX_DECORATIVE,
+            reason="ambiguous_protected_component_without_cleanup_owner",
+        )
+        record.explicit_cleanup_authority = False
+        record.explicit_protected_authority = True
+        if not record.protection_owner_ids:
+            record.protection_owner_ids = list(record.protection_container_ids or [])
+        record.protected_reason_codes = list(record.reason_codes)
+        return
+
+    _component_auth_set_state(
+        record,
+        AUTH_REVIEW_UNKNOWN_NOT_CLEANUP,
+        reason="ambiguous_component_requires_review_not_cleanup",
+        ambiguity=True,
+    )
+    record.explicit_cleanup_authority = False
+    record.explicit_protected_authority = False
+
+
+def _component_auth_cleanup_overrides_protected_conflict(record: TextAreaComponentAuthorizationRecord) -> bool:
+    if not _component_auth_is_speech_record(record):
+        return False
+    if _component_auth_is_weak_background_authority_record(record):
+        return False
+    if _component_auth_is_completed_ogkalu_speech_text_run_record(record):
+        return True
+    if (
+        _component_auth_is_strong_speech_authority_record(record)
+        and not _component_auth_has_nondeterministic_protected_authority(record)
+    ):
+        return True
+    return False
+
+
+def _component_auth_is_completed_ogkalu_speech_text_run_record(record: TextAreaComponentAuthorizationRecord) -> bool:
+    marker = _component_auth_record_marker(record)
+    if "ogkalu_speech_text_group_completion" not in marker:
+        return False
+    if AUTH_CLEANUP_TRANSLATE_SPEECH not in set(record.semantic_unit_states or []):
+        return False
+    if len(record.candidate_cleanup_job_ids or []) > 1:
+        return False
+    return bool(
+        record.owner_cleanup_job_id
+        or record.candidate_cleanup_job_ids
+        or record.scope_cleanup_job_ids
+        or record.owning_container_ids
+        or record.cleanup_owner_ids
+    )
+
+
+def _component_auth_cleanup_state_for_record(record: TextAreaComponentAuthorizationRecord) -> str:
+    states = set(record.semantic_unit_states or [])
+    if AUTH_CLEANUP_TRANSLATE_SPEECH in states or _component_auth_is_speech_record(record):
+        return AUTH_CLEANUP_TRANSLATE_SPEECH
+    if AUTH_CLEANUP_TRANSLATE_BACKGROUND in states:
+        return AUTH_CLEANUP_TRANSLATE_BACKGROUND
+    if AUTH_CLEANUP_TRANSLATE_CAPTION in states:
+        return AUTH_CLEANUP_TRANSLATE_CAPTION
+    return AUTH_CLEANUP_TRANSLATE_SPEECH
+
+
+def _component_auth_bind_cleanup_job_from_candidates(record: TextAreaComponentAuthorizationRecord) -> None:
+    job_ids = [str(item) for item in (record.scope_cleanup_job_ids or record.candidate_cleanup_job_ids or []) if str(item)]
+    if record.owner_cleanup_job_id and record.owner_cleanup_job_id not in job_ids:
+        job_ids.insert(0, str(record.owner_cleanup_job_id))
+    job_ids = list(dict.fromkeys(job_ids))
+    if len(job_ids) == 1:
+        record.owner_cleanup_job_id = job_ids[0]
+        record.scope_cleanup_job_ids = list(job_ids)
+        record.candidate_cleanup_job_ids = list(job_ids)
+        record.job_binding_state = "bound_unique"
+        record.job_binding_failure_reason = ""
+        record.projection_quality_state = PROJECTION_READY
+        record.projection_quality_reasons = [
+            reason
+            for reason in (record.projection_quality_reasons or [])
+            if reason not in {PROJECTION_AMBIGUOUS_COMPONENT, PROJECTION_COMPONENT_MERGED}
+        ]
+        record.mask_readiness_state = MASK_READY
+        record.mask_readiness_failure_reason = ""
+    elif not job_ids:
+        record.job_binding_state = "missing_cleanup_job"
+        record.mask_readiness_state = MASK_NOT_READY
+        record.mask_readiness_failure_reason = "missing_cleanup_job"
+    else:
+        record.job_binding_state = "non_unique_cleanup_job"
+        record.scope_cleanup_job_ids = job_ids
+        record.candidate_cleanup_job_ids = job_ids
+        record.mask_readiness_state = MASK_NOT_READY
+        record.mask_readiness_failure_reason = "non_unique_cleanup_job"
+
+
+def _component_auth_has_nondeterministic_protected_authority(record: TextAreaComponentAuthorizationRecord) -> bool:
+    marker = _component_auth_record_marker(record)
+    strong_tokens = (
+        "typed_ogkalu_sfx_decorative",
+        "recognized_sfx_decorative_typed_evidence",
+        "current_region_sfx_decorative_evidence",
+        "current_sfx_decorative_region",
+        "protect_art_or_non_text",
+        "art_or_non_text",
+        "non_text",
+        "non-text",
+    )
+    if any(token in marker for token in strong_tokens):
+        return True
+    return False
+
+
+def _component_auth_apply_ogkalu_speech_unit_protected_blocks(
+    records: Sequence[TextAreaComponentAuthorizationRecord],
+) -> None:
+    blocked_keys: set[str] = set()
+    for record in records:
+        marker = _component_auth_record_marker(record)
+        if "ogkalu_text_bubble_without_kitsumed_mask" not in marker:
+            continue
+        if not (
+            "deterministic_large_sfx" in marker
+            or "typed_ogkalu_sfx_decorative" in marker
+            or "recognized_sfx_decorative_typed_evidence" in marker
+        ):
+            continue
+        if not (
+            record.authorization_state == AUTH_AMBIGUOUS_COMPONENT_OWNER
+            or _component_auth_family(record.authorization_state) == "protected"
+            or _component_auth_has_decorative_evidence(record)
+        ):
+            continue
+        for key in _component_auth_cleanup_group_keys(record):
+            blocked_keys.add(key)
+    if not blocked_keys:
+        return
+
+    for record in records:
+        if _component_auth_family(record.authorization_state) != "cleanup":
+            continue
+        if not _component_auth_is_speech_record(record):
+            continue
+        if _component_auth_is_completed_ogkalu_speech_text_run_record(record):
+            continue
+        if not (blocked_keys & set(_component_auth_cleanup_group_keys(record))):
+            continue
+        if not _component_auth_is_large_display_fragment(record):
+            continue
+        _component_auth_add_contract_diagnostic(
+            record,
+            "ogkalu_speech_unit_blocked_by_protected_sfx_evidence",
+            defect=True,
+            visual_review=True,
+            candidate_conflict=True,
+        )
+        _component_auth_set_state(
+            record,
+            AUTH_PROTECT_SFX_DECORATIVE,
+            reason="ogkalu_speech_unit_blocked_by_protected_sfx_evidence",
+        )
+        record.explicit_cleanup_authority = False
+        record.explicit_protected_authority = True
+        if not record.protection_owner_ids:
+            record.protection_owner_ids = list(record.protection_container_ids or [])
+
+
+def _component_auth_cleanup_group_keys(record: TextAreaComponentAuthorizationRecord) -> List[str]:
+    keys: List[str] = []
+    for source in (
+        record.owning_container_ids,
+        record.cleanup_owner_ids,
+        record.candidate_container_ids,
+    ):
+        for item in source or []:
+            value = str(item or "")
+            if not value or value.startswith("det_large_sfx_"):
+                continue
+            if "sfx" in value.lower() or "decorative" in value.lower():
+                continue
+            if value not in keys:
+                keys.append(value)
+    return keys
 
 
 def _component_auth_is_strong_speech_authority_record(record: TextAreaComponentAuthorizationRecord) -> bool:
