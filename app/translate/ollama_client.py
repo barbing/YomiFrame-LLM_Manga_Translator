@@ -15,11 +15,54 @@ class DeepSeekApiKeyError(RuntimeError):
     """Raised when the DeepSeek API key is missing or unreadable."""
 
 
+_DEEPSEEK_API_KEY_FIELDS = ("DEEPSEEK_API_KEY", "API_KEY", "api_key", "key")
+_DEEPSEEK_PROVIDER_FIELDS = ("Deepseek", "DeepSeek", "deepseek")
+_DEEPSEEK_JSON_OBJECT_RESPONSE_FORMAT = {"type": "json_object"}
+_DEEPSEEK_DISABLED_THINKING = {"type": "disabled"}
+
+
 def _strip_wrapping_quotes(value: str) -> str:
     value = value.strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         return value[1:-1].strip()
     return value
+
+
+def _coerce_api_key_value(value: object) -> str:
+    if value is None or isinstance(value, (dict, list, tuple, set)):
+        return ""
+    return _strip_wrapping_quotes(str(value))
+
+
+def _extract_api_key_from_json(parsed: dict) -> str:
+    for key in _DEEPSEEK_API_KEY_FIELDS:
+        value = _coerce_api_key_value(parsed.get(key))
+        if value:
+            return value
+
+    for provider_key in _DEEPSEEK_PROVIDER_FIELDS:
+        provider_value = parsed.get(provider_key)
+        if isinstance(provider_value, dict):
+            for key in _DEEPSEEK_API_KEY_FIELDS:
+                value = _coerce_api_key_value(provider_value.get(key))
+                if value:
+                    return value
+        else:
+            value = _coerce_api_key_value(provider_value)
+            if value:
+                return value
+
+    return ""
+
+
+def _normalize_deepseek_thinking(value: object) -> dict[str, str]:
+    if isinstance(value, dict):
+        kind = str(value.get("type") or "").strip().lower()
+    else:
+        kind = str(value or "").strip().lower()
+    if kind not in {"enabled", "disabled"}:
+        kind = "disabled"
+    return {"type": kind}
 
 
 def _parse_api_key_text(text: str) -> str:
@@ -29,13 +72,17 @@ def _parse_api_key_text(text: str) -> str:
     if clean.startswith("{"):
         try:
             parsed = json.loads(clean)
-        except json.JSONDecodeError:
-            parsed = None
+        except json.JSONDecodeError as exc:
+            raise DeepSeekApiKeyError(
+                "DeepSeek API key JSON is invalid; expected a supported DeepSeek API key field."
+            ) from exc
         if isinstance(parsed, dict):
-            for key in ("DEEPSEEK_API_KEY", "API_KEY", "api_key", "key"):
-                value = str(parsed.get(key) or "").strip()
-                if value:
-                    return _strip_wrapping_quotes(value)
+            value = _extract_api_key_from_json(parsed)
+            if value:
+                return value
+        raise DeepSeekApiKeyError(
+            "DeepSeek API key JSON does not contain a supported DeepSeek API key field."
+        )
 
     for line in clean.splitlines():
         line = line.strip()
@@ -148,6 +195,7 @@ class DeepSeekClient:
             "model": self.model_name,
             "messages": [{"role": "user", "content": "ping"}],
             "stream": False,
+            "thinking": dict(_DEEPSEEK_DISABLED_THINKING),
             "temperature": 0.0,
             "max_tokens": 1,
         }
@@ -162,10 +210,16 @@ class DeepSeekClient:
         url = f"{self._base_url}/chat/completions"
         model_to_use = str(model or "").strip() or self.model_name
         options = dict(options or {})
+        messages = []
+        system_prompt = str(options.get("system_prompt") or "").strip()
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
         payload = {
             "model": model_to_use,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "stream": False,
+            "thinking": _normalize_deepseek_thinking(options.get("thinking", "disabled")),
             "temperature": options.get("temperature", 0.2),
         }
         if "top_p" in options:
@@ -174,6 +228,12 @@ class DeepSeekClient:
             payload["max_tokens"] = options["num_predict"]
         elif "max_tokens" in options:
             payload["max_tokens"] = options["max_tokens"]
+        if "response_format" in options:
+            response_format = options["response_format"]
+            if isinstance(response_format, dict):
+                payload["response_format"] = dict(response_format)
+        elif options.get("json_mode"):
+            payload["response_format"] = dict(_DEEPSEEK_JSON_OBJECT_RESPONSE_FORMAT)
 
         response = requests.post(url, headers=self._headers(), json=payload, timeout=timeout)
         response.raise_for_status()
@@ -214,7 +274,12 @@ class DeepSeekClient:
                 response = self.generate(
                     model=self.model_name,
                     prompt=prompt_text,
-                    options={"num_predict": 1024, "temperature": 0.1}
+                    options={
+                        "num_predict": 1024,
+                        "temperature": 0.1,
+                        "json_mode": True,
+                        "thinking": {"type": "disabled"},
+                    }
                 )
 
                 chunk_map = _parse_glossary_response(response)

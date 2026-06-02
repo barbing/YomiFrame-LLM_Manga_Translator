@@ -69,6 +69,7 @@ def build_batch_translation_prompt(
     style_guide: Dict[str, object],
     items: List[Dict[str, str]],
     context_lines: List[str] | None = None,
+    json_object_wrapper: bool = False,
 ) -> str:
     guide_text = str(style_guide.get("notes", "")).strip()
     glossary = _format_glossary(style_guide.get("glossary", []))
@@ -78,6 +79,33 @@ def build_batch_translation_prompt(
     context = "\n".join(context_lines or []).strip()
     payload = json.dumps(items, ensure_ascii=False)
     if target_lang == "Simplified Chinese":
+        if json_object_wrapper:
+            lines = [
+                "将以下日文翻译成简体中文，仅输出有效的 json 对象。",
+                "json格式：{\"translations\":[{\"id\":\"...\",\"translation\":\"...\"}]}，仅翻译text字段，保持条目顺序。",
+                "不要输出顶层JSON数组，不要输出Markdown，不要解释。",
+                "注意：以下文本为同一页漫画的连续对话，请保持语境连贯和人称一致。",
+                "拟声词或背景杂字可返回空字符串。",
+                "译文要像中文漫画对白，简洁自然，不要照搬日语语序。",
+                "不要擅自补充主语、说明或额外句子。",
+                "短句就短译；原文是停顿、迟疑、感叹或省略句时，也保持同样的语气，不要补成完整书面句。",
+                "不要为了自然度硬加人称、主语或称呼。",
+                "人名和称呼优先遵循术语表；敬语请用自然中文处理。",
+            ]
+            if guide_text:
+                lines.append(f"风格：{guide_text}")
+            if glossary:
+                lines.append(f"术语表：{glossary}")
+            if characters:
+                lines.append(f"角色设定：{characters}")
+            if required_terms:
+                lines.append(f"必须使用：{required_terms}")
+            if forbidden_terms:
+                lines.append(f"禁止使用：{forbidden_terms}")
+            if context:
+                lines.append(f"参考上下文：{context}")
+            lines.append(f"输入：{payload}")
+            return "\n".join(lines)
         lines = [
             "将以下日文翻译成简体中文，仅输出JSON数组。",
             "JSON格式：[{\"id\":\"...\",\"translation\":\"...\"}]，仅翻译text字段，保持条目顺序。",
@@ -102,6 +130,27 @@ def build_batch_translation_prompt(
         if context:
             lines.append(f"参考上下文：{context}")
         lines.append(f"输入：{payload}")
+        return "\n".join(lines)
+    if json_object_wrapper:
+        lines = [
+            f"Translate {source_lang} to {target_lang}. Output only a valid json object.",
+            "json format: {\"translations\":[{\"id\":\"...\",\"translation\":\"...\"}]}. Translate only text fields.",
+            "Do not output a top-level JSON array. Do not add markdown or explanations.",
+            "Do not merge entries. For background noise, return an empty string.",
+        ]
+        if guide_text:
+            lines.append(f"Style guide: {guide_text}")
+        if glossary:
+            lines.append(f"Glossary: {glossary}")
+        if characters:
+            lines.append(f"Characters: {characters}")
+        if required_terms:
+            lines.append(f"Required terms: {required_terms}")
+        if forbidden_terms:
+            lines.append(f"Forbidden terms: {forbidden_terms}")
+        if context:
+            lines.append(f"Context (reference only): {context}")
+        lines.append(f"Input: {payload}")
         return "\n".join(lines)
     lines = [
         f"Translate {source_lang} to {target_lang}. Output only JSON.",

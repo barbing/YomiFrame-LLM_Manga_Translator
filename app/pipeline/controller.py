@@ -13134,10 +13134,20 @@ def _parse_json_list(text: str) -> list:
     """Robustly parse a JSON list from LLM output."""
     if not text:
         return []
+    def _list_from_json_value(value: Any) -> list:
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            for key in ("translations", "items", "results", "data"):
+                nested = value.get(key)
+                if isinstance(nested, list):
+                    return nested
+        return []
     try:
         data = json.loads(text)
-        if isinstance(data, list):
-            return data
+        parsed = _list_from_json_value(data)
+        if parsed:
+            return parsed
     except:
         pass
     
@@ -13148,6 +13158,16 @@ def _parse_json_list(text: str) -> list:
             data = json.loads(match.group())
             if isinstance(data, list):
                 return data
+        except:
+            pass
+    # DeepSeek JSON Output uses a JSON object response_format. Accept a
+    # wrapper object when the model obeys that API contract.
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            parsed = _list_from_json_value(json.loads(match.group()))
+            if parsed:
+                return parsed
         except:
             pass
     return []
@@ -13174,24 +13194,43 @@ def _build_compact_batch_retry_prompt(
     source_lang: str,
     target_lang: str,
     items: list[dict],
+    json_object_wrapper: bool = False,
 ) -> str:
     lines = []
     if target_lang == "Simplified Chinese":
-        lines.extend(
-            [
-                "将下面每条日语分别翻译成简体中文。",
-                "只输出JSON数组，格式为[{\"id\":\"...\",\"translation\":\"...\"}]。",
-                "不要合并条目，不要解释，不要保留日语假名。",
-            ]
-        )
+        if json_object_wrapper:
+            lines.extend(
+                [
+                    "将下面每条日语分别翻译成简体中文。",
+                    "只输出有效的 json 对象，格式为{\"translations\":[{\"id\":\"...\",\"translation\":\"...\"}]}。",
+                    "不要输出顶层JSON数组，不要合并条目，不要解释，不要保留日语假名。",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "将下面每条日语分别翻译成简体中文。",
+                    "只输出JSON数组，格式为[{\"id\":\"...\",\"translation\":\"...\"}]。",
+                    "不要合并条目，不要解释，不要保留日语假名。",
+                ]
+            )
     else:
-        lines.extend(
-            [
-                f"Translate each {source_lang} item to {target_lang}.",
-                "Output only JSON: [{\"id\":\"...\",\"translation\":\"...\"}].",
-                "Do not merge items or add explanations.",
-            ]
-        )
+        if json_object_wrapper:
+            lines.extend(
+                [
+                    f"Translate each {source_lang} item to {target_lang}.",
+                    "Output only a valid json object: {\"translations\":[{\"id\":\"...\",\"translation\":\"...\"}]}.",
+                    "Do not output a top-level JSON array. Do not merge items or add explanations.",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    f"Translate each {source_lang} item to {target_lang}.",
+                    "Output only JSON: [{\"id\":\"...\",\"translation\":\"...\"}].",
+                    "Do not merge items or add explanations.",
+                ]
+            )
     payload = [
         {"id": str(item.get("id", "") or ""), "text": str(item.get("text", "") or "")}
         for item in items
@@ -14815,6 +14854,22 @@ def _translation_perf_record_post_ensure(
         record["ensure_retry_skipped_reason"] = retry_skipped_reason
 
 
+def _is_deepseek_translation_backend(settings: PipelineSettings | None) -> bool:
+    return str(getattr(settings, "translator_backend", "") or "") == "DeepSeek"
+
+
+def _deepseek_request_timeout(default_timeout: int = 600) -> int:
+    return min(int(default_timeout), 35)
+
+
+def _sanitized_llm_output_snippet(text: str, limit: int = 240) -> str:
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+", " ", str(text or ""))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) > limit:
+        return cleaned[:limit] + "..."
+    return cleaned
+
+
 def _batch_translate(
     ollama,
     model: str,
@@ -14841,11 +14896,14 @@ def _batch_translate(
              temp = settings.ollama_temperature
              top_p = settings.ollama_top_p
              
+    deepseek_backend = _is_deepseek_translation_backend(settings)
     batch_size = 16
     if settings and settings.translator_backend == "GGUF":
         # Smaller GGUF batches are more stable for Sakura-style JSON output
         # and avoid pathological long generations on dense pages.
         batch_size = 6
+    elif deepseek_backend:
+        batch_size = 8
     initial_batch_size = batch_size
     effective_batch_size = batch_size
     start = 0
@@ -14860,10 +14918,19 @@ def _batch_translate(
             style_guide,
             chunk,
             context_lines=context_lines,
+            json_object_wrapper=deepseek_backend,
         )
         token_limit = _estimate_num_predict(chunk)
         if settings and settings.translator_backend == "GGUF":
             token_limit = min(token_limit, 224 if target_lang == "Simplified Chinese" else 256)
+        elif deepseek_backend:
+            token_limit = max(token_limit, 256)
+        request_options = {"num_predict": token_limit, "temperature": temp, "top_p": top_p}
+        request_timeout = 600
+        if deepseek_backend:
+            request_options["response_format"] = {"type": "json_object"}
+            request_options["thinking"] = {"type": "disabled"}
+            request_timeout = _deepseek_request_timeout(600)
         chunk_records = [
             (debug_records_by_text or {}).get(str(item.get("text") or ""))
             for item in chunk
@@ -14881,8 +14948,8 @@ def _batch_translate(
             raw = ollama.generate(
                 resolved,
                 prompt,
-                timeout=600,
-                options={"num_predict": token_limit, "temperature": temp, "top_p": top_p},
+                timeout=request_timeout,
+                options=request_options,
             )
             call_latency = time.time() - call_start
             for record in chunk_records:
@@ -14943,7 +15010,11 @@ def _batch_translate(
                     record["adaptive_batch_split_trigger"] = "batch_no_usable_json"
             if settings and settings.translator_backend == "GGUF" and effective_batch_size > 2:
                 effective_batch_size = max(2, math.ceil(effective_batch_size / 2))
-            logger.warning("Batch translation chunk returned no usable JSON output; falling back to single translation for this chunk.")
+            logger.warning(
+                "Batch translation chunk returned no usable JSON output; falling back to single translation for this chunk. "
+                "raw_response_snippet=%s",
+                _sanitized_llm_output_snippet(raw),
+            )
             continue
         for record in chunk_records:
             if record:
@@ -15004,13 +15075,27 @@ def _batch_translate(
                 repair_token_limit = max(48, min(128, _estimate_num_predict(repair_items)))
                 if settings and settings.translator_backend == "GGUF":
                     repair_token_limit = min(repair_token_limit, 128 if target_lang == "Simplified Chinese" else 160)
+                elif deepseek_backend:
+                    repair_token_limit = max(repair_token_limit, 128)
+                    repair_prompt = _build_compact_batch_retry_prompt(
+                        source_lang,
+                        target_lang,
+                        repair_items,
+                        json_object_wrapper=True,
+                    )
                 try:
                     repair_start = time.time()
+                    repair_options = {"num_predict": repair_token_limit, "temperature": temp, "top_p": top_p}
+                    repair_timeout = 600
+                    if deepseek_backend:
+                        repair_options["response_format"] = {"type": "json_object"}
+                        repair_options["thinking"] = {"type": "disabled"}
+                        repair_timeout = _deepseek_request_timeout(600)
                     repair_raw = ollama.generate(
                         resolved,
                         repair_prompt,
-                        timeout=600,
-                        options={"num_predict": repair_token_limit, "temperature": temp, "top_p": top_p},
+                        timeout=repair_timeout,
+                        options=repair_options,
                     )
                     repair_latency = time.time() - repair_start
                     for record in empty_records:
@@ -15131,13 +15216,18 @@ def _translate_single(
              top_p = settings.ollama_top_p
 
     token_limit = _estimate_single_num_predict(text, target_lang)
+    deepseek_backend = _is_deepseek_translation_backend(settings)
+    single_timeout = _deepseek_request_timeout(300) if deepseek_backend else 300
+    single_options = {"num_predict": token_limit, "temperature": temp, "top_p": top_p}
+    if deepseek_backend:
+        single_options["thinking"] = {"type": "disabled"}
     _translation_perf_add_path(debug_record, "single")
     call_start = time.time()
     result = ollama.generate(
         _resolve_model(model),
         prompt,
-        timeout=300,
-    options={"num_predict": token_limit, "temperature": temp, "top_p": top_p},
+        timeout=single_timeout,
+        options=single_options,
     )
     _translation_perf_record_llm_call(
         debug_record,
@@ -15175,8 +15265,11 @@ def _translate_single(
         result = ollama.generate(
             _resolve_model(model),
             retry_prompt,
-            timeout=300,
-            options={"num_predict": token_limit, "temperature": min(temp, 0.1), "top_p": top_p},
+            timeout=single_timeout,
+            options={
+                **single_options,
+                "temperature": min(temp, 0.1),
+            },
         )
         _translation_perf_record_llm_call(
             debug_record,
