@@ -1235,6 +1235,8 @@ def _resolve_prescan_model_name(settings: "PipelineSettings", translator) -> str
 
     if settings.translator_backend == "GGUF":
         return settings.gguf_model_path
+    if settings.translator_backend == "DeepSeek":
+        return settings.deepseek_model
 
     model_name = str(settings.ollama_model or "").strip()
     if model_name and model_name != "auto-detect":
@@ -1678,6 +1680,13 @@ def _batch_translate_nodes(
                 n_batch=settings.gguf_n_batch,
             )
             model_name = settings.gguf_model_path
+        elif settings.translator_backend == "DeepSeek":
+            from app.translate.ollama_client import DeepSeekClient
+            client = DeepSeekClient(
+                base_url=settings.deepseek_base_url,
+                model_name=settings.deepseek_model,
+            )
+            model_name = settings.deepseek_model
         else:
             from app.translate.ollama_client import OllamaClient
             client = OllamaClient()

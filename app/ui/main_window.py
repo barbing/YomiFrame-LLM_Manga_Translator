@@ -776,7 +776,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(QtWidgets.QLabel("OCR Engine"), 0, 1)
         layout.addWidget(self.ocr_engine, 1, 1)
         self.translator_backend = QtWidgets.QComboBox()
-        self.translator_backend.addItems(["Ollama", "GGUF"])
+        self.translator_backend.addItems(["Ollama", "GGUF", "DeepSeek"])
         self.translator_backend.setCurrentText(self._defaults.translator_backend)
         layout.addWidget(QtWidgets.QLabel("Translator"), 2, 0)
         layout.addWidget(self.translator_backend, 3, 0)
@@ -857,7 +857,7 @@ class MainWindow(QtWidgets.QMainWindow):
         l_trans.setColumnStretch(1, 1)
         
         self.settings_translator_backend = QtWidgets.QComboBox()
-        self.settings_translator_backend.addItems(["Ollama", "GGUF"])
+        self.settings_translator_backend.addItems(["Ollama", "GGUF", "DeepSeek"])
         self.settings_translator_backend.setCurrentText(self._defaults.translator_backend)
         
         self.settings_ollama_model = QtWidgets.QComboBox()
@@ -874,6 +874,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings_gguf_prompt_style = QtWidgets.QComboBox()
         self.settings_gguf_prompt_style.addItems(["sakura", "qwen", "plain"])
         self.settings_gguf_prompt_style.setCurrentText(self._defaults.gguf_prompt_style)
+
+        self.settings_deepseek_model = QtWidgets.QLineEdit(self._defaults.deepseek_model)
+        self.settings_deepseek_base_url = QtWidgets.QLineEdit(self._defaults.deepseek_base_url)
         
         l_trans.addWidget(QtWidgets.QLabel("Backend"), 0, 0)
         l_trans.addWidget(self.settings_translator_backend, 0, 1)
@@ -887,13 +890,19 @@ class MainWindow(QtWidgets.QMainWindow):
         l_trans.addWidget(QtWidgets.QLabel("GGUF Prompt"), 3, 0)
         l_trans.addWidget(self.settings_gguf_prompt_style, 3, 1)
 
+        l_trans.addWidget(QtWidgets.QLabel("DeepSeek Model"), 4, 0)
+        l_trans.addWidget(self.settings_deepseek_model, 4, 1)
+
+        l_trans.addWidget(QtWidgets.QLabel("DeepSeek Base URL"), 5, 0)
+        l_trans.addWidget(self.settings_deepseek_base_url, 5, 1)
+
         self.settings_trans_warning = QtWidgets.QLabel(
             "⚠️ GGUF model not found. Browse a valid .gguf file or place it under models/."
         )
         self.settings_trans_warning.setStyleSheet("color: #ef4444; font-size: 10px; font-weight: 600;")
         self.settings_trans_warning.setVisible(False)
         self.settings_trans_warning.setWordWrap(True)
-        l_trans.addWidget(self.settings_trans_warning, 4, 1)
+        l_trans.addWidget(self.settings_trans_warning, 6, 1)
 
         self.settings_trans_ollama_warning = QtWidgets.QLabel(
             "⚠️ Ollama server not available. Install Ollama and run 'ollama serve'."
@@ -901,7 +910,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings_trans_ollama_warning.setStyleSheet("color: #ef4444; font-size: 10px; font-weight: 600;")
         self.settings_trans_ollama_warning.setVisible(False)
         self.settings_trans_ollama_warning.setWordWrap(True)
-        l_trans.addWidget(self.settings_trans_ollama_warning, 5, 1)
+        l_trans.addWidget(self.settings_trans_ollama_warning, 7, 1)
+
+        self.settings_trans_deepseek_warning = QtWidgets.QLabel(
+            "⚠️ DeepSeek backend selected, but DEEPSEEK_API_KEY or api/API_KEY is missing."
+        )
+        self.settings_trans_deepseek_warning.setStyleSheet("color: #ef4444; font-size: 10px; font-weight: 600;")
+        self.settings_trans_deepseek_warning.setVisible(False)
+        self.settings_trans_deepseek_warning.setWordWrap(True)
+        l_trans.addWidget(self.settings_trans_deepseek_warning, 8, 1)
         
         main_layout.addWidget(grp_trans)
 
@@ -1615,6 +1632,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings_trans_ollama_warning.setVisible(False)
         if backend == "Ollama":
             self.settings_trans_ollama_warning.setVisible(not self._ollama_available())
+        self.settings_trans_deepseek_warning.setVisible(False)
+        if backend == "DeepSeek":
+            if not self.settings_deepseek_model.text().strip():
+                self.settings_trans_deepseek_warning.setText("⚠️ DeepSeek backend selected, but the model name is empty.")
+                self.settings_trans_deepseek_warning.setVisible(True)
+            elif not self.settings_deepseek_base_url.text().strip():
+                self.settings_trans_deepseek_warning.setText("⚠️ DeepSeek backend selected, but the base URL is empty.")
+                self.settings_trans_deepseek_warning.setVisible(True)
+            elif not self._deepseek_key_configured():
+                self.settings_trans_deepseek_warning.setText(
+                    "⚠️ DeepSeek backend selected, but DEEPSEEK_API_KEY or api/API_KEY is missing."
+                )
+                self.settings_trans_deepseek_warning.setVisible(True)
 
     def _update_scan_warnings(self) -> None:
         backend = self.settings_discovery_backend.currentText()
@@ -1648,6 +1678,13 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             return False
 
+    def _deepseek_key_configured(self) -> bool:
+        try:
+            from app.translate.ollama_client import DeepSeekClient
+            return DeepSeekClient.has_configured_key()
+        except Exception:
+            return False
+
     def _gguf_runtime_available(self) -> bool:
         try:
             import llama_cpp  # noqa: F401
@@ -1656,6 +1693,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
     def _validate_translation_backend(self, settings: PipelineSettings) -> str:
+        if settings.translator_backend == "DeepSeek":
+            if not (settings.deepseek_model or "").strip():
+                return "DeepSeek backend selected, but the model name is empty."
+            if not (settings.deepseek_base_url or "").strip():
+                return "DeepSeek backend selected, but the base URL is empty."
+            if not self._deepseek_key_configured():
+                return "DeepSeek backend selected, but DEEPSEEK_API_KEY or api/API_KEY is missing."
+            return ""
         if settings.translator_backend != "GGUF":
             return ""
         gguf_path = (settings.gguf_model_path or "").strip()
@@ -1703,6 +1748,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.auto_glossary.toggled.connect(self._update_glossary_controls)
         self.settings_translator_backend.currentTextChanged.connect(self._update_translation_warning)
         self.settings_gguf_model_path.currentTextChanged.connect(self._update_translation_warning)
+        self.settings_deepseek_model.textChanged.connect(self._update_translation_warning)
+        self.settings_deepseek_base_url.textChanged.connect(self._update_translation_warning)
         self.settings_discovery_backend.currentTextChanged.connect(self._update_scan_warnings)
         self.settings_discovery_gguf_path.currentTextChanged.connect(self._update_scan_warnings)
         
@@ -2507,7 +2554,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 ollama_temperature = float(override.get("ollama_temp", ollama_temperature))
                 ollama_top_p = float(override.get("ollama_top_p", ollama_top_p))
                 ollama_context = int(override.get("ollama_ctx", ollama_context))
-        else:
+        elif backend == "GGUF":
             model_id = self._selected_gguf_model_path()
             override = self._get_override_values("GGUF", model_id)
             if override:
@@ -2536,6 +2583,8 @@ class MainWindow(QtWidgets.QMainWindow):
             inpaint_mode=self.inpaint_mode.currentText(),
             font_detection=self.font_detection.currentText(),
             translator_backend=self.translator_backend.currentText(),
+            deepseek_model=self.settings_deepseek_model.text().strip() or self._defaults.deepseek_model,
+            deepseek_base_url=self.settings_deepseek_base_url.text().strip() or self._defaults.deepseek_base_url,
             gguf_model_path=self._selected_gguf_model_path(),
             gguf_prompt_style=self.gguf_prompt_style.currentText(),
             gguf_n_ctx=gguf_n_ctx,
@@ -2786,6 +2835,8 @@ class MainWindow(QtWidgets.QMainWindow):
         settings.setValue("ollama_temp", self.settings_ollama_temp.value())
         settings.setValue("ollama_top_p", self.settings_ollama_top_p.value())
         settings.setValue("ollama_ctx", self.settings_ollama_ctx.value())
+        settings.setValue("deepseek_model", self.settings_deepseek_model.text().strip())
+        settings.setValue("deepseek_base_url", self.settings_deepseek_base_url.text().strip())
         settings.setValue("gguf_temp", self.settings_gguf_temp.value())
         settings.setValue("gguf_top_p", self.settings_gguf_top_p.value())
         
@@ -2855,6 +2906,8 @@ class MainWindow(QtWidgets.QMainWindow):
         _restore(self.settings_ollama_temp, "ollama_temp", type_func=float)
         _restore(self.settings_ollama_top_p, "ollama_top_p", type_func=float)
         _restore(self.settings_ollama_ctx, "ollama_ctx", type_func=int)
+        _restore(self.settings_deepseek_model, "deepseek_model")
+        _restore(self.settings_deepseek_base_url, "deepseek_base_url")
         _restore(self.settings_gguf_temp, "gguf_temp", type_func=float)
         _restore(self.settings_gguf_top_p, "gguf_top_p", type_func=float)
         

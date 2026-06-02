@@ -17,6 +17,9 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Local API credentials
+api/
+
 # App outputs / local data
 output/
 *.sqlite

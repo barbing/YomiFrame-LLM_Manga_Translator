@@ -40,6 +40,8 @@ class AppDefaults:
     # for compatibility/provenance only; cleanup does not load arbitrary paths.
     inpaint_model: str = IOPAINT_ANIME_MANGA_BIG_LAMA
     translator_backend: str = "GGUF"
+    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_base_url: str = "https://api.deepseek.com"
     gguf_model_path: str = ""
     gguf_prompt_style: str = "sakura"
     gguf_n_ctx: int = 4096

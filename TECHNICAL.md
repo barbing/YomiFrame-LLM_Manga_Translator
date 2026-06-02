@@ -177,9 +177,11 @@ Mask-only validation cannot by itself prove end-to-end cleanup runtime, inpainti
 
 ## Cleanup/Inpainting Readiness Boundary
 
-Cleanup and inpainting validation should start only after upstream semantic authorization and text-pixel projection are accepted. Cleanup validation then needs to prove runtime execution, proof artifacts, inpainting quality, and final render composition.
+Cleanup and inpainting should run only after upstream semantic authorization and text-pixel projection are accepted. Accepted cleanup masks are planned and executed through the configured cleanup backend, and proof records source-text removal, mask containment, broad-fill risk, and collateral-change evidence.
 
-It should not reopen BubbleDetection/TextAreaPlan ownership unless raw visual evidence shows that an upstream semantic unit or component authorization is still wrong.
+The renderer consumes the cleaned pre-render image and cleanup/proof metadata. It should not generate cleanup masks, choose cleanup classes, select cleanup backends, or perform renderer-local cleanup mutation.
+
+End-to-end quality is evaluated from rendered output pages, project and audit metadata, cleanup/proof consumption, rendered-text completeness, layout quality, SFX/decorative preservation, and performance.
 
 ## Auto-Glossary and Name Memory
 

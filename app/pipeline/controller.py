@@ -299,6 +299,8 @@ class PipelineSettings:
     inpaint_mode: str
     font_detection: str
     translator_backend: str
+    deepseek_model: str
+    deepseek_base_url: str
     # Generation Options
     ollama_temperature: float
     ollama_top_p: float
@@ -383,7 +385,7 @@ class PipelineWorker(QtCore.QThread):
 
         start_time = time.time()
         from app.ocr.manga_ocr_engine import MangaOcrEngine, ensure_torch_runtime_ready
-        from app.translate.ollama_client import OllamaClient
+        from app.translate.ollama_client import DeepSeekClient, OllamaClient
         from app.render.renderer import render_translations
         from app.pipeline.cleanup_contracts import build_cleanup_job_candidates
         from app.pipeline.cleanup_masks import build_cleanup_masks
@@ -526,6 +528,14 @@ class PipelineWorker(QtCore.QThread):
                             "GGUF is running in CPU mode. For speed, install a CUDA-enabled llama-cpp-python "
                             "build or switch to Ollama."
                         )
+                elif self._settings.translator_backend == "DeepSeek":
+                    ollama = DeepSeekClient(
+                        base_url=self._settings.deepseek_base_url,
+                        model_name=self._settings.deepseek_model,
+                    )
+                    if not ollama.is_available():
+                        self.message.emit("DeepSeek API is not available. Set DEEPSEEK_API_KEY or api/API_KEY and verify network access.")
+                        return
                 else:
                     ollama = OllamaClient()
                     if not ollama.is_available():
@@ -534,12 +544,15 @@ class PipelineWorker(QtCore.QThread):
             except Exception as exc:
                 self.message.emit(_friendly_model_error(exc))
                 return
-            model_name = (
-                self._settings.gguf_model_path
-                if self._settings.translator_backend == "GGUF"
-                else self._settings.ollama_model
-            )
-            resolved_model = _resolve_model(self._settings.ollama_model)
+            if self._settings.translator_backend == "GGUF":
+                model_name = self._settings.gguf_model_path
+                resolved_model = model_name
+            elif self._settings.translator_backend == "DeepSeek":
+                model_name = self._settings.deepseek_model
+                resolved_model = model_name
+            else:
+                model_name = self._settings.ollama_model
+                resolved_model = _resolve_model(self._settings.ollama_model)
             if self._settings.translator_backend == "Ollama":
                 if resolved_model and self._settings.ollama_model != "auto-detect":
                     available = list_models()
@@ -575,6 +588,8 @@ class PipelineWorker(QtCore.QThread):
             project["project"]["model"]["ocr"] = self._settings.ocr_engine
             if self._settings.translator_backend == "GGUF":
                 project["project"]["model"]["translator"] = f"gguf:{self._settings.gguf_model_path}"
+            elif self._settings.translator_backend == "DeepSeek":
+                project["project"]["model"]["translator"] = f"deepseek:{self._settings.deepseek_model}"
             else:
                 project["project"]["model"]["translator"] = f"ollama:{self._settings.ollama_model}"
             project["project"]["style_guide"] = self._settings.style_guide_path or ""
@@ -14251,6 +14266,8 @@ def _translation_perf_prompt_style(settings: PipelineSettings | None) -> str:
     backend = str(getattr(settings, "translator_backend", "") or "")
     if backend == "GGUF":
         return str(getattr(settings, "gguf_prompt_style", "") or "")
+    if backend == "DeepSeek":
+        return "deepseek_chat_completions"
     return "ollama_batch_single"
 
 
