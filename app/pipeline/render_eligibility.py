@@ -337,6 +337,21 @@ def _decision_for_region(
         "image_size": list(image_size) if image_size else None,
     }
 
+    if _failed_closed_root(region, render):
+        return RenderEligibilityDecision(
+            page_id=page_id,
+            region_id=rid,
+            status=RenderEligibilityStatus.SUPPRESSED_SOURCE_UNGROUNDED,
+            reason="root_transaction_failed_closed",
+            translated_text_present=bool(str(translated_text or "").strip()),
+            source_text=source_text,
+            translated_text=translated_text,
+            ocr_confidence=min_confidence,
+            risky_detection_source=risky_source,
+            hard_contradictions=_dedupe(list(hard_contradictions) + ["root_transaction_failed_closed"]),
+            evidence=evidence,
+        )
+
     if source_erasure_unproven and translated_meaningful:
         return RenderEligibilityDecision(
             page_id=page_id,
@@ -1093,6 +1108,8 @@ def _record_reasons(records: Sequence[Mapping[str, Any]]) -> list[str]:
 
 
 def _suppression_reason(hard_contradictions: Sequence[str]) -> str:
+    if "root_transaction_failed_closed" in hard_contradictions:
+        return "root_transaction_failed_closed"
     if "mislocalized_source_erasure_required" in hard_contradictions:
         return "mislocalized_source_erasure_required"
     if "source_present_cleanup_unproven" in hard_contradictions:
@@ -1173,6 +1190,37 @@ def _meaningful_text(text: str) -> bool:
 def _weak_source_text(text: str) -> bool:
     text = str(text or "").strip()
     return _punctuation_only(text) or _semantic_char_count(text) <= WEAK_SOURCE_MAX_SEMANTIC_CHARS
+
+
+def _failed_closed_root(region: Mapping[str, Any], render: Mapping[str, Any]) -> bool:
+    state = _text_from(
+        region,
+        render,
+        keys=("root_final_state", "text_block_root_final_state"),
+    )
+    reason = _text_from(
+        region,
+        render,
+        keys=("root_final_state_reason", "text_block_root_final_state_reason"),
+    )
+    skip = _text_from(region, render, keys=("skip_reason",))
+    action = _text_from(
+        region,
+        render,
+        keys=("source_coherence_action", "root_source_coherence_action"),
+    )
+    combined = " ".join(value for value in (state, reason, skip, action) if value).lower()
+    if state == "unresolved_meaningful_blocker":
+        return True
+    markers = {
+        "root_transaction_failed_closed",
+        "ocr_punctuation_only_blocker",
+        "root_source_coherence_rejected_parent",
+        "block_review_only",
+        "unresolved_review_only",
+        "no_accepted_parent_unit",
+    }
+    return any(marker in combined for marker in markers)
 
 
 def _punctuation_only(text: str) -> bool:

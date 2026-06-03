@@ -8964,6 +8964,7 @@ def _process_page(
             continue
         if _logical_text_region_blocks_independent_render(region):
             region["translation"] = ""
+            region["translated_text"] = ""
             continue
         if (
             region.get("type") == "speech_bubble"
@@ -8983,6 +8984,7 @@ def _process_page(
             continue
         if _logical_text_region_blocks_independent_render(region):
             region["translation"] = ""
+            region["translated_text"] = ""
             continue
         flags = region.get("flags", {}) or {}
         if flags.get("ignore") and not recover_candidate:
@@ -9134,6 +9136,8 @@ def _process_page(
 
 
 def _logical_text_region_blocks_independent_render(region: dict) -> bool:
+    if _logical_text_region_failed_closed(region):
+        return True
     status = str(region.get("logical_text_ownership_status") or "").strip()
     if status in {
         "transferred_child",
@@ -9145,6 +9149,44 @@ def _logical_text_region_blocks_independent_render(region: dict) -> bool:
     if str(region.get("skip_reason") or "") == "ignored_by_pipeline":
         return True
     return False
+
+
+def _logical_text_region_failed_closed(region: dict) -> bool:
+    render = region.get("render", {}) if isinstance(region.get("render"), dict) else {}
+    state = str(
+        region.get("root_final_state")
+        or render.get("root_final_state")
+        or region.get("text_block_root_final_state")
+        or render.get("text_block_root_final_state")
+        or ""
+    ).strip()
+    reason = str(
+        region.get("root_final_state_reason")
+        or render.get("root_final_state_reason")
+        or region.get("text_block_root_final_state_reason")
+        or render.get("text_block_root_final_state_reason")
+        or ""
+    ).strip()
+    skip = str(region.get("skip_reason") or render.get("skip_reason") or "").strip()
+    action = str(
+        region.get("source_coherence_action")
+        or render.get("source_coherence_action")
+        or region.get("root_source_coherence_action")
+        or render.get("root_source_coherence_action")
+        or ""
+    ).strip()
+    combined = " ".join(value for value in (state, reason, skip, action) if value).lower()
+    if state == "unresolved_meaningful_blocker":
+        return True
+    failed_closed_markers = {
+        "root_transaction_failed_closed",
+        "ocr_punctuation_only_blocker",
+        "root_source_coherence_rejected_parent",
+        "block_review_only",
+        "unresolved_review_only",
+        "no_accepted_parent_unit",
+    }
+    return any(marker in combined for marker in failed_closed_markers)
 
 
 def _apply_experimental_text_area_route_assist(
@@ -15702,6 +15744,20 @@ def _ensure_target_language(
         retry_assessment = final_assessment if final else retry_assessment
     
     if retry_assessment["hard_failure_reasons"]:
+        flagged_translation = retry or translation
+        if flagged_translation:
+            _translation_perf_set_final(
+                debug_record,
+                translation=flagged_translation,
+                status="ensure_failed_quality_flagged_output_preserved",
+            )
+            _translation_perf_record_post_ensure(
+                debug_record,
+                flagged_translation,
+                acceptance_status="retry_failed_quality_flagged_output_preserved",
+                retry_skipped_reason="postcheck_quality_failure_advisory",
+            )
+            return flagged_translation, False
         _translation_perf_set_final(debug_record, translation="", status="ensure_failed_bad_shape")
         _translation_perf_record_post_ensure(
             debug_record,
@@ -16202,8 +16258,10 @@ def _translate_strict(
 def _cjk_ratio(text: str) -> float:
     if not text:
         return 0.0
-    cjk = sum(1 for ch in text if _is_japanese(ch))
-    return cjk / max(1, len(text))
+    body = _non_punct_chars(text)
+    denominator = len(body) if body else len(text)
+    cjk = sum(1 for ch in body if _is_japanese(ch)) if body else sum(1 for ch in text if _is_japanese(ch))
+    return cjk / max(1, denominator)
 
 
 def _kana_ratio(text: str) -> float:
