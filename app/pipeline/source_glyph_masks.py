@@ -506,6 +506,49 @@ def generate_source_glyph_masks(
                 consumed_by_renderer = True
                 generation_required = True
                 not_generated_reason = ""
+            elif _is_route_owned_cleanup_only_anchor(region, render):
+                route = str(_canonical_region_render_value(region, render, "text_area_route_intent") or "")
+                is_caption = route in {"translate_caption", "translate_caption_background"} or _is_background_region(region)
+                limit_box = _xywh_value_to_xyxy(
+                    _canonical_region_render_value(region, render, "text_area_container_bbox"),
+                    img_w,
+                    img_h,
+                )
+                if is_caption:
+                    source_mask = _caption_background_source_cleanup_mask(
+                        img_np,
+                        bbox,
+                        None,
+                        dilate_px=2,
+                        limit_box=limit_box,
+                    )
+                    method = "caption_background_cleanup_only_glyph_local"
+                else:
+                    cleanup_only_dilate = max(2, min(4, int(max(min(w, h) * 0.08, h * 0.02))))
+                    source_mask = _source_glyph_local_mask(
+                        img_np,
+                        bbox,
+                        polygon,
+                        dilate_px=cleanup_only_dilate,
+                        limit_box=limit_box,
+                        bright_context_only=True,
+                    )
+                    method = "speech_cleanup_only_glyph_local"
+                expected_box = _source_erasure_expected_box(
+                    region,
+                    render,
+                    regions_by_id,
+                    bbox,
+                    img_w,
+                    img_h,
+                )
+                allowed_area = _recovered_speech_allowed_area(region, render, img_w, img_h)
+                consumed_by_renderer = True
+                generation_required = True
+                not_generated_reason = ""
+                is_caption_mask = is_caption
+                is_side_caption_mask = bool(is_caption and _is_vertical_side_caption(region, render))
+                container_clip_reason = _container_clip_reason(expected_box, allowed_area)
             elif _is_logical_text_cleanup_anchor(region, render):
                 route = str(_canonical_region_render_value(region, render, "text_area_route_intent") or "")
                 is_caption = route in {"translate_caption", "translate_caption_background"} or _is_background_region(region)
@@ -1440,10 +1483,11 @@ def _base_coverage_record(page_id: str, region: dict, render: dict, cleanup_mode
     flags = region.get("flags", {}) or {}
     region_id = str(region.get("region_id", "") or "")
     renderable = bool(str(region.get("translation", "") or "").strip()) and not bool(flags.get("ignore"))
+    cleanup_only = _is_route_owned_cleanup_only_anchor(region, render)
     ocr_backed = bool(str(region.get("ocr_text", "") or "").strip())
     region_type = str(region.get("type", "") or "")
-    cleanup_enabled = renderable and cleanup_mode not in {"", "preserve", "none", "skip"}
-    tracking_required = bool(cleanup_enabled and ocr_backed and region_type not in {"decorative_text"})
+    cleanup_enabled = (renderable or cleanup_only) and cleanup_mode not in {"", "preserve", "none", "skip"}
+    tracking_required = bool(cleanup_enabled and (ocr_backed or cleanup_only) and region_type not in {"decorative_text"})
     not_generated_reason = None if tracking_required else _default_missing_reason(region, render, cleanup_mode)
     record = {
         "page_id": page_id,
@@ -1506,9 +1550,12 @@ def _default_missing_reason(region: dict, render: dict, cleanup_mode: str) -> st
     flags = region.get("flags", {}) or {}
     if flags.get("ignore"):
         return "ignored_by_pipeline"
+    cleanup_only = _is_route_owned_cleanup_only_anchor(region, render)
     if not str(region.get("translation", "") or "").strip():
+        if cleanup_only:
+            return "cleanup_only_source_glyph_mask_required"
         return "not_renderable_or_empty_translation"
-    if not str(region.get("ocr_text", "") or "").strip():
+    if not str(region.get("ocr_text", "") or "").strip() and not cleanup_only:
         return "no_ocr_text"
     if cleanup_mode in {"", "preserve", "none", "skip"}:
         return "cleanup_not_enabled"
@@ -1903,6 +1950,12 @@ def _is_accepted_standalone_speech_cleanup_anchor(region: dict, render: dict) ->
     return _coerce_box_list(container_bbox) is not None
 
 
+def _is_route_owned_cleanup_only_anchor(region: dict, render: dict) -> bool:
+    # SourceGlyphMask may support translated logical-text cleanup anchors, but
+    # route-owned cleanup-only anchors are no longer production authority.
+    return False
+
+
 def _is_logical_text_cleanup_anchor(region: dict, render: dict) -> bool:
     if not isinstance(region, dict):
         return False
@@ -1951,6 +2004,8 @@ def _rendered_region_requires_source_mask(region: dict, render: dict, cleanup_mo
     flags = region.get("flags", {}) or {}
     if bool(flags.get("ignore")) or bool(region.get("skip_translation")):
         return False
+    if _is_route_owned_cleanup_only_anchor(region, render):
+        return True
     if not str(region.get("translation") or region.get("translated_text") or "").strip():
         return False
     cleanup = str(cleanup_mode or render.get("cleanup_mode") or "").strip().lower()

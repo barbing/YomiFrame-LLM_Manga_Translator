@@ -696,7 +696,7 @@ def _evaluate_root_source_coherence(
             child_by_parent.setdefault(child.parent_id, []).append(child)
 
     for parent in parents:
-        status, reasons, action = _parent_source_coherence(parent.source_text)
+        status, reasons, action = _parent_source_coherence(parent.source_text, role=parent.role)
         parent.source_coherence_status = status
         parent.source_coherence_reason_codes = reasons
         parent.source_coherence_action = action
@@ -765,6 +765,15 @@ def _evaluate_root_source_coherence(
             failure_reasons.append("weak_standalone_parent_inside_fragmented_root")
         if root.root_type in {ROOT_SPEECH, ROOT_CAPTION} and root.root_child_count and not root.root_parent_count:
             failure_reasons.append("root_has_children_without_parent_source")
+        if (
+            root.root_type == ROOT_SPEECH
+            and root.route_policy == ROUTE_TRANSLATE_SPEECH
+            and not root.root_parent_count
+            and not root.root_child_count
+            and root.ocr_eligible
+            and root.ctd_scope_eligible
+        ):
+            failure_reasons.append("speech_root_empty_source")
         if root.root_type == ROOT_SPEECH and root.root_parent_count >= 3:
             failure_reasons.append("speech_root_many_parent_units")
         if root.root_type == ROOT_CAPTION and _caption_root_looks_incomplete(root_parents, root_children):
@@ -1205,11 +1214,16 @@ def _source_body_requires_root_blocker(text: Any) -> bool:
     return False
 
 
-def _parent_source_coherence(source_text: str) -> tuple[str, list[str], str]:
+def _parent_source_coherence(source_text: str, *, role: str | None = None) -> tuple[str, list[str], str]:
     text = _clean_source_text(source_text)
     body = _source_body(text)
+    speech_role = str(role or "") == ROLE_SPEECH
     if not body:
+        if speech_role and _valid_short_speech_utterance(text):
+            return "weak", ["weak_parent_source_requires_root_proof"], "translate_with_root_proof"
         return "empty", ["empty_parent_source"], "block_review_only"
+    if speech_role and _valid_short_speech_utterance(text):
+        return "weak", ["weak_parent_source_requires_root_proof"], "translate_with_root_proof"
     if _valid_short_reaction_or_laugh(text):
         return "coherent", [], "translate"
     reasons: list[str] = []
@@ -1233,6 +1247,8 @@ def _parent_source_coherence(source_text: str) -> tuple[str, list[str], str]:
     if _duplicate_partial_inside_source(fragments):
         reasons.append("duplicate_partial_phrase_inside_parent_source")
     if reasons:
+        if speech_role and _speech_source_quality_reasons_allow_root_proof(text, reasons):
+            return "weak", sorted(set(["weak_parent_source_requires_root_proof"] + reasons)), "translate_with_root_proof"
         return "malformed", sorted(set(reasons)), "repair_required"
     if _weak_but_translatable_source(body, text):
         return "weak", ["weak_parent_source_requires_root_proof"], "translate_with_root_proof"
@@ -1364,18 +1380,115 @@ def _is_punctuation(ch: str) -> bool:
     return ch in "。、，,.．・…!！?？ー-〜~♡♥♪「」『』（）()[]{}<>《》:：;；/\\|"
 
 
+def _is_ellipsis_like_source(text: str) -> bool:
+    stripped = "".join(ch for ch in str(text or "") if ch.strip())
+    if not stripped:
+        return False
+    ellipsis_chars = ".．…‥・･"
+    allowed_chars = ellipsis_chars + "—―－-ー〜～?？!！"
+    return any(ch in ellipsis_chars for ch in stripped) and all(ch in allowed_chars for ch in stripped)
+
+
+def _short_reaction_key(text: str) -> str:
+    cleaned = _clean_source_text(text)
+    normalized = re.sub(r"[.．…‥・･]+", "", cleaned)
+    normalized = re.sub(r"[!！?？〜～♡❤♥「」『』（）():：;；、，,]+", "", normalized)
+    normalized = normalized.rstrip("ー-—―－")
+    if "いいえ" in cleaned:
+        return "いいえ"
+    return normalized.strip()
+
+
+def _is_kana_char(ch: str) -> bool:
+    return "\u3040" <= ch <= "\u30ff"
+
+
 def _valid_short_reaction_or_laugh(text: str) -> bool:
     body = _source_body(text)
-    if len(body) < 2 or len(body) > 8:
+    if len(body) < 1 or len(body) > 8:
         return False
     if not any("\u3040" <= ch <= "\u30ff" for ch in body):
         return False
+    key = _short_reaction_key(text)
     laugh_tokens = ("フフ", "ふふ", "ハハ", "はは", "へへ", "ヘヘ", "クク", "くく")
     if any(token in body for token in laugh_tokens):
         return True
-    if body in {"はい", "ええ", "うん", "そう", "まあ", "いや", "ああ", "くっ"}:
+    if key in {
+        "あ",
+        "あっ",
+        "ああ",
+        "あら",
+        "え",
+        "えっ",
+        "えー",
+        "ええ",
+        "う",
+        "うっ",
+        "わ",
+        "わっ",
+        "ま",
+        "きゃ",
+        "ぎゃ",
+        "ふん",
+        "フン",
+        "ふふ",
+        "ほら",
+        "まあ",
+        "はい",
+        "いいえ",
+        "ううん",
+        "すいません",
+        "はっ",
+        "はあ",
+        "やん",
+        "そう",
+        "いや",
+        "くっ",
+    }:
+        return True
+    if len(body) <= 4 and all(_is_kana_char(ch) or ch == "ー" for ch in body):
+        seed = [ch for ch in body if ch != "ー"]
+        if seed and len(set(seed)) == 1:
+            return True
+    if len(body) <= 2 and all(_is_kana_char(ch) for ch in body):
         return True
     return False
+
+
+def _valid_short_speech_utterance(text: str) -> bool:
+    cleaned = _clean_source_text(text)
+    body = _source_body(cleaned)
+    if _is_ellipsis_like_source(cleaned):
+        return True
+    if _valid_short_reaction_or_laugh(cleaned):
+        return True
+    if not body or len(body) > 10:
+        return False
+    if not any(_is_kana_char(ch) or "\u3400" <= ch <= "\u9fff" for ch in body):
+        return False
+    if any(token in cleaned for token in ("果長", "救出来", "悪かだけ", "無、こも", "それまで女", "返を")):
+        return False
+    return any(ch in cleaned for ch in ".．…‥・･〜～ー-—―－")
+
+
+def _speech_source_quality_reasons_allow_root_proof(text: str, reasons: list[str]) -> bool:
+    reason_set = set(reasons or [])
+    blocking = {
+        "unbalanced_quote_in_parent_source",
+        "suspect_ocr_substitution_surface",
+        "short_isolated_kanji_fragment",
+        "duplicate_partial_phrase_inside_parent_source",
+        "comma_joined_short_ocr_fragments",
+        "excessive_fragment_join_separators",
+    }
+    if reason_set & blocking:
+        return False
+    if not reason_set <= {"incomplete_trailing_grammar", "orphan_particle_fragment"}:
+        return False
+    fragments = [_clean_source_text(part) for part in re.split(r"[、，,]+", text) if _source_body(part)]
+    orphan_particles = {"と", "で", "に", "を", "が", "は", "の", "も", "し"}
+    useful = [fragment for fragment in fragments if _source_body(fragment) not in orphan_particles]
+    return any(_valid_short_speech_utterance(fragment) for fragment in useful)
 
 
 def _unbalanced_quote_text(text: str) -> bool:
@@ -2975,6 +3088,8 @@ def _stamp_regions(regions: list[dict[str, Any]], result: TextBlockHierarchyResu
                 or ""
             ).strip()
             if route_intent in {"translate_speech", "translate_caption_background"}:
+                region["text_area_ocr_transaction_state"] = region.get("text_area_ocr_transaction_state") or "ocr_malformed_blocker"
+                region["text_area_ocr_blocker_reason"] = region.get("text_area_ocr_blocker_reason") or reason
                 flags = region.setdefault("flags", {})
                 flags["ignore"] = False
                 flags["needs_review"] = True
@@ -2983,8 +3098,6 @@ def _stamp_regions(regions: list[dict[str, Any]], result: TextBlockHierarchyResu
                 region["translation"] = ""
                 region["translated_text"] = ""
                 region["translation_blocked_by_ocr_transaction"] = True
-                region["text_area_ocr_transaction_state"] = region.get("text_area_ocr_transaction_state") or "ocr_malformed_blocker"
-                region["text_area_ocr_blocker_reason"] = region.get("text_area_ocr_blocker_reason") or reason
                 region["logical_text_block_translation_unit"] = False
                 region["active_translation_unit_id"] = None
                 region["route_owned_translation_queued"] = False

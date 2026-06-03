@@ -337,6 +337,21 @@ def _decision_for_region(
         "image_size": list(image_size) if image_size else None,
     }
 
+    if source_erasure_unproven and translated_meaningful:
+        return RenderEligibilityDecision(
+            page_id=page_id,
+            region_id=rid,
+            status=RenderEligibilityStatus.SUPPRESSED_SOURCE_UNGROUNDED,
+            reason=_suppression_reason(hard_contradictions),
+            translated_text_present=True,
+            source_text=source_text,
+            translated_text=translated_text,
+            ocr_confidence=min_confidence,
+            risky_detection_source=risky_source,
+            hard_contradictions=hard_contradictions,
+            evidence=evidence,
+        )
+
     preserve_reason = _preservation_reason(page_id, rid, semantic_class, source_text, low_confidence, cleanup_classes)
     if preserve_reason:
         status = (
@@ -633,8 +648,8 @@ def _hard_contradictions(
         contradictions.append("source_glyph_missing_failed_or_quality_failed")
     if _expected_source_mask_missing(cleanup_records, mask_records):
         contradictions.append("expected_source_mask_missing")
-    if source_erasure_unproven and risky_caption_background_recovery:
-        if risky_source:
+    if source_erasure_unproven:
+        if risky_caption_background_recovery and risky_source:
             contradictions.append("mislocalized_source_erasure_required")
         else:
             contradictions.append("source_present_cleanup_unproven")
@@ -901,6 +916,9 @@ def _source_erasure_required_but_unproven(
 ) -> bool:
     """True when source cleanup is required but no executable mask proof exists."""
 
+    if _cleanup_records_require_source_erasure(cleanup_records) and not _valid_cleanup_mask_exists(mask_records):
+        return True
+
     source_required = any(
         _truthy(
             _get(
@@ -917,6 +935,35 @@ def _source_erasure_required_but_unproven(
     source_unproven = _source_glyph_missing_failed_or_quality_failed(source_records)
     expected_mask_missing = _expected_source_mask_missing(cleanup_records, mask_records)
     return (source_unproven or expected_mask_missing) and not _valid_cleanup_mask_exists(mask_records)
+
+
+def _cleanup_records_require_source_erasure(cleanup_records: Sequence[Mapping[str, Any]]) -> bool:
+    for record in cleanup_records or []:
+        section = str(_get(record, "record_section") or "").lower()
+        if section and section not in {"jobs", "obligation_records"}:
+            continue
+        cleanup_class = str(_get(record, "cleanup_class") or "").lower()
+        route_intent = str(_get(record, "route_intent") or "").lower()
+        semantic_class = str(_get(record, "semantic_class") or "").lower()
+        cleanup_mode = str(_get(record, "cleanup_mode") or "").lower()
+        combined = " ".join([cleanup_class, route_intent, semantic_class, cleanup_mode])
+        if any(marker in combined for marker in ("preserve", "sfx", "decorative", "art_entangled")):
+            continue
+        if any(
+            marker in combined
+            for marker in (
+                "speech",
+                "caption",
+                "background",
+                "narration",
+                "title",
+                "sign",
+                "translate",
+                "small_reaction",
+            )
+        ):
+            return True
+    return False
 
 
 def _valid_cleanup_mask_exists(mask_records: Sequence[Mapping[str, Any]]) -> bool:

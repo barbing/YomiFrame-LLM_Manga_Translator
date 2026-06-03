@@ -6,11 +6,12 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import time
 from datetime import datetime, timezone
 import sys
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from app.pipeline.filters import TextFilter
 from PySide6 import QtCore
 from app.io.project import default_project_dict, save_project
@@ -330,6 +331,7 @@ class PipelineSettings:
     debug_artifacts: bool = False
     debug_pages: str = ""
     debug_dir: str = ""
+    private_cleanup_validation_stop_after_cleanup: bool = False
 
 
 class PipelineWorker(QtCore.QThread):
@@ -1187,49 +1189,76 @@ class PipelineWorker(QtCore.QThread):
                             },
                         }
 
-                try:
-                    render_start = time.time()
-                    _page014_timeout_checkpoint("renderer_entry", "start", page_id=page_id, render_input_path=render_input_path)
-                    render_translations(
-                        render_input_path,
-                        output_path,
-                        regions,
-                        self._settings.font_name,
-                        inpaint_mode=self._settings.inpaint_mode,
-                        use_gpu=self._settings.use_gpu,
-                        model_id=self._settings.inpaint_model_id,
-                        debug_context=debug_context if debug_artifacts_enabled else None,
-                        source_glyph_masks=source_glyph_mask_result,
-                        render_eligibility=render_eligibility_contract_result,
-                        perf_telemetry_context=debug_context if perf_telemetry_is_enabled else None,
-                    )
-                    if debug_context is not None:
-                        set_timing(debug_context, "rendering_time", time.time() - render_start)
-                        if render_input_path != source_path:
+                if getattr(self._settings, "private_cleanup_validation_stop_after_cleanup", False):
+                    try:
+                        if os.path.isfile(render_input_path):
+                            shutil.copyfile(render_input_path, output_path)
+                        if debug_context is not None:
+                            set_timing(debug_context, "rendering_time", 0.0)
+                            debug_context["private_cleanup_validation_stop_after_cleanup"] = True
+                            debug_context["render_translations_called"] = False
+                            debug_context["final_translated_text_drawn"] = False
                             debug_context["cleanup_upstream_renderer_input_path"] = render_input_path
-                    _page014_timeout_checkpoint(
-                        "renderer_entry",
-                        "end",
-                        page_id=page_id,
-                        elapsed_ms=round((time.time() - render_start) * 1000.0, 3),
-                    )
-                except Exception as exc:
-                    _page014_timeout_checkpoint(
-                        "renderer_entry",
-                        "error",
-                        page_id=page_id,
-                        error=f"{type(exc).__name__}: {exc}",
-                    )
-                    page_elapsed = time.time() - page_start
-                    self.queue_item.emit(index - 1, f"error ({_format_seconds(page_elapsed)}): {exc}")
-                    self.message.emit(f"Failed to render {name}: {exc}")
-                    continue
-                finally:
-                    if cleanup_upstream_temp_path:
-                        try:
-                            os.unlink(cleanup_upstream_temp_path)
-                        except OSError:
-                            pass
+                        _page014_timeout_checkpoint(
+                            "renderer_entry",
+                            "skipped_private_cleanup_validation",
+                            page_id=page_id,
+                            render_input_path=render_input_path,
+                        )
+                    except Exception as exc:
+                        _page014_timeout_checkpoint(
+                            "renderer_entry",
+                            "error",
+                            page_id=page_id,
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
+                        page_elapsed = time.time() - page_start
+                        self.queue_item.emit(index - 1, f"error ({_format_seconds(page_elapsed)}): {exc}")
+                        self.message.emit(f"Failed to write cleanup validation output for {name}: {exc}")
+                        continue
+                else:
+                    try:
+                        render_start = time.time()
+                        _page014_timeout_checkpoint("renderer_entry", "start", page_id=page_id, render_input_path=render_input_path)
+                        render_translations(
+                            render_input_path,
+                            output_path,
+                            regions,
+                            self._settings.font_name,
+                            inpaint_mode=self._settings.inpaint_mode,
+                            use_gpu=self._settings.use_gpu,
+                            model_id=self._settings.inpaint_model_id,
+                            debug_context=debug_context if debug_artifacts_enabled else None,
+                            source_glyph_masks=source_glyph_mask_result,
+                            render_eligibility=render_eligibility_contract_result,
+                            perf_telemetry_context=debug_context if perf_telemetry_is_enabled else None,
+                        )
+                        if debug_context is not None:
+                            set_timing(debug_context, "rendering_time", time.time() - render_start)
+                            if render_input_path != source_path:
+                                debug_context["cleanup_upstream_renderer_input_path"] = render_input_path
+                        _page014_timeout_checkpoint(
+                            "renderer_entry",
+                            "end",
+                            page_id=page_id,
+                            elapsed_ms=round((time.time() - render_start) * 1000.0, 3),
+                        )
+                    except Exception as exc:
+                        _page014_timeout_checkpoint(
+                            "renderer_entry",
+                            "error",
+                            page_id=page_id,
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
+                        page_elapsed = time.time() - page_start
+                        self.queue_item.emit(index - 1, f"error ({_format_seconds(page_elapsed)}): {exc}")
+                        self.message.emit(f"Failed to render {name}: {exc}")
+                        continue
+                if cleanup_upstream_temp_path:
+                    try:
+                        os.unlink(cleanup_upstream_temp_path)
+                    except OSError:
+                        pass
 
                 page_record = build_page_record(
                     source_path,
@@ -1816,6 +1845,13 @@ def _apply_cleanup_runtime_render_blocks(
     if not warning_records:
         return render_eligibility_result
 
+    _suppress_render_eligibility_for_cleanup_blocks(
+        render_eligibility_result,
+        warning_records,
+        reason="cleanup_runtime_required_source_erasure_not_proven",
+        contradiction="cleanup_runtime_required_source_erasure_not_proven",
+    )
+
     for record in warning_records:
         region_id = str(record.get("region_id") or "")
         warning_reason = str(record.get("phase5_cleanup_warning_reason") or "cleanup_runtime_warning_before_renderer")
@@ -1831,9 +1867,9 @@ def _apply_cleanup_runtime_render_blocks(
                     cleanup_runtime_failure_reason=record.get("failure_reason"),
                     cleanup_result_id=record.get("cleanup_result_id"),
                     cleanup_proof_id=record.get("cleanup_proof_id"),
-                    cleanup_render_permission_gate_released=True,
-                    cleanup_render_permission_gate_release_reason="cleanup_failure_is_not_text_render_permission_owner",
-                    renderer_policy_changed=False,
+                    cleanup_render_permission_gate_released=False,
+                    cleanup_render_permission_gate_release_reason="cleanup_required_source_erasure_not_proven",
+                    renderer_policy_changed=True,
                 )
             except Exception:
                 pass
@@ -1865,6 +1901,13 @@ def _apply_cleanup_upstream_commit_render_blocks(
     if not blocked_records:
         return render_eligibility_result
 
+    _suppress_render_eligibility_for_cleanup_blocks(
+        render_eligibility_result,
+        blocked_records,
+        reason="cleanup_commit_required_source_erasure_not_committed",
+        contradiction="cleanup_commit_required_source_erasure_not_committed",
+    )
+
     for record in blocked_records:
         region_id = str(record.get("region_id") or "")
         if debug_context is not None:
@@ -1879,14 +1922,119 @@ def _apply_cleanup_upstream_commit_render_blocks(
                     cleanup_upstream_commit_warning_reason="cleanup_upstream_commit_blocked_warning_before_renderer",
                     cleanup_result_id=record.get("cleanup_result_id"),
                     cleanup_proof_id=record.get("cleanup_proof_id"),
-                    cleanup_render_permission_gate_released=True,
-                    cleanup_render_permission_gate_release_reason="cleanup_commit_failure_is_not_text_render_permission_owner",
-                    renderer_policy_changed=False,
+                    cleanup_render_permission_gate_released=False,
+                    cleanup_render_permission_gate_release_reason="cleanup_commit_required_source_erasure_not_committed",
+                    renderer_policy_changed=True,
                 )
             except Exception:
                 pass
 
     return render_eligibility_result
+
+
+def _suppress_render_eligibility_for_cleanup_blocks(
+    render_eligibility_result: Any,
+    records: list[dict[str, Any]],
+    *,
+    reason: str,
+    contradiction: str,
+) -> None:
+    if render_eligibility_result is None or not records:
+        return
+    decisions_by_region = getattr(render_eligibility_result, "decisions_by_region_id", None)
+    decisions = getattr(render_eligibility_result, "decisions", None)
+    if not isinstance(decisions_by_region, dict) or not isinstance(decisions, list):
+        return
+    try:
+        from app.pipeline.render_eligibility import RenderEligibilityDecision, RenderEligibilityStatus
+    except Exception:
+        return
+
+    changed = False
+    for record in records:
+        for region_id in _cleanup_block_region_ids(record):
+            current = decisions_by_region.get(region_id)
+            if current is None:
+                continue
+            current_status = str(_render_eligibility_decision_value(current, "status") or "")
+            if current_status in {
+                "suppressed_source_ungrounded",
+                "RenderEligibilityStatus.SUPPRESSED_SOURCE_UNGROUNDED",
+            }:
+                continue
+            if not bool(_render_eligibility_decision_value(current, "translated_text_present")):
+                continue
+            existing_hard = list(_render_eligibility_decision_value(current, "hard_contradictions") or [])
+            if contradiction not in existing_hard:
+                existing_hard.append(contradiction)
+            evidence = dict(_render_eligibility_decision_value(current, "evidence") or {})
+            evidence.update(
+                {
+                    "cleanup_render_permission_gate_released": False,
+                    "cleanup_render_permission_gate_release_reason": reason,
+                    "cleanup_block_failure_reason": record.get("failure_reason"),
+                    "cleanup_result_id": record.get("cleanup_result_id"),
+                    "cleanup_proof_id": record.get("cleanup_proof_id"),
+                }
+            )
+            replacement = RenderEligibilityDecision(
+                page_id=str(_render_eligibility_decision_value(current, "page_id") or ""),
+                region_id=region_id,
+                status=RenderEligibilityStatus.SUPPRESSED_SOURCE_UNGROUNDED,
+                reason=reason,
+                translated_text_present=True,
+                source_text=str(_render_eligibility_decision_value(current, "source_text") or ""),
+                translated_text=str(_render_eligibility_decision_value(current, "translated_text") or ""),
+                ocr_confidence=_render_eligibility_decision_value(current, "ocr_confidence"),
+                risky_detection_source=str(_render_eligibility_decision_value(current, "risky_detection_source") or ""),
+                hard_contradictions=existing_hard,
+                preservation_reason=str(_render_eligibility_decision_value(current, "preservation_reason") or ""),
+                evidence=evidence,
+            )
+            decisions_by_region[region_id] = replacement
+            for index, decision in enumerate(decisions):
+                if str(_render_eligibility_decision_value(decision, "region_id") or "") == region_id:
+                    decisions[index] = replacement
+                    break
+            changed = True
+    if changed:
+        _rebuild_render_eligibility_status_lists(render_eligibility_result)
+
+
+def _cleanup_block_region_ids(record: Mapping[str, Any]) -> list[str]:
+    region_ids: list[str] = []
+    for key in ("region_id", "target_region_id"):
+        value = str(record.get(key) or "")
+        if value:
+            region_ids.append(value)
+    for key in ("target_region_ids", "region_ids", "cleanup_unit_child_region_ids"):
+        value = record.get(key)
+        if isinstance(value, (list, tuple, set)):
+            region_ids.extend(str(item) for item in value if str(item or ""))
+    return list(dict.fromkeys(region_ids))
+
+
+def _rebuild_render_eligibility_status_lists(render_eligibility_result: Any) -> None:
+    decisions = getattr(render_eligibility_result, "decisions", None)
+    if not isinstance(decisions, list):
+        return
+    suppressed = getattr(render_eligibility_result, "suppressed_records", None)
+    review_allowed = getattr(render_eligibility_result, "review_allowed_records", None)
+    eligible = getattr(render_eligibility_result, "eligible_records", None)
+    if not all(isinstance(item, list) for item in (suppressed, review_allowed, eligible)):
+        return
+    suppressed[:] = []
+    review_allowed[:] = []
+    eligible[:] = []
+    for decision in decisions:
+        audit = _render_eligibility_decision_audit(decision)
+        status = str(audit.get("status") or _render_eligibility_decision_value(decision, "status") or "")
+        if status in {"suppressed_source_ungrounded", "RenderEligibilityStatus.SUPPRESSED_SOURCE_UNGROUNDED"}:
+            suppressed.append(audit)
+        elif status == "review_allowed":
+            review_allowed.append(audit)
+        else:
+            eligible.append(audit)
 
 
 def _render_eligibility_decision_value(decision: Any, key: str) -> Any:
@@ -5141,12 +5289,13 @@ def _root_reconstruction_candidate_acceptance(
     root_type = str(getattr(root, "root_type", "") or "")
     text = _clean_ocr_text(str(recovered_text or ""))
     body = _root_reconstruction_source_body(text)
+    speech_short_source = root_type == "speech_bubble" and _is_speech_short_or_ellipsis_source(text)
     reasons: list[str] = []
-    if not body:
+    if not body and not speech_short_source:
         return False, ["empty_recovered_source"], 0.0, []
-    if _is_punctuation_or_ellipsis_only_controller(text):
+    if _is_punctuation_or_ellipsis_only_controller(text) and not speech_short_source:
         return False, ["punctuation_only_recovered_source"], 0.0, []
-    if _is_valid_japanese(text) < 0.55:
+    if _is_valid_japanese(text) < 0.55 and not speech_short_source:
         return False, ["low_japanese_source_ratio"], 0.0, []
     if root_type == "caption_background":
         if not _is_meaningful_background_caption_source(text):
@@ -5154,11 +5303,12 @@ def _root_reconstruction_candidate_acceptance(
         if ocr_conf < 0.70:
             return False, ["caption_recovered_source_low_confidence"], 0.0, []
     else:
-        status, quality_reasons, action = quality_func(text, [])
-        if action in {"source_quality_blocked", "block_auto_translation", "split_required", "unresolved_review"}:
-            return False, ["speech_recovered_source_quality_blocked"] + list(quality_reasons or []), 0.0, []
-        if len(body) < 5 and not _is_short_reaction_source(text):
-            return False, ["speech_recovered_source_too_short"], 0.0, []
+        if not speech_short_source:
+            status, quality_reasons, action = quality_func(text, [])
+            if action in {"source_quality_blocked", "block_auto_translation", "split_required", "unresolved_review"}:
+                return False, ["speech_recovered_source_quality_blocked"] + list(quality_reasons or []), 0.0, []
+            if len(body) < 5 and not _is_short_reaction_source(text):
+                return False, ["speech_recovered_source_too_short"], 0.0, []
 
     child_status = _root_reconstruction_child_fragment_status(recovered_text, children)
     missing_meaningful = [
@@ -5175,6 +5325,9 @@ def _root_reconstruction_candidate_acceptance(
         score += 20.0
     if missing_meaningful and ocr_conf < 0.95:
         return False, ["recovered_source_missing_meaningful_child_fragment"], score, child_status
+    if speech_short_source and ocr_conf >= 0.50 and not missing_meaningful:
+        reasons.append("speech_short_source_root_reocr")
+        return True, reasons, score, child_status
     if ocr_conf >= 0.90:
         reasons.append("high_confidence_root_reocr")
         return True, reasons, score, child_status
@@ -5848,12 +6001,13 @@ def _logical_block_recovered_source_is_better(
     before = _clean_ocr_text(str(before_text or ""))
     recovered = _clean_ocr_text(str(recovered_text or ""))
     recovered_body = _source_body_for_ownership(recovered)
-    if len(recovered_body) < 4:
+    speech_short_source = _is_speech_short_or_ellipsis_source(recovered)
+    if len(recovered_body) < 4 and not speech_short_source:
         return False, "recovered_source_too_short"
-    if _is_valid_japanese(recovered) < 0.55:
+    if _is_valid_japanese(recovered) < 0.55 and not speech_short_source:
         return False, "recovered_source_low_japanese_ratio"
     status, reasons, action = quality_func(recovered, [_region_for_block_member(rid, region_by_id) for rid in getattr(block, "member_region_ids", []) or []])
-    if action in {"source_quality_blocked", "split_required", "unresolved_review", "block_auto_translation"}:
+    if action in {"source_quality_blocked", "split_required", "unresolved_review", "block_auto_translation"} and not speech_short_source:
         return False, "recovered_source_quality_blocked"
     original_blocking_action = str(getattr(block, "source_quality_action", "") or "") in {"source_quality_blocked", "block_auto_translation"}
     if original_blocking_action and float(recovered_conf or 0.0) < 0.72:
@@ -11855,6 +12009,22 @@ def _is_short_reaction_source(text: str) -> bool:
     if len(body) <= 2 and all(_is_kana(ch) for ch in body):
         return True
     return False
+
+
+def _is_speech_short_or_ellipsis_source(text: str) -> bool:
+    cleaned = _clean_ocr_text(text)
+    if not cleaned:
+        return False
+    if _is_short_reaction_source(cleaned):
+        return True
+    body = _non_punct_chars(cleaned)
+    if not body or len(body) > 10:
+        return False
+    if not any(_is_kana(ch) or _is_cjk_char(ch) for ch in body):
+        return False
+    if any(token in cleaned for token in ("果長", "救出来", "悪かだけ", "無、こも", "それまで女", "返を")):
+        return False
+    return any(ch in cleaned for ch in ".．…‥・･〜～ー-—―－")
 
 
 def _suppress_duplicate_caption_background_regions(

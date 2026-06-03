@@ -546,6 +546,8 @@ def _build_physical_bubble_groups(
         reason_codes = ["physical_bubble_owner:speech_text_area_container"]
         if len(component) > 1:
             reason_codes.append("physical_bubble_owner:close_or_overlapping_speech_containers")
+            if any(bool(summaries.get(cid, {}).get("speech_context_only")) for cid in component):
+                reason_codes.append("physical_bubble_owner:ogkalu_bubble_context_for_text_bubble")
         else:
             reason_codes.append("physical_bubble_owner:single_speech_container")
         source_model_ids = sorted(
@@ -590,21 +592,67 @@ def _plan_speech_container_summaries(
         container_id = str(container.get("container_id") or "").strip()
         if not container_id:
             continue
-        if str(container.get("container_type") or "").strip() != "speech_bubble":
-            continue
-        if str(container.get("route_intent") or "").strip() != "translate_speech":
+        container_type = str(container.get("container_type") or "").strip()
+        route_intent = str(container.get("route_intent") or "").strip()
+        is_speech_authority = (
+            container_type == "speech_bubble"
+            and route_intent == "translate_speech"
+        )
+        is_speech_context = _is_ogkalu_bubble_speech_context(container)
+        if not is_speech_authority and not is_speech_context:
             continue
         conflicts = [flag for flag in (container.get("conflict_flags") or []) if str(flag).strip()]
         if conflicts:
             continue
         tier = str(container.get("confidence_tier") or "").strip()
+        role_evidence = container.get("semantic_role_evidence") if isinstance(container.get("semantic_role_evidence"), dict) else {}
         summaries[container_id] = {
             "bbox": _clip_bbox(_bbox(container.get("bbox")), image_size),
             "tiers": {tier} if tier else set(),
             "conflicts": conflicts,
             "source_model_ids": [str(v) for v in (container.get("source_model_ids") or []) if str(v).strip()],
+            "neighboring_speech_context_ids": [
+                str(v)
+                for v in (role_evidence.get("neighboring_speech_context_ids") or [])
+                if str(v).strip()
+            ],
+            "speech_authority": bool(is_speech_authority),
+            "speech_context_only": bool(is_speech_context and not is_speech_authority),
         }
     return summaries
+
+
+def _is_ogkalu_bubble_speech_context(container: dict[str, Any]) -> bool:
+    """Return true for bubble-context boxes that can enlarge a speech root crop.
+
+    This is physical context only. It does not grant translation or cleanup
+    authority; an adjacent speech-authorized text_bubble still has to provide
+    semantic ownership.
+    """
+    if str(container.get("route_intent") or "").strip() != "review_or_fallback":
+        return False
+    if str(container.get("cleanup_authorization") or "").strip() != "review_unknown_not_cleanup":
+        return False
+    role_evidence = container.get("semantic_role_evidence")
+    if not isinstance(role_evidence, dict):
+        return False
+    classes = {str(v) for v in (role_evidence.get("ogkalu_class_names") or []) if str(v)}
+    if "bubble" not in classes:
+        return False
+    candidate_states = {str(v) for v in (role_evidence.get("cleanup_candidate_states") or []) if str(v)}
+    if "cleanup_translate_speech" not in candidate_states:
+        return False
+    source_ids = [str(v) for v in (container.get("source_model_ids") or []) if str(v).strip()]
+    neighbor_ids = [str(v) for v in (role_evidence.get("neighboring_speech_context_ids") or []) if str(v).strip()]
+    if not source_ids or not neighbor_ids:
+        return False
+    try:
+        confidence = float(role_evidence.get("model_confidence") or container.get("confidence") or 0.0)
+    except Exception:
+        confidence = 0.0
+    if confidence < 0.90:
+        return False
+    return True
 
 
 def _text_area_plan_to_dict(text_area_plan: Any | None) -> dict[str, Any]:
@@ -640,6 +688,9 @@ def _containers_share_physical_bubble(
 ) -> tuple[bool, str]:
     if left.get("conflicts") or right.get("conflicts"):
         return False, ""
+    context_related, context_reason = _speech_context_links_authorized_container(left, right)
+    if context_related:
+        return True, context_reason
     left_tiers = set(left.get("tiers") or [])
     right_tiers = set(right.get("tiers") or [])
     if not (left_tiers & _STRONG_PHYSICAL_TIERS) or not (right_tiers & _STRONG_PHYSICAL_TIERS):
@@ -663,6 +714,39 @@ def _containers_share_physical_bubble(
         and _vertical_gap(left_box, right_box) <= 28
     ):
         return True, "physical_bubble_close_vertical_split"
+    return False, ""
+
+
+def _speech_context_links_authorized_container(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> tuple[bool, str]:
+    pairs = ((left, right), (right, left))
+    for authority, context in pairs:
+        if not bool(authority.get("speech_authority")):
+            continue
+        if not bool(context.get("speech_context_only")):
+            continue
+        authority_ids = {str(v) for v in (authority.get("source_model_ids") or []) if str(v)}
+        context_ids = {str(v) for v in (context.get("source_model_ids") or []) if str(v)}
+        authority_neighbors = {str(v) for v in (authority.get("neighboring_speech_context_ids") or []) if str(v)}
+        context_neighbors = {str(v) for v in (context.get("neighboring_speech_context_ids") or []) if str(v)}
+        if not ((authority_ids & context_neighbors) or (context_ids & authority_neighbors)):
+            continue
+        authority_box = _bbox(authority.get("bbox"))
+        context_box = _bbox(context.get("bbox"))
+        if _overlap_ratio(authority_box, context_box) >= 0.20:
+            return True, "physical_bubble_ogkalu_bubble_context_for_text_bubble"
+        if (
+            _vertical_overlap_fraction(authority_box, context_box) >= 0.45
+            and _horizontal_gap(authority_box, context_box) <= 32
+        ):
+            return True, "physical_bubble_ogkalu_bubble_context_for_text_bubble"
+        if (
+            _horizontal_overlap_fraction(authority_box, context_box) >= 0.45
+            and _vertical_gap(authority_box, context_box) <= 28
+        ):
+            return True, "physical_bubble_ogkalu_bubble_context_for_text_bubble"
     return False, ""
 
 
@@ -1213,7 +1297,15 @@ def _source_quality_assessment(
     cleaned = _clean_source_text(source_text)
     compact = _source_body(cleaned)
     reasons: list[str] = []
+    speech_members = any(
+        str(region.get("type") or region.get("semantic_class") or "").strip() == "speech_bubble"
+        or str((region.get("render") or {}).get("text_area_route_intent") or region.get("text_area_route_intent") or "").strip() == "translate_speech"
+        for region in members
+        if isinstance(region, dict)
+    )
     if not compact:
+        if speech_members and _is_ellipsis_like_source(cleaned):
+            return "fragmented", ["punctuation_only_speech_source"], "translate"
         return "empty", ["empty_logical_text_source"], "unresolved_review"
     known_bad_patterns = (
         "それまで女救出",
@@ -1244,6 +1336,8 @@ def _source_quality_assessment(
     elif len(compact) <= 4 and compact.endswith(("で", "と", "を", "に", "の", "は", "が")):
         reasons.append("incomplete_trailing_grammar")
     if reasons:
+        if speech_members and _speech_source_quality_reasons_allow_translation(cleaned, reasons):
+            return "fragmented", sorted(set(reasons + ["speech_short_source_requires_root_proof"])), "translate"
         return "contaminated", sorted(set(reasons)), "source_quality_blocked"
 
     fragments = [
@@ -1268,9 +1362,64 @@ def _source_quality_assessment(
             reasons.append("suspect_ocr_substitution_surface")
         if any(_source_body(fragment) in orphan_particles for fragment in fragments):
             reasons.append("orphan_particle_fragment")
+        if speech_members and _speech_source_quality_reasons_allow_translation(cleaned, reasons):
+            reasons.append("speech_short_source_requires_root_proof")
         return "fragmented", sorted(set(reasons)), "translate"
 
     return "clean", [], "translate"
+
+
+def _is_ellipsis_like_source(text: str) -> bool:
+    stripped = "".join(ch for ch in str(text or "") if ch.strip())
+    if not stripped:
+        return False
+    ellipsis_chars = ".．…‥・･"
+    allowed_chars = ellipsis_chars + "—―－-ー〜～?？!！"
+    return any(ch in ellipsis_chars for ch in stripped) and all(ch in allowed_chars for ch in stripped)
+
+
+def _is_kana_char(ch: str) -> bool:
+    return "\u3040" <= ch <= "\u30ff"
+
+
+def _valid_short_speech_utterance(text: str) -> bool:
+    cleaned = _clean_source_text(text)
+    body = _source_body(cleaned)
+    if _is_ellipsis_like_source(cleaned):
+        return True
+    if not body or len(body) > 10:
+        return False
+    if not any(_is_kana_char(ch) or "\u3400" <= ch <= "\u9fff" for ch in body):
+        return False
+    if any(token in cleaned for token in ("果長", "救出来", "悪かだけ", "無、こも", "それまで女", "返を")):
+        return False
+    if len(body) <= 2 and all(_is_kana_char(ch) for ch in body):
+        return True
+    return any(ch in cleaned for ch in ".．…‥・･〜～ー-—―－")
+
+
+def _speech_source_quality_reasons_allow_translation(text: str, reasons: list[str]) -> bool:
+    reason_set = set(reasons or [])
+    blocking = {
+        "known_malformed_ocr_anchor_pattern",
+        "malformed_ocr_anchor_surface",
+        "unbalanced_quote_in_logical_source",
+        "suspect_ocr_substitution_surface",
+    }
+    if reason_set & blocking:
+        return False
+    allowed = {
+        "incomplete_trailing_grammar",
+        "fragmented_physical_bubble_source",
+        "many_short_ocr_fragments",
+        "orphan_particle_fragment",
+    }
+    if not reason_set <= allowed:
+        return False
+    fragments = [_clean_source_text(part) for part in re.split(r"[、，,]+", text) if _source_body(part)]
+    orphan_particles = {"と", "で", "に", "を", "が", "は", "の", "も", "し"}
+    useful = [fragment for fragment in fragments if _source_body(fragment) not in orphan_particles]
+    return any(_valid_short_speech_utterance(fragment) for fragment in useful) or _valid_short_speech_utterance(text)
 
 
 def _choose_anchor(meaningful: list[dict[str, Any]]) -> dict[str, Any]:

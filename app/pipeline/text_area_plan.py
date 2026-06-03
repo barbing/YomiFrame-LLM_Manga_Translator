@@ -635,6 +635,9 @@ def build_text_area_component_authorization_map(
         cleanup_jobs=cleanup_jobs or [],
         mask_shape=binary.shape,
     )
+    cleanup_job_areas: List[Dict[str, Any]] = []
+    for job in cleanup_jobs or []:
+        cleanup_job_areas.extend(_component_auth_cleanup_job_area_records(job, binary.shape))
 
     components: List[TextAreaComponentAuthorizationRecord] = []
     for label in range(1, int(len(stats))):
@@ -642,12 +645,13 @@ def build_text_area_component_authorization_map(
         if pixel_count <= 0:
             continue
         component_mask = labels == label
-        candidates = _component_auth_candidates(component_mask, pixel_count, centroids[label], scopes)
+        bbox = [x, y, x + w, y + h]
+        candidates = _component_auth_candidates(component_mask, pixel_count, centroids[label], scopes, bbox)
         record = _component_auth_record(
             page_id=str(page_id),
             component_index=len(components),
             label=label,
-            bbox=[x, y, x + w, y + h],
+            bbox=bbox,
             pixel_count=pixel_count,
             centroid=centroids[label],
             candidates=candidates,
@@ -663,6 +667,7 @@ def build_text_area_component_authorization_map(
     _component_auth_apply_unowned_display_neighbor_conflicts(components)
     _component_auth_apply_protected_sfx_grouping(components)
     _component_auth_apply_review_only_caption_guard(components)
+    _component_auth_apply_cleanup_obligation_area_bindings(components, cleanup_job_areas)
     _component_auth_apply_terminal_authority_guards(components)
     _component_auth_assign_groups(str(page_id), components)
     state_counts: Dict[str, int] = {}
@@ -797,15 +802,43 @@ def _component_auth_scopes(
 ) -> List[Dict[str, Any]]:
     region_jobs: Dict[str, List[str]] = {}
     container_jobs: Dict[str, List[str]] = {}
+    source_evidence_jobs: Dict[str, List[Dict[str, Any]]] = {}
+    cleanup_job_areas: List[Dict[str, Any]] = []
     for job in cleanup_jobs or []:
         job_id = str(getattr(job, "cleanup_job_id", "") or "")
         if not job_id:
             continue
+        cleanup_job_areas.extend(_component_auth_cleanup_job_area_records(job, mask_shape))
         for region_id in getattr(job, "target_region_ids", []) or []:
             region_jobs.setdefault(str(region_id), []).append(job_id)
         container_id = str(getattr(job, "text_area_container_id", "") or "")
         if container_id:
             container_jobs.setdefault(container_id, []).append(job_id)
+        for evidence in _component_auth_cleanup_job_source_evidence(job):
+            evidence_container_id = str(
+                _component_auth_mapping_get(
+                    evidence,
+                    "text_area_container_id",
+                    "container_id",
+                    "source_glyph_mask_text_area_container_id",
+                )
+                or ""
+            )
+            if not evidence_container_id:
+                continue
+            evidence_bbox = _component_auth_source_evidence_bbox(evidence, mask_shape)
+            if not evidence_bbox:
+                continue
+            source_evidence_jobs.setdefault(evidence_container_id, []).append(
+                {
+                    "cleanup_job_id": job_id,
+                    "bbox": evidence_bbox,
+                    "region_id": str(_component_auth_mapping_get(evidence, "region_id", "target_region_id") or ""),
+                    "source_glyph_mask_id": str(
+                        _component_auth_mapping_get(evidence, "source_glyph_mask_id", "mask_id", "id") or ""
+                    ),
+                }
+            )
 
     scopes: List[Dict[str, Any]] = []
     semantic_unit_records = list(plan.get("semantic_units") or [])
@@ -819,6 +852,8 @@ def _component_auth_scopes(
                 mask_shape=mask_shape,
                 region_jobs=region_jobs,
                 container_jobs=container_jobs,
+                source_evidence_jobs=source_evidence_jobs,
+                cleanup_job_areas=cleanup_job_areas,
             )
             if scope:
                 scopes.append(scope)
@@ -834,6 +869,8 @@ def _component_auth_scopes(
                 mask_shape=mask_shape,
                 region_jobs=region_jobs,
                 container_jobs=container_jobs,
+                source_evidence_jobs=source_evidence_jobs,
+                cleanup_job_areas=cleanup_job_areas,
             )
             if scope:
                 scopes.append(scope)
@@ -847,6 +884,8 @@ def _component_auth_scopes(
                 mask_shape=mask_shape,
                 region_jobs=region_jobs,
                 container_jobs=container_jobs,
+                source_evidence_jobs=source_evidence_jobs,
+                cleanup_job_areas=cleanup_job_areas,
             )
             if scope:
                 scopes.append(scope)
@@ -860,6 +899,8 @@ def _component_auth_scopes(
                 mask_shape=mask_shape,
                 region_jobs=region_jobs,
                 container_jobs=container_jobs,
+                source_evidence_jobs=source_evidence_jobs,
+                cleanup_job_areas=cleanup_job_areas,
             )
             if scope:
                 scopes.append(scope)
@@ -875,6 +916,8 @@ def _component_auth_scope(
     mask_shape: tuple[int, int],
     region_jobs: Mapping[str, Sequence[str]],
     container_jobs: Mapping[str, Sequence[str]],
+    source_evidence_jobs: Mapping[str, Sequence[Mapping[str, Any]]],
+    cleanup_job_areas: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Any] | None:
     bbox_value = source.get("bbox") or source.get("xyxy") or source.get("bounds")
     bbox = (
@@ -922,12 +965,39 @@ def _component_auth_scope(
         for job_id in container_jobs.get(container_id, []) if container_id else []:
             if job_id not in job_ids:
                 job_ids.append(str(job_id))
+    evidence_job_ids = _component_auth_source_evidence_job_ids(
+        container_id=container_id,
+        bbox=bbox,
+        source_evidence_jobs=source_evidence_jobs,
+    )
+    if evidence_job_ids:
+        if not job_ids or (len(job_ids) != 1 and len(evidence_job_ids) == 1):
+            job_ids = list(evidence_job_ids)
+        else:
+            for job_id in evidence_job_ids:
+                if job_id not in job_ids:
+                    job_ids.append(str(job_id))
+    cleanup_area_job_ids = _component_auth_cleanup_area_job_ids(
+        authorization_state=auth,
+        route_intent=str(source.get("route_intent") or source.get("text_area_route_intent") or source.get("intent") or ""),
+        semantic_kind=str(source.get("semantic_kind") or source.get("container_type") or source.get("text_area_container_type") or ""),
+        bbox=bbox,
+        cleanup_job_areas=cleanup_job_areas,
+    )
+    cleanup_area_binding_used = False
+    if cleanup_area_job_ids and not job_ids:
+        job_ids = list(cleanup_area_job_ids)
+        cleanup_area_binding_used = True
     reason_codes = _component_auth_list(
         source.get("reason_codes")
         or source.get("evidence_reason_codes")
         or source.get("text_area_reason_codes")
         or []
     )
+    if evidence_job_ids and "cleanup_job_binding_from_source_glyph_evidence" not in reason_codes:
+        reason_codes.append("cleanup_job_binding_from_source_glyph_evidence")
+    if cleanup_area_binding_used and "cleanup_job_binding_from_cleanup_obligation_area" not in reason_codes:
+        reason_codes.append("cleanup_job_binding_from_cleanup_obligation_area")
     if protection_reason and protection_reason not in reason_codes:
         reason_codes.append(protection_reason)
     conflict_flags = _component_auth_list(source.get("conflict_flags") or source.get("text_area_conflict_flags") or [])
@@ -990,6 +1060,8 @@ def _component_auth_scope(
             or []
         ),
         "cleanup_job_ids": job_ids,
+        "source_evidence_job_records": list(source_evidence_jobs.get(container_id, []) or []),
+        "cleanup_job_area_records": list(cleanup_job_areas or []),
         "explicit_cleanup_authority": explicit_cleanup_authority,
         "explicit_protected_authority": explicit_protected_authority,
         "explicit_authority_source": explicit_authority_source,
@@ -1006,6 +1078,312 @@ def _component_auth_scope(
         "semantic_evidence_ids": semantic_evidence_ids,
         "semantic_evidence_trace": normalized_trace,
     }
+
+
+def _component_auth_cleanup_job_source_evidence(job: Any) -> List[Mapping[str, Any]]:
+    raw = getattr(job, "source_glyph_evidence", None)
+    if raw is None and isinstance(job, Mapping):
+        raw = job.get("source_glyph_evidence")
+    output: List[Mapping[str, Any]] = []
+    if isinstance(raw, Mapping):
+        raw = [raw]
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)):
+        for item in raw:
+            if isinstance(item, Mapping):
+                output.append(item)
+    if len(output) <= 1:
+        return output
+    anchor_region_id = str(
+        getattr(job, "cleanup_unit_anchor_region_id", "")
+        or (job.get("cleanup_unit_anchor_region_id") if isinstance(job, Mapping) else "")
+        or ""
+    )
+    target_region_ids = [
+        str(item)
+        for item in (
+            getattr(job, "target_region_ids", None)
+            if not isinstance(job, Mapping)
+            else job.get("target_region_ids")
+        )
+        or []
+        if str(item)
+    ]
+    if not anchor_region_id and len(target_region_ids) == 1:
+        anchor_region_id = target_region_ids[0]
+    if anchor_region_id:
+        anchored: List[Mapping[str, Any]] = [
+            item
+            for item in output
+            if anchor_region_id in _component_auth_region_ids_from_evidence(item)
+        ]
+        if anchored:
+            return anchored
+    expected_bbox = _component_auth_first_job_bbox(
+        job,
+        (
+            "source_glyph_erasure_expected_area_bbox",
+            "source_glyph_erasure_bbox",
+            "allowed_cleanup_area",
+        ),
+    )
+    if expected_bbox:
+        expected_box = _component_auth_box_tuple(expected_bbox)
+        if expected_box:
+            spatial_matches: List[Mapping[str, Any]] = []
+            best_score = 0.0
+            for item in output:
+                item_box = _component_auth_box_tuple(
+                    item.get("source_glyph_erasure_expected_area_bbox")
+                    or item.get("source_glyph_erasure_bbox")
+                    or item.get("bbox")
+                    or []
+                )
+                if not item_box:
+                    continue
+                intersection = _intersection_area(expected_box, item_box)
+                if intersection <= 0:
+                    continue
+                score = intersection / max(1.0, min(_area(expected_box), _area(item_box)))
+                if score > best_score:
+                    best_score = score
+                    spatial_matches = [item]
+                elif score > 0 and score >= best_score * 0.90:
+                    spatial_matches.append(item)
+            if spatial_matches and best_score >= 0.90:
+                return spatial_matches
+    return output
+
+
+def _component_auth_cleanup_job_area_records(job: Any, mask_shape: tuple[int, int]) -> List[Dict[str, Any]]:
+    job_id = str(getattr(job, "cleanup_job_id", "") or "")
+    if not job_id:
+        return []
+    if bool(getattr(job, "protected", False)):
+        return []
+    if getattr(job, "source_text_present", True) is False or getattr(job, "translated_text_present", True) is False:
+        return []
+    area_bbox: List[int] | None = None
+    for attr in (
+        "source_glyph_erasure_expected_area_bbox",
+        "source_glyph_erasure_bbox",
+        "allowed_cleanup_area",
+    ):
+        bbox = _component_auth_valid_or_xywh_bbox(getattr(job, attr, None), mask_shape)
+        if bbox:
+            area_bbox = bbox
+            break
+    cleanup_class = getattr(job, "cleanup_class", "")
+    cleanup_class_value = str(getattr(cleanup_class, "value", cleanup_class) or "")
+    return [
+        {
+            "cleanup_job_id": job_id,
+            "bbox": area_bbox,
+            "route_intent": str(getattr(job, "route_intent", "") or ""),
+            "cleanup_class": cleanup_class_value,
+            "semantic_class": str(getattr(job, "semantic_class", "") or ""),
+            "text_block_root_id": str(getattr(job, "text_block_root_id", "") or ""),
+            "cleanup_unit_id": str(getattr(job, "cleanup_unit_id", "") or ""),
+            "text_area_container_id": str(getattr(job, "text_area_container_id", "") or ""),
+        }
+    ]
+
+
+def _component_auth_first_job_bbox(job: Any, attrs: Sequence[str]) -> List[int] | None:
+    for attr in attrs:
+        value = getattr(job, attr, None) if not isinstance(job, Mapping) else job.get(attr)
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and len(value) >= 4:
+            try:
+                bbox = [int(round(float(item))) for item in value[:4]]
+            except Exception:
+                continue
+            if bbox[2] > bbox[0] and bbox[3] > bbox[1]:
+                return bbox
+    return None
+
+
+def _component_auth_region_ids_from_evidence(evidence: Mapping[str, Any]) -> List[str]:
+    ids: set[str] = set()
+    for key in ("region_id", "target_region_id"):
+        value = evidence.get(key)
+        if value is not None and str(value):
+            ids.add(str(value))
+    for key in ("text_instance_ids", "target_region_ids", "represented_region_ids"):
+        value = evidence.get(key)
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            for item in value:
+                if item is not None and str(item):
+                    ids.add(str(item))
+        elif value is not None and str(value):
+            ids.add(str(value))
+    compatibility = evidence.get("compatibility_source_fields")
+    if isinstance(compatibility, Mapping):
+        ids.update(_component_auth_region_ids_from_evidence(compatibility))
+    return sorted(ids)
+
+
+def _component_auth_cleanup_area_job_ids(
+    *,
+    authorization_state: str,
+    route_intent: str,
+    semantic_kind: str,
+    bbox: Sequence[int],
+    cleanup_job_areas: Sequence[Mapping[str, Any]],
+) -> List[str]:
+    if _component_auth_family(authorization_state) != "cleanup":
+        return []
+    scope_box = _component_auth_box_tuple(bbox)
+    if not scope_box:
+        return []
+    scope_area = max(1.0, _area(scope_box))
+    job_scores: Dict[str, Tuple[float, float]] = {}
+    for record in cleanup_job_areas or []:
+        job_id = str(record.get("cleanup_job_id") or "")
+        job_box = _component_auth_box_tuple(record.get("bbox") or [])
+        if not job_id or not job_box:
+            continue
+        if not _component_auth_cleanup_job_route_compatible(
+            authorization_state=authorization_state,
+            route_intent=route_intent,
+            semantic_kind=semantic_kind,
+            job_record=record,
+        ):
+            continue
+        intersection = _intersection_area(scope_box, job_box)
+        if intersection <= 0:
+            continue
+        containment = intersection / scope_area
+        if containment < 0.60:
+            continue
+        job_area = _area(job_box)
+        current = job_scores.get(job_id)
+        if current is None or containment > current[0] or (
+            abs(containment - current[0]) < 1e-6 and job_area < current[1]
+        ):
+            job_scores[job_id] = (float(containment), float(job_area))
+    if not job_scores:
+        return []
+    best_score = max(score for score, _area_value in job_scores.values())
+    top = {
+        job_id: (score, area_value)
+        for job_id, (score, area_value) in job_scores.items()
+        if score >= 0.60 and score >= best_score * 0.90
+    }
+    if not top:
+        return []
+    smallest_area = min(area_value for _score, area_value in top.values())
+    return [
+        job_id
+        for job_id, (_score, area_value) in sorted(top.items())
+        if area_value <= smallest_area * 1.05
+    ]
+
+
+def _component_auth_cleanup_job_route_compatible(
+    *,
+    authorization_state: str,
+    route_intent: str,
+    semantic_kind: str,
+    job_record: Mapping[str, Any],
+) -> bool:
+    del route_intent, semantic_kind
+    text = " ".join(
+        str(value or "").lower()
+        for value in (
+            job_record.get("route_intent"),
+            job_record.get("cleanup_class"),
+            job_record.get("semantic_class"),
+        )
+    )
+    if authorization_state == AUTH_CLEANUP_TRANSLATE_SPEECH:
+        return "speech" in text or "bubble" in text
+    if authorization_state in {AUTH_CLEANUP_TRANSLATE_BACKGROUND, AUTH_CLEANUP_TRANSLATE_CAPTION}:
+        return any(token in text for token in ("caption", "background", "title", "sign", "side"))
+    return False
+
+
+def _component_auth_mapping_get(source: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in source and source[key] not in (None, ""):
+            return source[key]
+    return None
+
+
+def _component_auth_source_evidence_bbox(
+    evidence: Mapping[str, Any],
+    mask_shape: tuple[int, int],
+) -> List[int] | None:
+    for key in (
+        "bbox",
+        "source_glyph_erasure_bbox",
+        "mask_bbox",
+        "source_glyph_mask_actual_bbox",
+        "source_glyph_mask_expected_bbox",
+    ):
+        bbox = _component_auth_valid_or_xywh_bbox(evidence.get(key), mask_shape)
+        if bbox:
+            return bbox
+    return None
+
+
+def _component_auth_source_evidence_job_ids(
+    *,
+    container_id: str,
+    bbox: Sequence[int],
+    source_evidence_jobs: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> List[str]:
+    if not container_id or not bbox:
+        return []
+    scope_box = _component_auth_box_tuple(bbox)
+    if not scope_box:
+        return []
+    job_scores: Dict[str, Tuple[float, float]] = {}
+    for record in source_evidence_jobs.get(container_id, []) or []:
+        job_id = str(record.get("cleanup_job_id") or "")
+        evidence_box = _component_auth_box_tuple(record.get("bbox") or [])
+        if not job_id or not evidence_box:
+            continue
+        intersection = _intersection_area(scope_box, evidence_box)
+        if intersection <= 0:
+            continue
+        score = intersection / max(1.0, min(_area(scope_box), _area(evidence_box)))
+        if score <= 0:
+            continue
+        evidence_area = _area(evidence_box)
+        current = job_scores.get(job_id)
+        if current is None or score > current[0] or (
+            abs(score - current[0]) < 1e-6 and evidence_area < current[1]
+        ):
+            job_scores[job_id] = (float(score), float(evidence_area))
+    if not job_scores:
+        return []
+    best_score = max(score for score, _area_value in job_scores.values())
+    if best_score < 0.20:
+        return []
+    top = {
+        job_id: (score, area_value)
+        for job_id, (score, area_value) in job_scores.items()
+        if score >= 0.20 and score >= best_score * 0.90
+    }
+    if not top:
+        return []
+    smallest_area = min(area_value for _score, area_value in top.values())
+    return [
+        job_id
+        for job_id, (_score, area_value) in sorted(top.items())
+        if area_value <= smallest_area * 1.05
+    ]
+
+
+def _component_auth_box_tuple(value: Any) -> Tuple[float, float, float, float] | None:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or len(value) < 4:
+        return None
+    try:
+        x0, y0, x1, y1 = [float(item) for item in value[:4]]
+    except Exception:
+        return None
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return (x0, y0, x1, y1)
 
 
 def _component_auth_polygon_mask(polygon: Any, mask_shape: tuple[int, int]) -> Any:
@@ -1058,6 +1436,7 @@ def _component_auth_candidates(
     pixel_count: int,
     centroid: Sequence[float],
     scopes: Sequence[Mapping[str, Any]],
+    component_bbox: Sequence[int],
 ) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
     cx = float(centroid[0])
@@ -1090,9 +1469,21 @@ def _component_auth_candidates(
             pixel_count=pixel_count,
             overlap_ratio=ratio,
         )
+        refined_scope = dict(scope)
+        refined_job_ids, refinement_reasons = _component_auth_refined_component_job_ids(
+            scope=scope,
+            component_bbox=component_bbox,
+        )
+        if refined_job_ids != list(scope.get("cleanup_job_ids") or []):
+            refined_scope["cleanup_job_ids"] = refined_job_ids
+            reason_codes = _component_auth_list(refined_scope.get("reason_codes") or [])
+            for reason in refinement_reasons:
+                if reason not in reason_codes:
+                    reason_codes.append(reason)
+            refined_scope["reason_codes"] = reason_codes
         candidates.append(
             {
-                **dict(scope),
+                **refined_scope,
                 "overlap_pixels": overlap,
                 "overlap_ratio": ratio,
                 "centroid_inside": centroid_inside,
@@ -1109,6 +1500,57 @@ def _component_auth_candidates(
         reverse=True,
     )
     return candidates
+
+
+def _component_auth_refined_component_job_ids(
+    *,
+    scope: Mapping[str, Any],
+    component_bbox: Sequence[int],
+) -> Tuple[List[str], List[str]]:
+    existing = [str(job_id) for job_id in scope.get("cleanup_job_ids") or [] if str(job_id)]
+    if len(existing) <= 1:
+        return existing, []
+    container_id = str(scope.get("container_id") or "")
+    reasons: List[str] = []
+    refined = list(existing)
+    evidence_records = scope.get("source_evidence_job_records") or []
+    if evidence_records:
+        evidence_ids = _component_auth_source_evidence_job_ids(
+            container_id=container_id,
+            bbox=component_bbox,
+            source_evidence_jobs={container_id: evidence_records},
+        )
+        refined_by_evidence = _component_auth_refine_existing_job_ids(refined, evidence_ids)
+        if refined_by_evidence != refined:
+            refined = refined_by_evidence
+            reasons.append("cleanup_job_binding_refined_by_component_source_glyph_evidence")
+    if len(refined) > 1:
+        area_records = scope.get("cleanup_job_area_records") or []
+        if area_records:
+            area_ids = _component_auth_cleanup_area_job_ids(
+                authorization_state=str(scope.get("authorization_state") or ""),
+                route_intent=str(scope.get("route_intent") or ""),
+                semantic_kind=str(scope.get("semantic_kind") or ""),
+                bbox=component_bbox,
+                cleanup_job_areas=area_records,
+            )
+            refined_by_area = _component_auth_refine_existing_job_ids(refined, area_ids)
+            if refined_by_area != refined:
+                refined = refined_by_area
+                reasons.append("cleanup_job_binding_from_cleanup_obligation_area")
+                reasons.append("cleanup_job_binding_refined_by_component_cleanup_obligation_area")
+    return refined, reasons
+
+
+def _component_auth_refine_existing_job_ids(existing: Sequence[str], preferred: Sequence[str]) -> List[str]:
+    current = [str(job_id) for job_id in existing or [] if str(job_id)]
+    selected = [str(job_id) for job_id in preferred or [] if str(job_id)]
+    if not current or not selected:
+        return current
+    intersection = [job_id for job_id in current if job_id in set(selected)]
+    if intersection:
+        return intersection
+    return current
 
 
 def _component_auth_projection_candidate_eligible(
@@ -2538,6 +2980,54 @@ def _component_auth_set_state(
         record.ambiguity_reasons.append(reason)
 
 
+def _component_auth_apply_cleanup_obligation_area_bindings(
+    records: Sequence[TextAreaComponentAuthorizationRecord],
+    cleanup_job_areas: Sequence[Mapping[str, Any]],
+) -> None:
+    if not cleanup_job_areas:
+        return
+    for record in records:
+        if _component_auth_family(record.authorization_state) != "cleanup":
+            continue
+        if record.job_binding_state == "bound_unique" and record.owner_cleanup_job_id:
+            continue
+        job_ids = _component_auth_cleanup_area_job_ids(
+            authorization_state=record.authorization_state,
+            route_intent=record.route_intent,
+            semantic_kind=record.semantic_kind or " ".join(record.semantic_kinds or []),
+            bbox=record.component_bbox,
+            cleanup_job_areas=cleanup_job_areas,
+        )
+        if not job_ids:
+            continue
+        existing_job_ids = _component_auth_record_cleanup_job_ids(record)
+        selected_job_ids = list(job_ids)
+        if existing_job_ids:
+            selected_job_ids = [job_id for job_id in job_ids if job_id in existing_job_ids]
+            if len(selected_job_ids) != 1:
+                continue
+        record.scope_cleanup_job_ids = list(selected_job_ids)
+        record.candidate_cleanup_job_ids = list(selected_job_ids)
+        if len(selected_job_ids) == 1:
+            record.owner_cleanup_job_id = selected_job_ids[0]
+        if "cleanup_job_binding_from_cleanup_obligation_area" not in record.reason_codes:
+            record.reason_codes.append("cleanup_job_binding_from_cleanup_obligation_area")
+
+
+def _component_auth_record_cleanup_job_ids(record: TextAreaComponentAuthorizationRecord) -> List[str]:
+    output: List[str] = []
+    for value in (
+        [record.owner_cleanup_job_id] if record.owner_cleanup_job_id else [],
+        record.scope_cleanup_job_ids or [],
+        record.candidate_cleanup_job_ids or [],
+    ):
+        for item in value:
+            text = str(item or "")
+            if text and text not in output:
+                output.append(text)
+    return output
+
+
 def _component_auth_apply_terminal_authority_guards(records: Sequence[TextAreaComponentAuthorizationRecord]) -> None:
     """Resolve blocking contract defects before CleanupMask consumption.
 
@@ -2584,6 +3074,8 @@ def _component_auth_apply_terminal_authority_guards(records: Sequence[TextAreaCo
             )
             record.explicit_cleanup_authority = False
             continue
+        if record.job_binding_state in {"", "missing_cleanup_job", "non_unique_cleanup_job"}:
+            _component_auth_bind_cleanup_job_from_candidates(record)
 
 
 def _component_auth_resolve_ambiguous_component(record: TextAreaComponentAuthorizationRecord) -> None:
@@ -4316,12 +4808,50 @@ def _apply_cleanup_authorization(container: TextAreaContainer) -> None:
     container.authorization_explicit = bool(adjudication.authorization_explicit)
     container.authorization_field_origin = adjudication.authorization_field_origin
     container.semantic_authorization_state = adjudication.semantic_authorization_state
+    _align_container_route_to_cleanup_authority(container)
     container.parent_source_evidence = {
         "source_model_ids": list(container.source_model_ids or []),
         "evidence_reason_codes": list(container.evidence_reason_codes or []),
         "conflict_flags": list(container.conflict_flags or []),
         "semantic_role_evidence": dict(container.semantic_role_evidence or {}),
     }
+
+
+def _align_container_route_to_cleanup_authority(container: TextAreaContainer) -> None:
+    """Keep semantic cleanup authority and downstream route eligibility coherent.
+
+    Semantic adjudication is the upstream authority. Once it explicitly assigns
+    a cleanup-translate state and protected/art conflicts have already been
+    resolved, the container must not remain review-only with scoped OCR disabled;
+    otherwise the cleanup mask can be correct in isolation while the production
+    workflow never creates the corresponding cleanup/translation obligation.
+    """
+
+    if not bool(container.authorization_explicit):
+        return
+    auth = str(container.semantic_authorization_state or container.cleanup_authorization or "")
+    if auth == AUTH_CLEANUP_TRANSLATE_SPEECH:
+        target_route = ROUTE_TRANSLATE_SPEECH
+        target_type = CONTAINER_SPEECH
+        target_reason = "semantic_cleanup_speech_authority_route_alignment"
+        ocr_reason = "semantic_cleanup_speech_authority"
+    elif auth in {AUTH_CLEANUP_TRANSLATE_BACKGROUND, AUTH_CLEANUP_TRANSLATE_CAPTION}:
+        target_route = ROUTE_TRANSLATE_CAPTION
+        target_type = CONTAINER_CAPTION
+        target_reason = "semantic_cleanup_background_authority_route_alignment"
+        ocr_reason = "semantic_cleanup_background_authority"
+    else:
+        return
+
+    if container.route_intent != target_route:
+        container.route_intent = target_route
+    if container.container_type == CONTAINER_UNKNOWN:
+        container.container_type = target_type
+    container.ocr_eligible = True
+    container.comic_text_detector_scope_eligible = True
+    if target_reason not in container.evidence_reason_codes:
+        container.evidence_reason_codes.append(f"text_area_plan:{target_reason}")
+    container.ocr_eligibility_reason = ocr_reason
 
 
 def _authorization_is_explicit(auth: str) -> bool:
@@ -4719,6 +5249,7 @@ def _finish_plan(plan: TextAreaPlan, started: float) -> TextAreaPlan:
     _demote_ogkalu_speech_authority_overlapping_protected(plan.containers, plan.image_size)
     for container in plan.containers:
         _apply_cleanup_authorization(container)
+    _sync_scopes_to_authorized_containers(plan)
     semantic_units: List[TextAreaSemanticAuthorizationRecord] = []
     for container in plan.containers:
         semantic_units.extend(_semantic_units_from_container(container))
@@ -4753,6 +5284,39 @@ def _finish_plan(plan: TextAreaPlan, started: float) -> TextAreaPlan:
         "compatibility_mode": plan.runtime.compatibility_mode,
     }
     return plan
+
+
+def _sync_scopes_to_authorized_containers(plan: TextAreaPlan) -> None:
+    """Keep scoped OCR/CTD inputs aligned with final container authority."""
+
+    scopes_by_container_id = {
+        str(scope.container_id or ""): scope
+        for scope in plan.scopes
+        if str(scope.container_id or "")
+    }
+    for container in plan.containers:
+        container_id = str(container.container_id or "")
+        if not container_id or not bool(container.comic_text_detector_scope_eligible):
+            continue
+        if container_id in scopes_by_container_id:
+            continue
+        scope = TextAreaScope(
+            scope_id=f"scope_{container.container_id}",
+            page_id=str(plan.page_id),
+            container_id=container.container_id,
+            bbox=list(container.bbox),
+            container_type=container.container_type,
+            route_intent=container.route_intent,
+            ocr_eligible=container.ocr_eligible,
+            comic_text_detector_scope_eligible=container.comic_text_detector_scope_eligible,
+            fallback_reason=container.fallback_reason,
+            ocr_eligibility_reason=container.ocr_eligibility_reason,
+            text_area_pre_ocr_authority=container.text_area_pre_ocr_authority,
+            text_area_enriched_from_region=container.text_area_enriched_from_region,
+        )
+        _copy_container_authorization_to_scope(scope, container)
+        plan.scopes.append(scope)
+        scopes_by_container_id[container_id] = scope
 
 
 def _container_from_fused(

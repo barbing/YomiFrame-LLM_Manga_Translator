@@ -181,23 +181,42 @@ def create_manga_ocr_instance(use_gpu: bool):
 
 
 class MangaOcrEngine:
-    def recognize_with_confidence(self, image) -> tuple[str, float]:
-        """Recognize text and return confidence score."""
+    @staticmethod
+    def _prepare_input_image(image):
+        """Normalize OCR crops so tiny page-space slices do not crash MangaOCR."""
         try:
             import numpy as np
-            from PIL import Image
+            from PIL import Image, ImageOps
             import cv2
+
             if isinstance(image, np.ndarray):
                 if image.ndim == 3 and image.shape[2] == 3:
-                     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 image = Image.fromarray(image)
-            
-            # CRITICAL: MangaOCR expects RGB inputs.
-            # If input is Grayscale (L) or RGBA, convert to RGB to match standard library behavior.
             if hasattr(image, "convert"):
                 image = image.convert("RGB")
+                width, height = image.size
+                min_side = 8
+                if width < min_side or height < min_side:
+                    pad_w = max(0, min_side - width)
+                    pad_h = max(0, min_side - height)
+                    image = ImageOps.expand(
+                        image,
+                        border=(
+                            pad_w // 2,
+                            pad_h // 2,
+                            pad_w - (pad_w // 2),
+                            pad_h - (pad_h // 2),
+                        ),
+                        fill="white",
+                    )
+            return image
         except Exception:
-            pass
+            return image
+
+    def recognize_with_confidence(self, image) -> tuple[str, float]:
+        """Recognize text and return confidence score."""
+        image = self._prepare_input_image(image)
 
         try:
             import torch
@@ -264,7 +283,11 @@ class MangaOcrEngine:
             
         except Exception as e:
             print(f"[MangaOCR] Confidence extraction failed: {e}")
-            return self._engine(image), 1.0
+            try:
+                return self._engine(image), 1.0
+            except Exception as fallback_exc:
+                print(f"[MangaOCR] OCR fallback failed: {fallback_exc}")
+                return "", 0.0
 
     def __init__(self, use_gpu: bool) -> None:
         try:
@@ -274,19 +297,12 @@ class MangaOcrEngine:
         self._engine = create_manga_ocr_instance(use_gpu)
 
     def recognize(self, image) -> str:
+        image = self._prepare_input_image(image)
         try:
-            import numpy as np
-            from PIL import Image
-            import cv2
-            if isinstance(image, np.ndarray):
-                # Convert BGR (OpenCV) to RGB (PIL)
-                if image.ndim == 3 and image.shape[2] == 3:
-                     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                image = Image.fromarray(image)
-        except Exception:
-            pass  # Fallback to original input if conversion fails
-            
-        return self._engine(image)
+            return self._engine(image)
+        except Exception as exc:
+            print(f"[MangaOCR] OCR failed: {exc}")
+            return ""
 
     def close(self) -> None:
         """Release resources."""

@@ -3205,6 +3205,9 @@ def _runtime_cleanup_class_for_job(job: CleanupJob, requested_class: CleanupClas
 def _runtime_job_exclusion_reason(job: CleanupJob, cleanup_mask: CleanupMask | None = None) -> str:
     if bool(job.protected):
         return job.protection_reason or "job_protected"
+    cleanup_only = bool(getattr(job, "cleanup_only_obligation", False))
+    if cleanup_only:
+        return "cleanup_only_obligation_not_runtime_authority"
     source_evidence_reason = _runtime_source_evidence_exclusion_reason(job, cleanup_mask)
     if source_evidence_reason:
         return source_evidence_reason
@@ -3231,9 +3234,9 @@ def _runtime_job_exclusion_reason(job: CleanupJob, cleanup_mask: CleanupMask | N
     ):
         if blocked in combined:
             return f"phase5_runtime_excludes_{blocked}"
-    if not job.source_text_present:
+    if not job.source_text_present and not cleanup_only:
         return "source_text_missing"
-    if not job.translated_text_present:
+    if not job.translated_text_present and not cleanup_only:
         return "translated_text_missing"
     return ""
 

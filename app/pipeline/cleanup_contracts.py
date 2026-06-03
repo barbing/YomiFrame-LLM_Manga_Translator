@@ -122,6 +122,7 @@ class CleanupJob:
     cleanup_unit_child_region_ids: list[str] = field(default_factory=list)
     cleanup_unit_required_source_glyph_mask_ids: list[str] = field(default_factory=list)
     cleanup_unit_missing_source_glyph_mask_ids: list[str] = field(default_factory=list)
+    cleanup_only_obligation: bool = False
 
     def to_audit_dict(self) -> dict[str, Any]:
         return _dataclass_audit_dict(self)
@@ -550,6 +551,8 @@ def build_cleanup_job_candidates(
             cleanup_mode=cleanup_mode,
             source_records=source_records,
         )
+        cleanup_only_obligation = predicate_class == "accepted_cleanup_only_obligation"
+        accepted_cleanup_obligation = _predicate_is_accepted_cleanup_obligation(predicate_class)
         protected_reason = _protected_reason(region, render, route_intent, semantic_class, cleanup_mode)
         base_record = _base_accounting_record(
             page_id=page_id,
@@ -560,7 +563,7 @@ def build_cleanup_job_candidates(
         )
 
         if cleanup_unit.ambiguous_reason:
-            if predicate_class == "accepted_translated_render_obligation":
+            if accepted_cleanup_obligation:
                 obligation_records.append(
                     _obligation_record(
                         page_id=page_id,
@@ -578,7 +581,7 @@ def build_cleanup_job_candidates(
             continue
 
         if _explicitly_inactive(region, render):
-            if predicate_class == "accepted_translated_render_obligation":
+            if accepted_cleanup_obligation:
                 obligation_records.append(
                     _obligation_record(
                         page_id=page_id,
@@ -595,7 +598,7 @@ def build_cleanup_job_candidates(
             continue
 
         if protected_reason:
-            if predicate_class == "accepted_translated_render_obligation":
+            if accepted_cleanup_obligation:
                 obligation_records.append(
                     _obligation_record(
                         page_id=page_id,
@@ -626,8 +629,8 @@ def build_cleanup_job_candidates(
             protected_records.append({**base_record, "reason": protected_reason})
             continue
 
-        if not _truthy_text(translated_text):
-            if predicate_class == "accepted_translated_render_obligation":
+        if not _truthy_text(translated_text) and not cleanup_only_obligation:
+            if accepted_cleanup_obligation:
                 represented_job_id, represented_regions = _represented_cleanup_job_hint(
                     page_id=page_id,
                     region_id=region_id,
@@ -693,7 +696,7 @@ def build_cleanup_job_candidates(
             continue
 
         if _region_flag(region, render, "ignore", "skip_translation", "no_translation"):
-            if predicate_class == "accepted_translated_render_obligation":
+            if accepted_cleanup_obligation:
                 obligation_records.append(
                     _obligation_record(
                         page_id=page_id,
@@ -710,7 +713,7 @@ def build_cleanup_job_candidates(
             continue
 
         if not source_records:
-            if predicate_class == "accepted_translated_render_obligation":
+            if accepted_cleanup_obligation:
                 obligation_records.append(
                     _obligation_record(
                         page_id=page_id,
@@ -751,13 +754,13 @@ def build_cleanup_job_candidates(
                         "unsupported_cleanup_reason": "artifact_risk_or_non_flat_background_not_caption_flat_background",
                     }
                 )
-            if predicate_class == "accepted_translated_render_obligation" and cleanup_class != CleanupClass.PRESERVE_SFX_DECORATIVE:
+            if accepted_cleanup_obligation and cleanup_class != CleanupClass.PRESERVE_SFX_DECORATIVE:
                 job_blocking_reason = skip_reason
                 if not classification_reason:
                     classification_reason = skip_reason
                 skip_record["reason"] = "job_created_for_accepted_unit_with_blocking_cleanup_class"
                 skip_record["blocking_reason"] = skip_reason
-            elif predicate_class == "accepted_translated_render_obligation":
+            elif accepted_cleanup_obligation:
                 obligation_records.append(
                     _obligation_record(
                         page_id=page_id,
@@ -780,7 +783,7 @@ def build_cleanup_job_candidates(
         source_mask_ids = cleanup_unit.required_source_glyph_mask_ids or _source_mask_ids(source_records)
         first_record = _anchor_source_record(source_records, region_id) or (source_records[0] if source_records else {})
         cleanup_job_id = f"cjob_{_safe_id(page_id)}_{_safe_id(cleanup_unit.anchor_region_id or region_id)}"
-        if predicate_class == "accepted_translated_render_obligation":
+        if accepted_cleanup_obligation:
             obligation_records.append(
                 _obligation_record(
                     page_id=page_id,
@@ -813,7 +816,7 @@ def build_cleanup_job_candidates(
                 route_intent=route_intent,
                 semantic_class=semantic_class,
                 source_text_present=_truthy_text(source_text),
-                translated_text_present=True,
+                translated_text_present=_truthy_text(translated_text),
                 source_glyph_mask_ids=source_mask_ids,
                 source_glyph_evidence=evidence,
                 allowed_cleanup_area=_bbox_from_first(
@@ -865,6 +868,7 @@ def build_cleanup_job_candidates(
                 cleanup_unit_child_region_ids=cleanup_unit.child_region_ids,
                 cleanup_unit_required_source_glyph_mask_ids=cleanup_unit.required_source_glyph_mask_ids,
                 cleanup_unit_missing_source_glyph_mask_ids=cleanup_unit.missing_source_glyph_mask_ids,
+                cleanup_only_obligation=cleanup_only_obligation,
             )
         )
         _cleanup_perf_contract_checkpoint(
@@ -999,6 +1003,26 @@ def _region_flag(*items: Any) -> bool:
     return False
 
 
+def _predicate_is_accepted_cleanup_obligation(predicate_class: str) -> bool:
+    return predicate_class in {
+        "accepted_translated_render_obligation",
+        "accepted_cleanup_only_obligation",
+    }
+
+
+def _cleanup_only_authorized(
+    *,
+    region: Mapping[str, Any],
+    render: Mapping[str, Any],
+    route_intent: str,
+    semantic_class: str,
+    cleanup_mode: str,
+) -> bool:
+    # Route-owned text must remain translation-owned. Cleanup-only is not a
+    # valid authority source for speech/caption/background text.
+    return False
+
+
 def _cleanup_obligation_predicate(
     *,
     region: Mapping[str, Any],
@@ -1011,6 +1035,14 @@ def _cleanup_obligation_predicate(
 ) -> str:
     if _truthy_text(translated_text):
         return "accepted_translated_render_obligation"
+    if _cleanup_only_authorized(
+        region=region,
+        render=render,
+        route_intent=route_intent,
+        semantic_class=semantic_class,
+        cleanup_mode=cleanup_mode,
+    ):
+        return "accepted_cleanup_only_obligation"
     if _region_flag(
         region,
         render,
@@ -1359,12 +1391,24 @@ def _classify_cleanup_class(
         )
     ).lower()
 
+    speech_bubble_authorized = _speech_bubble_cleanup_authorized(
+        metadata=metadata,
+        route_intent=route_intent,
+        semantic_class=semantic_class,
+        cleanup_mode=cleanup_mode,
+    )
     contract_class = _cleanup_class_from_source_contracts(source_records)
     if contract_class == CleanupClass.PRESERVE_SFX_DECORATIVE:
         return (
             contract_class,
             "",
             f"source_glyph_class_contract_excludes_{contract_class.value}",
+        )
+    if contract_class == CleanupClass.SMALL_REACTION and speech_bubble_authorized:
+        return (
+            CleanupClass.SPEECH_FLAT_BUBBLE,
+            "translated_speech_bubble_authority_overrides_small_reaction_source_glyph_strategy",
+            "",
         )
     if contract_class in {
         CleanupClass.ART_ENTANGLED_AMBIGUOUS,
@@ -1411,6 +1455,25 @@ def _classify_cleanup_class(
         "metadata_insufficient_cleanup_strategy_default",
         "",
     )
+
+
+def _speech_bubble_cleanup_authorized(
+    *,
+    metadata: str,
+    route_intent: str,
+    semantic_class: str,
+    cleanup_mode: str,
+) -> bool:
+    route = str(route_intent or "").lower()
+    semantic = str(semantic_class or "").lower()
+    cleanup = str(cleanup_mode or "").lower()
+    if "translate_speech" not in route:
+        return False
+    if "speech" in semantic or "bubble" in semantic:
+        return True
+    if cleanup in {"bubble", "speech", "speech_bubble"}:
+        return True
+    return "speech" in metadata and "bubble" in metadata
 
 
 def _cleanup_class_from_source_contracts(source_records: list[dict[str, Any]]) -> CleanupClass | None:
