@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 
-BUBBLE_DETECTION_VERSION = "phase4b21_bubble_detection_semantic_authority_contract_v3"
-BUBBLE_DETECTION_CACHE_VERSION = "phase4b21_bubble_detection_semantic_authority_cache_v3"
+BUBBLE_DETECTION_VERSION = "phase4b22_bubble_detection_semantic_authority_contract_v4"
+BUBBLE_DETECTION_CACHE_VERSION = "phase4b22_bubble_detection_semantic_authority_cache_v4"
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = ROOT / "scripts"
@@ -49,6 +49,8 @@ SEMANTIC_EVIDENCE_PROVIDER_VERSION = "semantic_evidence_provider_v2"
 SEMANTIC_EVIDENCE_CONTRACT_VERSION = "semantic_authority_contract_v2"
 OGKALU_NEIGHBORING_SPEECH_CONTEXT_VERSION = "ogkalu_neighboring_speech_context_v1"
 OGKALU_STRONG_SINGLE_MODEL_CONFIDENCE = 0.85
+OGKALU_BUBBLE_TEXT_PAIR_REASON = "ogkalu_text_bubble_inside_unmasked_bubble_support"
+OGKALU_TEXT_EVIDENCE_ATTACHED_REASON = "ogkalu_text_bubble_attached_to_unmasked_bubble_container"
 PROVIDER_KITSUMED_SPEECH_MASK = "kitsumed_speech_mask_evidence"
 PROVIDER_OGKALU_TEXT_BUBBLE = "ogkalu_text_bubble_evidence"
 PROVIDER_OGKALU_TEXT_FREE_BACKGROUND = "ogkalu_text_free_background_evidence"
@@ -347,6 +349,7 @@ def run_bubble_detection(request: BubbleDetectionInput | Mapping[str, Any]) -> B
         )
         region_links = runtime.fusion_module.link_regions(list(req.regions or []), kitsumed_raw, ogkalu_raw)
         fused_containers = runtime.fusion_module.build_fusion(page_id, kitsumed_raw, ogkalu_raw, region_links)
+        _associate_unmasked_ogkalu_bubble_text_pairs(fused_containers, text_area_evidence)
         _annotate_fused_container_semantic_role_evidence(fused_containers, bubble_evidence, text_area_evidence, region_links)
         memberships = _build_memberships(fused_containers, region_links)
         decisions = _build_decisions(memberships, fused_containers)
@@ -1273,6 +1276,194 @@ def _annotate_ogkalu_neighboring_speech_context(
         record["neighboring_speech_context_ids"] = neighbor_ids
 
 
+def _bbox_area_xyxy(box: Sequence[Any]) -> float:
+    try:
+        x0, y0, x1, y1 = [float(value) for value in list(box or [])[:4]]
+    except Exception:
+        return 0.0
+    return max(0.0, x1 - x0) * max(0.0, y1 - y0)
+
+
+def _bbox_intersection_xyxy(a: Sequence[Any], b: Sequence[Any]) -> float:
+    try:
+        ax0, ay0, ax1, ay1 = [float(value) for value in list(a or [])[:4]]
+        bx0, by0, bx1, by1 = [float(value) for value in list(b or [])[:4]]
+    except Exception:
+        return 0.0
+    return max(0.0, min(ax1, bx1) - max(ax0, bx0)) * max(0.0, min(ay1, by1) - max(ay0, by0))
+
+
+def _bbox_center_inside_xyxy(inner: Sequence[Any], outer: Sequence[Any]) -> bool:
+    try:
+        x0, y0, x1, y1 = [float(value) for value in list(inner or [])[:4]]
+        ox0, oy0, ox1, oy1 = [float(value) for value in list(outer or [])[:4]]
+    except Exception:
+        return False
+    cx = (x0 + x1) * 0.5
+    cy = (y0 + y1) * 0.5
+    return bool(ox0 <= cx <= ox1 and oy0 <= cy <= oy1)
+
+
+def _ogkalu_record_by_id(records: Sequence[Mapping[str, Any]]) -> Dict[str, Mapping[str, Any]]:
+    output: Dict[str, Mapping[str, Any]] = {}
+    for record in records:
+        evidence_id = str(record.get("model_evidence_id") or record.get("evidence_id") or "")
+        if evidence_id:
+            output[evidence_id] = record
+    return output
+
+
+def _fused_single_ogkalu_class(
+    container: Mapping[str, Any],
+    records_by_id: Mapping[str, Mapping[str, Any]],
+) -> str:
+    ids = [str(item) for item in container.get("linked_ogkalu_detection_ids") or [] if str(item)]
+    classes = {
+        str((records_by_id.get(evidence_id) or {}).get("class_name") or "")
+        for evidence_id in ids
+        if records_by_id.get(evidence_id)
+    }
+    classes.discard("")
+    if len(classes) == 1:
+        return next(iter(classes))
+    return ""
+
+
+def _fused_ogkalu_confidence(
+    container: Mapping[str, Any],
+    records_by_id: Mapping[str, Mapping[str, Any]],
+) -> float:
+    values: List[float] = []
+    for evidence_id in [str(item) for item in container.get("linked_ogkalu_detection_ids") or [] if str(item)]:
+        record = records_by_id.get(evidence_id)
+        if not record:
+            continue
+        try:
+            values.append(float(record.get("confidence") or 0.0))
+        except Exception:
+            continue
+    return max(values) if values else 0.0
+
+
+def _fused_has_preserve_or_art_conflict(container: Mapping[str, Any]) -> bool:
+    text = " ".join(
+        str(item).lower()
+        for item in list(container.get("reason_codes") or []) + list(container.get("conflict_flags") or [])
+    )
+    return any(token in text for token in ("sfx", "decorative", "preserve", "art", "non_text", "non-text"))
+
+
+def _associate_unmasked_ogkalu_bubble_text_pairs(
+    fused_containers: Sequence[Dict[str, Any]],
+    text_area_evidence: Sequence[Mapping[str, Any]],
+) -> None:
+    """Attach contained OGKALU text boxes to their unmasked bubble container.
+
+    This is still source-text-free: it only uses provider class, confidence, bbox
+    containment, and conflict metadata. TextAreaPlan performs the later
+    text-presence proof before granting executable speech authority.
+    """
+
+    records_by_id = _ogkalu_record_by_id(text_area_evidence)
+    bubble_containers: List[Dict[str, Any]] = []
+    text_containers: List[Dict[str, Any]] = []
+    for container in fused_containers:
+        if container.get("linked_kitsumed_mask_ids"):
+            continue
+        if _fused_has_preserve_or_art_conflict(container):
+            continue
+        class_name = _fused_single_ogkalu_class(container, records_by_id)
+        if class_name == "bubble":
+            bubble_containers.append(container)
+        elif class_name == "text_bubble":
+            text_containers.append(container)
+
+    assignments: Dict[str, Dict[str, Any]] = {}
+    for text_container in text_containers:
+        text_ids = [str(item) for item in text_container.get("linked_ogkalu_detection_ids") or [] if str(item)]
+        if len(text_ids) != 1:
+            continue
+        text_id = text_ids[0]
+        text_record = records_by_id.get(text_id)
+        if not text_record:
+            continue
+        text_box = _ogkalu_bbox_xyxy(text_record)
+        text_area = _bbox_area_xyxy(text_box)
+        if text_area <= 0.0 or _fused_ogkalu_confidence(text_container, records_by_id) < OGKALU_STRONG_SINGLE_MODEL_CONFIDENCE:
+            continue
+        best: tuple[float, float, Dict[str, Any]] | None = None
+        for bubble_container in bubble_containers:
+            if bubble_container is text_container:
+                continue
+            if _fused_ogkalu_confidence(bubble_container, records_by_id) < OGKALU_STRONG_SINGLE_MODEL_CONFIDENCE:
+                continue
+            bubble_ids = [str(item) for item in bubble_container.get("linked_ogkalu_detection_ids") or [] if str(item)]
+            if not bubble_ids:
+                continue
+            bubble_record = records_by_id.get(bubble_ids[0])
+            if not bubble_record:
+                continue
+            bubble_box = _ogkalu_bbox_xyxy(bubble_record)
+            bubble_area = _bbox_area_xyxy(bubble_box)
+            if bubble_area <= text_area:
+                continue
+            inside_ratio = _bbox_intersection_xyxy(text_box, bubble_box) / max(1.0, text_area)
+            center_inside = _bbox_center_inside_xyxy(text_box, bubble_box)
+            area_ratio = text_area / max(1.0, bubble_area)
+            if inside_ratio < 0.82 and not (inside_ratio >= 0.65 and center_inside):
+                continue
+            if area_ratio < 0.08 or area_ratio > 0.82:
+                continue
+            score = inside_ratio - (bubble_area / 1_000_000_000.0)
+            candidate = (score, bubble_area, bubble_container)
+            if best is None or candidate[0] > best[0] or (candidate[0] == best[0] and candidate[1] < best[1]):
+                best = candidate
+        if best is not None:
+            assignments[text_id] = best[2]
+
+    if not assignments:
+        return
+
+    containers_by_text_id = {
+        str((container.get("linked_ogkalu_detection_ids") or [""])[0]): container
+        for container in text_containers
+        if len(container.get("linked_ogkalu_detection_ids") or []) == 1
+    }
+    for text_id, bubble_container in assignments.items():
+        linked_ids = [str(item) for item in bubble_container.get("linked_ogkalu_detection_ids") or [] if str(item)]
+        if text_id not in linked_ids:
+            linked_ids.append(text_id)
+            bubble_container["linked_ogkalu_detection_ids"] = linked_ids
+        reasons = [str(item) for item in bubble_container.get("reason_codes") or [] if str(item)]
+        if OGKALU_BUBBLE_TEXT_PAIR_REASON not in reasons:
+            reasons.append(OGKALU_BUBBLE_TEXT_PAIR_REASON)
+        bubble_container["reason_codes"] = reasons
+        downstream = [str(item) for item in bubble_container.get("suggested_downstream_use") or [] if str(item)]
+        for item in ("ownership_hint", "missed_text_hint"):
+            if item not in downstream:
+                downstream.append(item)
+        bubble_container["suggested_downstream_use"] = downstream
+        support = dict(bubble_container.get("unmasked_ogkalu_text_pair") or {})
+        support.setdefault("bubble_detection_ids", [linked_ids[0]] if linked_ids else [])
+        text_ids = [str(item) for item in support.get("text_detection_ids") or [] if str(item)]
+        if text_id not in text_ids:
+            text_ids.append(text_id)
+        support["text_detection_ids"] = text_ids
+        support["association_reason"] = OGKALU_BUBBLE_TEXT_PAIR_REASON
+        bubble_container["unmasked_ogkalu_text_pair"] = support
+
+        text_container = containers_by_text_id.get(text_id)
+        if not text_container:
+            continue
+        text_container["fused_container_type"] = "text_evidence_only"
+        text_container["attached_to_fused_container_id"] = bubble_container.get("fused_container_id")
+        text_reasons = [str(item) for item in text_container.get("reason_codes") or [] if str(item)]
+        if OGKALU_TEXT_EVIDENCE_ATTACHED_REASON not in text_reasons:
+            text_reasons.append(OGKALU_TEXT_EVIDENCE_ATTACHED_REASON)
+        text_container["reason_codes"] = text_reasons
+        text_container["suggested_downstream_use"] = ["text_evidence_slot_only"]
+
+
 def _semantic_role_evidence_for_ogkalu_record(record: Mapping[str, Any], linked_masks: Sequence[str]) -> Dict[str, Any]:
     class_name = str(record.get("class_name") or "")
     evidence_id = str(record.get("model_evidence_id") or "")
@@ -1623,6 +1814,9 @@ def _annotate_fused_container_semantic_role_evidence(
         elif fused_type == "free_text":
             role_signals.add("free_text_candidate")
             candidate_roles.add("background_narration")
+        if OGKALU_BUBBLE_TEXT_PAIR_REASON in {str(item) for item in container.get("reason_codes") or [] if str(item)}:
+            role_signals.add("ogkalu_bubble_text_pair")
+            candidate_roles.add("speech")
         container["semantic_role_evidence"] = {
             "source": "bubble_detection_fused_container",
             "evidence_source_list": sorted(evidence_source_list or {"bubble_detection_fused_container"}),

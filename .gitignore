@@ -44,6 +44,9 @@ app/tests/*
 # Local scripts
 Scripts/
 
+# Local validation workflow
+validation/
+
 # Documentation
 *.md
 !README.md

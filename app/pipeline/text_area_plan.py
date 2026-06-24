@@ -28,6 +28,7 @@ except Exception:  # pragma: no cover - optional runtime dependency
 
 
 TEXT_AREA_PLAN_VERSION = "bubble_detection_default_text_area_plan_v1"
+TEXT_AREA_ROOT_PARENT_CHILD_PLAN_VERSION = "text_area_root_parent_child_plan_v1"
 
 CONTAINER_SPEECH = "speech_bubble"
 CONTAINER_CAPTION = "caption_background"
@@ -38,6 +39,13 @@ ROUTE_TRANSLATE_SPEECH = "translate_speech"
 ROUTE_TRANSLATE_CAPTION = "translate_caption_background"
 ROUTE_PRESERVE_SFX = "preserve_sfx_decorative"
 ROUTE_REVIEW_FALLBACK = "review_or_fallback"
+
+TEXT_AREA_GRAPH_WORKFLOW_DISPOSITION = "workflow_root"
+TEXT_AREA_GRAPH_EXCLUDED_DISPOSITION = "excluded_nonworkflow"
+TEXT_AREA_GRAPH_PARENT_SOURCE_TEXT_UNIT = "text_unit_evidence_bbox"
+TEXT_AREA_GRAPH_PARENT_SOURCE_ROOT_VISUAL_TEXT_ISLAND = "root_local_visual_text_island"
+TEXT_AREA_GRAPH_PARENT_SOURCE_SINGLE_CLAIM = "single_parent_claim"
+TEXT_AREA_GRAPH_CHILD_SCOPE_PARENT_BOUNDARY = "parent_boundary_bbox"
 
 AUTH_CLEANUP_TRANSLATE_SPEECH = "cleanup_translate_speech"
 AUTH_CLEANUP_TRANSLATE_BACKGROUND = "cleanup_translate_background"
@@ -162,6 +170,11 @@ OGKALU_ONLY_SPEECH_AUTHORITY_REASON_TOKENS = (
     "typed_bright_ogkalu_bubble_speech_authority",
     "typed_ogkalu_text_bubble_speech_authority",
 )
+
+UNRESOLVED_OGKALU_SPEECH_RISK_REASON = "unresolved_ogkalu_speech_risk_candidate"
+OGKALU_BUBBLE_TEXT_PAIR_REASON = "ogkalu_text_bubble_inside_unmasked_bubble_support"
+OGKALU_BUBBLE_TEXT_PAIR_AUTHORITY_REASON = "ogkalu_bubble_text_pair_speech_authority"
+OGKALU_TEXT_EVIDENCE_ATTACHED_REASON = "ogkalu_text_bubble_attached_to_unmasked_bubble_container"
 
 DETECTION_SCOPED = "scoped"
 DETECTION_COMPATIBILITY_FALLBACK = "compatibility_fallback"
@@ -455,6 +468,1583 @@ class TextAreaPlanRuntime:
         return dict(self.__dict__)
 
 
+def _records_to_dict(records: Sequence[Any]) -> List[Dict[str, Any]]:
+    output: List[Dict[str, Any]] = []
+    for record in records or []:
+        if hasattr(record, "to_dict"):
+            output.append(record.to_dict())
+        elif isinstance(record, Mapping):
+            output.append(dict(record))
+    return output
+
+
+@dataclass
+class TextAreaRootNode:
+    root_node_id: str
+    page_id: str
+    container_id: str
+    semantic_role: str
+    workflow_disposition: str
+    bbox: List[int] = field(default_factory=list)
+    reason_codes: List[str] = field(default_factory=list)
+    source_evidence_ids: List[str] = field(default_factory=list)
+    support_geometry_ids: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "root_node_id": self.root_node_id,
+            "page_id": self.page_id,
+            "container_id": self.container_id,
+            "semantic_role": self.semantic_role,
+            "workflow_disposition": self.workflow_disposition,
+            "bbox": list(self.bbox),
+            "reason_codes": list(self.reason_codes),
+            "source_evidence_ids": list(self.source_evidence_ids),
+            "support_geometry_ids": list(self.support_geometry_ids),
+        }
+
+
+@dataclass
+class TextAreaParentNode:
+    parent_node_id: str
+    root_node_id: str
+    page_id: str
+    container_id: str
+    parent_boundary_id: str
+    parent_kind: str
+    bbox: List[int] = field(default_factory=list)
+    container_local_bbox: List[int] = field(default_factory=list)
+    boundary_source: str = ""
+    is_explicit_parent_obligation: bool = False
+    initial_state: str = "pending_source_attachment"
+    reason_codes: List[str] = field(default_factory=list)
+    support_geometry_ids: List[str] = field(default_factory=list)
+    source_evidence_ids: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "parent_node_id": self.parent_node_id,
+            "root_node_id": self.root_node_id,
+            "page_id": self.page_id,
+            "container_id": self.container_id,
+            "parent_boundary_id": self.parent_boundary_id,
+            "parent_kind": self.parent_kind,
+            "bbox": list(self.bbox),
+            "container_local_bbox": list(self.container_local_bbox),
+            "boundary_source": self.boundary_source,
+            "is_explicit_parent_obligation": bool(self.is_explicit_parent_obligation),
+            "initial_state": self.initial_state,
+            "reason_codes": list(self.reason_codes),
+            "support_geometry_ids": list(self.support_geometry_ids),
+            "source_evidence_ids": list(self.source_evidence_ids),
+        }
+
+
+@dataclass
+class TextAreaParentBoundaryCandidate:
+    candidate_id: str
+    page_id: str
+    root_node_id: str
+    container_id: str
+    candidate_boundary_id: str
+    candidate_kind: str
+    bbox: List[int] = field(default_factory=list)
+    container_local_bbox: List[int] = field(default_factory=list)
+    candidate_source: str = ""
+    is_explicit_parent_boundary_candidate: bool = False
+    adjudication_state: str = "proposed"
+    blocker_kind: str = ""
+    reason_codes: List[str] = field(default_factory=list)
+    support_geometry_ids: List[str] = field(default_factory=list)
+    source_evidence_ids: List[str] = field(default_factory=list)
+    cross_container_owner_ids: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "candidate_id": self.candidate_id,
+            "page_id": self.page_id,
+            "root_node_id": self.root_node_id,
+            "container_id": self.container_id,
+            "candidate_boundary_id": self.candidate_boundary_id,
+            "candidate_kind": self.candidate_kind,
+            "bbox": list(self.bbox),
+            "container_local_bbox": list(self.container_local_bbox),
+            "candidate_source": self.candidate_source,
+            "is_explicit_parent_boundary_candidate": bool(self.is_explicit_parent_boundary_candidate),
+            "adjudication_state": self.adjudication_state,
+            "blocker_kind": self.blocker_kind,
+            "reason_codes": list(self.reason_codes),
+            "support_geometry_ids": list(self.support_geometry_ids),
+            "source_evidence_ids": list(self.source_evidence_ids),
+            "cross_container_owner_ids": list(self.cross_container_owner_ids),
+        }
+
+
+@dataclass
+class TextAreaChildEvidenceSlot:
+    child_slot_id: str
+    parent_node_id: str
+    root_node_id: str
+    page_id: str
+    allowed_attachment_scope: str
+    bbox: List[int] = field(default_factory=list)
+    support_geometry_ids: List[str] = field(default_factory=list)
+    source_evidence_ids: List[str] = field(default_factory=list)
+    reason_codes: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "child_slot_id": self.child_slot_id,
+            "parent_node_id": self.parent_node_id,
+            "root_node_id": self.root_node_id,
+            "page_id": self.page_id,
+            "allowed_attachment_scope": self.allowed_attachment_scope,
+            "bbox": list(self.bbox),
+            "support_geometry_ids": list(self.support_geometry_ids),
+            "source_evidence_ids": list(self.source_evidence_ids),
+            "reason_codes": list(self.reason_codes),
+        }
+
+
+@dataclass
+class TextAreaGraphBlocker:
+    blocker_id: str
+    page_id: str
+    blocker_kind: str
+    container_id: str = ""
+    root_node_id: str = ""
+    parent_node_id: str = ""
+    evidence_ids: List[str] = field(default_factory=list)
+    reason_codes: List[str] = field(default_factory=list)
+    diagnostic_message: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "blocker_id": self.blocker_id,
+            "page_id": self.page_id,
+            "container_id": self.container_id,
+            "root_node_id": self.root_node_id,
+            "parent_node_id": self.parent_node_id,
+            "blocker_kind": self.blocker_kind,
+            "evidence_ids": list(self.evidence_ids),
+            "reason_codes": list(self.reason_codes),
+            "diagnostic_message": self.diagnostic_message,
+        }
+
+
+@dataclass
+class TextAreaExcludedInventoryRecord:
+    excluded_id: str
+    page_id: str
+    container_id: str
+    exclusion_kind: str
+    bbox: List[int] = field(default_factory=list)
+    reason_codes: List[str] = field(default_factory=list)
+    source_evidence_ids: List[str] = field(default_factory=list)
+    support_geometry_ids: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "excluded_id": self.excluded_id,
+            "page_id": self.page_id,
+            "container_id": self.container_id,
+            "exclusion_kind": self.exclusion_kind,
+            "bbox": list(self.bbox),
+            "reason_codes": list(self.reason_codes),
+            "source_evidence_ids": list(self.source_evidence_ids),
+            "support_geometry_ids": list(self.support_geometry_ids),
+        }
+
+
+@dataclass
+class TextAreaSourceEvidencePayload:
+    source_evidence_id: str
+    page_id: str
+    source_kind: str
+    container_id: str = ""
+    bbox: List[int] = field(default_factory=list)
+    source_ref: str = ""
+    reason_codes: List[str] = field(default_factory=list)
+    payload: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "source_evidence_id": self.source_evidence_id,
+            "page_id": self.page_id,
+            "source_kind": self.source_kind,
+            "container_id": self.container_id,
+            "bbox": list(self.bbox),
+            "source_ref": self.source_ref,
+            "reason_codes": list(self.reason_codes),
+            "payload": dict(self.payload),
+        }
+
+
+@dataclass
+class TextAreaRootParentChildPlan:
+    page_id: str
+    version: str = TEXT_AREA_ROOT_PARENT_CHILD_PLAN_VERSION
+    root_nodes: List[TextAreaRootNode | Mapping[str, Any]] = field(default_factory=list)
+    parent_boundary_candidates: List[TextAreaParentBoundaryCandidate | Mapping[str, Any]] = field(default_factory=list)
+    parent_nodes: List[TextAreaParentNode | Mapping[str, Any]] = field(default_factory=list)
+    child_evidence_slots: List[TextAreaChildEvidenceSlot | Mapping[str, Any]] = field(default_factory=list)
+    excluded_inventory: List[TextAreaExcludedInventoryRecord | Mapping[str, Any]] = field(default_factory=list)
+    graph_blockers: List[TextAreaGraphBlocker | Mapping[str, Any]] = field(default_factory=list)
+    source_evidence_payloads: List[TextAreaSourceEvidencePayload | Mapping[str, Any]] = field(default_factory=list)
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "page_id": self.page_id,
+            "version": self.version,
+            "root_nodes": _records_to_dict(self.root_nodes),
+            "parent_boundary_candidates": _records_to_dict(self.parent_boundary_candidates),
+            "parent_nodes": _records_to_dict(self.parent_nodes),
+            "child_evidence_slots": _records_to_dict(self.child_evidence_slots),
+            "excluded_inventory": _records_to_dict(self.excluded_inventory),
+            "graph_blockers": _records_to_dict(self.graph_blockers),
+            "source_evidence_payloads": _records_to_dict(self.source_evidence_payloads),
+            "diagnostics": dict(self.diagnostics),
+        }
+
+
+def _root_parent_child_plan_to_dict(plan: Any) -> Dict[str, Any]:
+    if hasattr(plan, "to_dict"):
+        return plan.to_dict()
+    if isinstance(plan, Mapping):
+        return dict(plan)
+    return {}
+
+
+def build_text_area_root_parent_child_plan(plan: "TextAreaPlan | Mapping[str, Any]") -> TextAreaRootParentChildPlan:
+    """Create the Phase 2 source-text-free graph plan from TextAreaPlan evidence."""
+
+    page_id = _text_area_graph_plan_page_id(plan)
+    containers = _text_area_graph_plan_containers(plan)
+    image_size = _text_area_graph_plan_image_size(plan)
+    luma_image = _text_area_graph_plan_luma_image(plan)
+    root_nodes: List[TextAreaRootNode] = []
+    parent_boundary_candidates: List[TextAreaParentBoundaryCandidate] = []
+    parent_nodes: List[TextAreaParentNode] = []
+    child_slots: List[TextAreaChildEvidenceSlot] = []
+    excluded_inventory: List[TextAreaExcludedInventoryRecord] = []
+    graph_blockers: List[TextAreaGraphBlocker] = []
+    source_payloads: List[TextAreaSourceEvidencePayload] = []
+
+    roots_by_container_id: Dict[str, TextAreaRootNode] = {}
+    root_container_ids_by_root_id: Dict[str, List[str]] = {}
+    containers_by_id: Dict[str, TextAreaContainer | Mapping[str, Any]] = {}
+    candidate_entries_by_container_id: Dict[str, List[Dict[str, Any]]] = {}
+    boundary_owners: Dict[str, List[str]] = {}
+    boundary_owner_containers: Dict[str, List[str]] = {}
+
+    workflow_containers: List[TextAreaContainer | Mapping[str, Any]] = []
+    for container in containers:
+        container_id = _text_area_graph_container_id(container)
+        if not container_id:
+            continue
+        containers_by_id[container_id] = container
+        if _text_area_graph_is_workflow_container(container):
+            workflow_containers.append(container)
+
+    root_groups, demoted_root_containers = _text_area_graph_normalized_root_groups(
+        workflow_containers,
+        image_size=image_size,
+    )
+    demoted_root_container_ids = {
+        _text_area_graph_container_id(container)
+        for container in demoted_root_containers
+        if _text_area_graph_container_id(container)
+    }
+
+    for container in containers:
+        container_id = _text_area_graph_container_id(container)
+        if not container_id:
+            continue
+        bbox = _text_area_graph_container_bbox(container)
+        source_ids = _text_area_graph_container_source_ids(container)
+        support_ids = _text_area_graph_support_geometry_ids(container)
+        reasons = _text_area_graph_reason_codes(container)
+        if container_id in demoted_root_container_ids:
+            excluded_inventory.append(
+                TextAreaExcludedInventoryRecord(
+                    excluded_id=_text_area_graph_node_id("tap_excluded", page_id, container_id),
+                    page_id=page_id,
+                    container_id=container_id,
+                    exclusion_kind="duplicate_background_candidate",
+                    bbox=bbox,
+                    reason_codes=_text_area_graph_unique_strings(
+                        reasons
+                        + [
+                            "text_area_plan:phase2_root_normalization_demoted",
+                            "text_area_plan:phase2_background_evidence_reused_by_speech_root",
+                        ]
+                    ),
+                    source_evidence_ids=source_ids,
+                    support_geometry_ids=support_ids,
+                )
+            )
+        elif _text_area_graph_is_workflow_container(container):
+            continue
+        elif _text_area_graph_is_excluded_container(container):
+            excluded_inventory.append(
+                TextAreaExcludedInventoryRecord(
+                    excluded_id=_text_area_graph_node_id("tap_excluded", page_id, container_id),
+                    page_id=page_id,
+                    container_id=container_id,
+                    exclusion_kind=_text_area_graph_exclusion_kind(container),
+                    bbox=bbox,
+                    reason_codes=_text_area_graph_unique_strings(
+                        reasons + ["text_area_plan:phase2_excluded_inventory"]
+                    ),
+                    source_evidence_ids=source_ids,
+                    support_geometry_ids=support_ids,
+                )
+            )
+        else:
+            graph_blockers.append(
+                TextAreaGraphBlocker(
+                    blocker_id=_text_area_graph_node_id("tap_blocker_root", page_id, container_id),
+                    page_id=page_id,
+                    container_id=container_id,
+                    blocker_kind="missing_root_workflow_container",
+                    evidence_ids=_text_area_graph_unique_strings(source_ids + support_ids),
+                    reason_codes=_text_area_graph_unique_strings(
+                        reasons + ["text_area_plan:phase2_unclassified_container"]
+                    ),
+                    diagnostic_message="TextAreaPlan container is neither workflow-root nor excluded inventory.",
+                )
+            )
+
+    for group in root_groups:
+        group_containers = list(group.get("containers") or [])
+        if not group_containers:
+            continue
+        primary = group_containers[0]
+        primary_container_id = _text_area_graph_container_id(primary)
+        if not primary_container_id:
+            continue
+        root = TextAreaRootNode(
+            root_node_id=_text_area_graph_node_id("tap_root", page_id, primary_container_id),
+            page_id=page_id,
+            container_id=primary_container_id,
+            semantic_role=str(group.get("semantic_role") or _text_area_graph_semantic_role(primary)),
+            workflow_disposition=TEXT_AREA_GRAPH_WORKFLOW_DISPOSITION,
+            bbox=list(group.get("bbox") or _text_area_graph_container_bbox(primary)),
+            reason_codes=_text_area_graph_unique_strings(
+                list(group.get("reason_codes") or [])
+                + [
+                    "text_area_plan:phase2_workflow_root_node",
+                    "text_area_plan:phase2_normalized_root_boundary",
+                ]
+            ),
+            source_evidence_ids=_text_area_graph_unique_strings(list(group.get("source_evidence_ids") or [])),
+            support_geometry_ids=_text_area_graph_unique_strings(list(group.get("support_geometry_ids") or [])),
+        )
+        root_nodes.append(root)
+        group_container_ids: List[str] = []
+        for member in group_containers:
+            member_id = _text_area_graph_container_id(member)
+            if not member_id:
+                continue
+            roots_by_container_id[member_id] = root
+            group_container_ids.append(member_id)
+            entries: List[Dict[str, Any]] = []
+            for index, raw_entry in enumerate(
+                _text_area_graph_parent_boundary_entries(
+                    member,
+                    image_size=image_size,
+                    luma_image=luma_image,
+                )
+            ):
+                evidence_id = str(raw_entry.get("evidence_id") or f"boundary_{index:02d}")
+                entry = {
+                    **raw_entry,
+                    "candidate_id": _text_area_graph_node_id("tap_candidate", page_id, member_id, evidence_id),
+                    "candidate_boundary_id": _text_area_graph_node_id("tap_candidate_boundary", page_id, member_id, evidence_id),
+                }
+                entries.append(entry)
+                key = _text_area_graph_parent_boundary_key(entry)
+                if key:
+                    boundary_owners.setdefault(key, []).append(root.root_node_id)
+                    boundary_owner_containers.setdefault(key, []).append(member_id)
+            candidate_entries_by_container_id[member_id] = entries
+        root_container_ids_by_root_id[root.root_node_id] = group_container_ids
+
+    for root in root_nodes:
+        group_container_ids = root_container_ids_by_root_id.get(root.root_node_id) or [root.container_id]
+        accepted_candidates: List[TextAreaParentBoundaryCandidate] = []
+        ambiguous_entries: List[Dict[str, Any]] = []
+        blocked_entries: List[Dict[str, Any]] = []
+        seen_root_candidate_keys: set[str] = set()
+        for container_id in group_container_ids:
+            container = containers_by_id.get(container_id)
+            if container is None:
+                continue
+            for entry in candidate_entries_by_container_id.get(container_id, []):
+                key = _text_area_graph_parent_boundary_key(entry)
+                owners = _text_area_graph_unique_strings(boundary_owners.get(key, []))
+                if key and len(owners) <= 1 and key in seen_root_candidate_keys:
+                    continue
+                if key:
+                    seen_root_candidate_keys.add(key)
+                explicit = bool(entry.get("is_explicit_parent_boundary_evidence"))
+                blocker_kind = ""
+                state = "accepted"
+                state_reasons = ["text_area_plan:phase2_parent_boundary_candidate_accepted"]
+                if len(owners) > 1:
+                    state = "ambiguous"
+                    blocker_kind = "cross_container_parent_boundary_evidence"
+                    state_reasons = ["text_area_plan:phase2_cross_container_parent_boundary_evidence"]
+                    ambiguous_entries.append({**entry, "cross_container_owners": boundary_owner_containers.get(key, [])})
+                elif not explicit:
+                    state = "blocked"
+                    blocker_kind = "missing_explicit_parent_boundary_marker"
+                    state_reasons = ["text_area_plan:phase2_missing_explicit_parent_boundary_marker"]
+                    blocked_entries.append(entry)
+                evidence_id = str(entry.get("evidence_id") or "")
+                bbox = _text_area_graph_bbox_from_entry(entry)
+                candidate = TextAreaParentBoundaryCandidate(
+                    candidate_id=str(entry.get("candidate_id") or _text_area_graph_node_id("tap_candidate", page_id, container_id, evidence_id)),
+                    page_id=page_id,
+                    root_node_id=root.root_node_id,
+                    container_id=container_id,
+                    candidate_boundary_id=str(
+                        entry.get("candidate_boundary_id")
+                        or _text_area_graph_node_id("tap_candidate_boundary", page_id, container_id, evidence_id)
+                    ),
+                    candidate_kind=_text_area_graph_semantic_role(container),
+                    bbox=bbox,
+                    container_local_bbox=_text_area_graph_container_local_bbox(bbox, root.bbox),
+                    candidate_source=str(entry.get("boundary_source") or TEXT_AREA_GRAPH_PARENT_SOURCE_TEXT_UNIT),
+                    is_explicit_parent_boundary_candidate=explicit,
+                    adjudication_state=state,
+                    blocker_kind=blocker_kind,
+                    reason_codes=_text_area_graph_unique_strings(
+                        [
+                            "text_area_plan:phase2_parent_boundary_candidate",
+                            f"text_area_plan:parent_boundary_class:{entry.get('class_name') or 'unknown'}",
+                        ]
+                        + state_reasons
+                    ),
+                    support_geometry_ids=_text_area_graph_unique_strings([evidence_id] if evidence_id else []),
+                    source_evidence_ids=_text_area_graph_unique_strings(
+                        _text_area_graph_container_source_ids(container) + ([evidence_id] if evidence_id else [])
+                    ),
+                    cross_container_owner_ids=_text_area_graph_unique_strings(
+                        boundary_owner_containers.get(key, [])
+                    )
+                    if state == "ambiguous"
+                    else [],
+                )
+                parent_boundary_candidates.append(candidate)
+                if state == "accepted":
+                    accepted_candidates.append(candidate)
+        if ambiguous_entries:
+            graph_blockers.append(
+                TextAreaGraphBlocker(
+                    blocker_id=_text_area_graph_node_id("tap_blocker_cross_container_parent", page_id, root.container_id),
+                    page_id=page_id,
+                    container_id=root.container_id,
+                    root_node_id=root.root_node_id,
+                    blocker_kind="cross_container_parent_boundary_evidence",
+                    evidence_ids=_text_area_graph_unique_strings(
+                        [str(entry.get("evidence_id") or "") for entry in ambiguous_entries]
+                    ),
+                    reason_codes=["text_area_plan:phase2_cross_container_parent_boundary_evidence"],
+                    diagnostic_message="One or more parent-boundary evidence records are owned by multiple workflow roots.",
+                )
+            )
+        if blocked_entries:
+            graph_blockers.append(
+                TextAreaGraphBlocker(
+                    blocker_id=_text_area_graph_node_id("tap_blocker_candidate_marker", page_id, root.container_id),
+                    page_id=page_id,
+                    container_id=root.container_id,
+                    root_node_id=root.root_node_id,
+                    blocker_kind="missing_explicit_parent_boundary_marker",
+                    evidence_ids=_text_area_graph_unique_strings(
+                        [str(entry.get("evidence_id") or "") for entry in blocked_entries]
+                    ),
+                    reason_codes=["text_area_plan:phase2_missing_explicit_parent_boundary_marker"],
+                    diagnostic_message="One or more candidate records lacked an explicit source-text-free parent-boundary marker.",
+                )
+            )
+        if not accepted_candidates:
+            source_ids = list(root.source_evidence_ids)
+            support_ids = list(root.support_geometry_ids)
+            blocker_kind = "source_evidence_without_parent_boundary" if source_ids or support_ids else "missing_parent_boundary_evidence"
+            graph_blockers.append(
+                TextAreaGraphBlocker(
+                    blocker_id=_text_area_graph_node_id("tap_blocker_parent_boundary", page_id, root.container_id),
+                    page_id=page_id,
+                    container_id=root.container_id,
+                    root_node_id=root.root_node_id,
+                    blocker_kind=blocker_kind,
+                    evidence_ids=_text_area_graph_unique_strings(source_ids + support_ids),
+                    reason_codes=[
+                        "text_area_plan:phase2_missing_explicit_parent_boundary",
+                        "text_area_plan:single_container_bbox_not_parent_proof",
+                    ],
+                    diagnostic_message="Workflow root has no unique explicit source-text-free parent-boundary evidence.",
+                )
+            )
+            continue
+        for candidate in accepted_candidates:
+            evidence_id = candidate.support_geometry_ids[0] if candidate.support_geometry_ids else candidate.candidate_id
+            container_id = candidate.container_id
+            parent_id = _text_area_graph_node_id("tap_parent", page_id, container_id, evidence_id)
+            boundary_id = _text_area_graph_node_id("tap_boundary", page_id, container_id, evidence_id)
+            bbox = list(candidate.bbox)
+            parent = TextAreaParentNode(
+                parent_node_id=parent_id,
+                root_node_id=root.root_node_id,
+                page_id=page_id,
+                container_id=container_id,
+                parent_boundary_id=boundary_id,
+                parent_kind=candidate.candidate_kind,
+                bbox=bbox,
+                container_local_bbox=list(candidate.container_local_bbox),
+                boundary_source=candidate.candidate_source,
+                is_explicit_parent_obligation=True,
+                initial_state="pending_source_attachment",
+                reason_codes=_text_area_graph_unique_strings(
+                    [
+                        "text_area_plan:phase2_explicit_parent_boundary",
+                        f"text_area_plan:accepted_candidate:{candidate.candidate_id}",
+                    ]
+                ),
+                support_geometry_ids=list(candidate.support_geometry_ids),
+                source_evidence_ids=list(candidate.source_evidence_ids),
+            )
+            parent_nodes.append(parent)
+            child_slots.append(
+                TextAreaChildEvidenceSlot(
+                    child_slot_id=_text_area_graph_node_id("tap_child_slot", page_id, container_id, evidence_id),
+                    parent_node_id=parent_id,
+                    root_node_id=root.root_node_id,
+                    page_id=page_id,
+                    allowed_attachment_scope=TEXT_AREA_GRAPH_CHILD_SCOPE_PARENT_BOUNDARY,
+                    bbox=bbox,
+                    support_geometry_ids=list(candidate.support_geometry_ids),
+                    source_evidence_ids=parent.source_evidence_ids,
+                    reason_codes=["text_area_plan:phase2_child_slot_for_parent_boundary"],
+                )
+            )
+            source_payloads.append(
+                TextAreaSourceEvidencePayload(
+                    source_evidence_id=_text_area_graph_node_id("tap_source_payload", page_id, container_id, evidence_id),
+                    page_id=page_id,
+                    source_kind="parent_boundary_reference",
+                    container_id=container_id,
+                    bbox=bbox,
+                    source_ref=candidate.candidate_id,
+                    reason_codes=["text_area_plan:phase2_source_payload_reference"],
+                    payload={
+                        "parent_node_id": parent_id,
+                        "parent_boundary_id": boundary_id,
+                        "candidate_id": candidate.candidate_id,
+                        "candidate_boundary_id": candidate.candidate_boundary_id,
+                        "boundary_source": candidate.candidate_source,
+                        "text_payload_included": False,
+                    },
+                )
+            )
+
+    diagnostics = {
+        "schema_version": TEXT_AREA_ROOT_PARENT_CHILD_PLAN_VERSION,
+        "phase": "phase2_text_area_graph_production",
+        "text_payload_free_topology": True,
+        "root_node_count": len(root_nodes),
+        "normalized_root_group_count": len(root_nodes),
+        "root_normalized_container_count": sum(len(ids) for ids in root_container_ids_by_root_id.values()),
+        "root_demoted_background_candidate_count": len(demoted_root_container_ids),
+        "parent_boundary_candidate_count": len(parent_boundary_candidates),
+        "parent_node_count": len(parent_nodes),
+        "child_evidence_slot_count": len(child_slots),
+        "excluded_inventory_count": len(excluded_inventory),
+        "graph_blocker_count": len(graph_blockers),
+        "source_evidence_payload_count": len(source_payloads),
+        "parent_boundary_source_counts": _text_area_graph_parent_source_counts(parent_nodes),
+        "parent_boundary_candidate_state_counts": _text_area_graph_candidate_state_counts(parent_boundary_candidates),
+        "blocker_counts": _text_area_graph_blocker_counts(graph_blockers),
+        "accepted_parent_boundary_requires_explicit_evidence": True,
+        "single_container_bbox_parent_claims_created": 0,
+        "production_topology_forbidden_inputs": [
+            "task0_ledger",
+            "ocr_payload_text",
+            "translated_payload_text",
+            "downstream_graph_output",
+            "cleanup_render_metadata",
+            "route_retry_recovery_state",
+        ],
+    }
+    return TextAreaRootParentChildPlan(
+        page_id=page_id,
+        root_nodes=root_nodes,
+        parent_boundary_candidates=parent_boundary_candidates,
+        parent_nodes=parent_nodes,
+        child_evidence_slots=child_slots,
+        excluded_inventory=excluded_inventory,
+        graph_blockers=graph_blockers,
+        source_evidence_payloads=source_payloads,
+        diagnostics=diagnostics,
+    )
+
+
+def _text_area_graph_normalized_root_groups(
+    workflow_containers: Sequence[TextAreaContainer | Mapping[str, Any]],
+    *,
+    image_size: Tuple[int, int] = (1, 1),
+) -> Tuple[List[Dict[str, Any]], List[TextAreaContainer | Mapping[str, Any]]]:
+    """Normalize workflow root evidence before parent topology is built."""
+
+    speech_evidence_ids: set[str] = set()
+    for container in workflow_containers:
+        if _text_area_graph_semantic_role(container) != SEMANTIC_KIND_SPEECH:
+            continue
+        speech_evidence_ids.update(_text_area_graph_root_evidence_ids(container))
+
+    demoted: List[TextAreaContainer | Mapping[str, Any]] = []
+    active: List[TextAreaContainer | Mapping[str, Any]] = []
+    for container in workflow_containers:
+        if (
+            _text_area_graph_is_deterministic_background_root(container)
+            and bool(_text_area_graph_root_evidence_ids(container) & speech_evidence_ids)
+        ):
+            demoted.append(container)
+        else:
+            active.append(container)
+
+    if not active:
+        return [], demoted
+
+    parents = list(range(len(active)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(first: int, second: int) -> None:
+        first_root, second_root = find(first), find(second)
+        if first_root != second_root:
+            parents[second_root] = first_root
+
+    for first_index in range(len(active)):
+        for second_index in range(first_index + 1, len(active)):
+            if _text_area_graph_workflow_roots_should_merge(active[first_index], active[second_index]):
+                union(first_index, second_index)
+
+    grouped_indexes: Dict[int, List[int]] = {}
+    for index in range(len(active)):
+        grouped_indexes.setdefault(find(index), []).append(index)
+
+    groups: List[Dict[str, Any]] = []
+    for indexes in grouped_indexes.values():
+        members = [active[index] for index in sorted(indexes)]
+        if not members:
+            continue
+        root_bbox, root_bbox_reasons = _text_area_graph_physical_root_bbox(
+            members,
+            active_containers=active,
+            image_size=image_size,
+        )
+        role = _text_area_graph_semantic_role(members[0])
+        reasons: List[str] = []
+        source_ids: List[str] = []
+        support_ids: List[str] = []
+        for member in members:
+            reasons.extend(_text_area_graph_reason_codes(member))
+            source_ids.extend(_text_area_graph_container_source_ids(member))
+            support_ids.extend(_text_area_graph_support_geometry_ids(member))
+        if len(members) > 1:
+            reasons.append("text_area_plan:phase2_merged_workflow_root_fragments")
+        reasons.extend(root_bbox_reasons)
+        groups.append(
+            {
+                "containers": members,
+                "semantic_role": role,
+                "bbox": root_bbox,
+                "reason_codes": _text_area_graph_unique_strings(reasons),
+                "source_evidence_ids": _text_area_graph_unique_strings(source_ids),
+                "support_geometry_ids": _text_area_graph_unique_strings(support_ids),
+            }
+        )
+    return groups, demoted
+
+
+def _text_area_graph_physical_root_bbox(
+    members: Sequence[TextAreaContainer | Mapping[str, Any]],
+    *,
+    active_containers: Sequence[TextAreaContainer | Mapping[str, Any]],
+    image_size: Tuple[int, int] = (1, 1),
+) -> Tuple[List[int], List[str]]:
+    member_bboxes = [_text_area_graph_container_bbox(member) for member in members]
+    physical_bboxes = list(member_bboxes)
+    group_ids = {_text_area_graph_container_id(member) for member in members}
+    added_text_unit_geometry = False
+    for member in members:
+        for bbox in _text_area_graph_owned_text_unit_physical_bboxes(
+            member,
+            active_containers=active_containers,
+            group_container_ids=group_ids,
+        ):
+            physical_bboxes.append(bbox)
+            added_text_unit_geometry = True
+    root_bbox = _text_area_graph_union_xywh(physical_bboxes)
+    if not root_bbox:
+        return [], []
+    if image_size != (1, 1):
+        root_bbox = _normalize_xywh(root_bbox, image_size)
+    reasons: List[str] = []
+    if added_text_unit_geometry and root_bbox != _text_area_graph_union_xywh(member_bboxes):
+        reasons.append("text_area_plan:phase2_root_physical_region_from_text_unit_geometry")
+    return root_bbox, reasons
+
+
+def _text_area_graph_owned_text_unit_physical_bboxes(
+    container: TextAreaContainer | Mapping[str, Any],
+    *,
+    active_containers: Sequence[TextAreaContainer | Mapping[str, Any]],
+    group_container_ids: set[str],
+) -> List[List[int]]:
+    role_evidence = _container_semantic_role_evidence(container)
+    entries = role_evidence.get("text_unit_evidence_bboxes") or []
+    if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+        return []
+    preferred_classes = _text_area_graph_root_text_unit_classes(container)
+    if not preferred_classes:
+        return []
+    output: List[List[int]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        class_name = str(entry.get("class_name") or "")
+        if class_name not in preferred_classes:
+            continue
+        bbox = _semantic_unit_bbox_from_evidence(entry)
+        if not bbox:
+            continue
+        if not _text_area_graph_container_can_claim_root_text_unit(container, bbox):
+            continue
+        if _text_area_graph_text_unit_better_owned_outside_group(
+            bbox,
+            container,
+            active_containers=active_containers,
+            group_container_ids=group_container_ids,
+        ):
+            continue
+        key = tuple(bbox)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(bbox)
+    return output
+
+
+def _text_area_graph_root_text_unit_classes(container: TextAreaContainer | Mapping[str, Any]) -> set[str]:
+    role = _text_area_graph_semantic_role(container)
+    if role == SEMANTIC_KIND_SPEECH:
+        return {"text_bubble"}
+    if role in {SEMANTIC_KIND_BACKGROUND_NARRATION, SEMANTIC_KIND_CAPTION}:
+        return {"text_free", "text_bubble"}
+    return set()
+
+
+def _text_area_graph_container_can_claim_root_text_unit(
+    container: TextAreaContainer | Mapping[str, Any],
+    bbox: Sequence[Any],
+) -> bool:
+    container_bbox = _text_area_graph_container_bbox(container)
+    return (
+        _inside_ratio_xywh(bbox, container_bbox) >= 0.25
+        or _text_area_graph_bbox_center_inside_xywh(bbox, container_bbox)
+    )
+
+
+def _text_area_graph_text_unit_better_owned_outside_group(
+    bbox: Sequence[Any],
+    container: TextAreaContainer | Mapping[str, Any],
+    *,
+    active_containers: Sequence[TextAreaContainer | Mapping[str, Any]],
+    group_container_ids: set[str],
+) -> bool:
+    owner_score = _text_area_graph_root_text_unit_owner_score(container, bbox)
+    if owner_score <= 0.0:
+        return True
+    owner_id = _text_area_graph_container_id(container)
+    owner_role = _text_area_graph_semantic_role(container)
+    for other in active_containers:
+        other_id = _text_area_graph_container_id(other)
+        if not other_id or other_id == owner_id or other_id in group_container_ids:
+            continue
+        if _text_area_graph_semantic_role(other) != owner_role:
+            continue
+        other_score = _text_area_graph_root_text_unit_owner_score(other, bbox)
+        if other_score > owner_score + 0.05:
+            return True
+    return False
+
+
+def _text_area_graph_root_text_unit_owner_score(
+    container: TextAreaContainer | Mapping[str, Any],
+    bbox: Sequence[Any],
+) -> float:
+    container_bbox = _text_area_graph_container_bbox(container)
+    overlap = _inside_ratio_xywh(bbox, container_bbox)
+    center_bonus = 1.0 if _text_area_graph_bbox_center_inside_xywh(bbox, container_bbox) else 0.0
+    return center_bonus + overlap
+
+
+def _text_area_graph_bbox_center_inside_xywh(inner: Sequence[Any], outer: Sequence[Any]) -> bool:
+    ix, iy, iw, ih = _coerce_xywh(inner)
+    ox, oy, ow, oh = _coerce_xywh(outer)
+    if iw <= 0 or ih <= 0 or ow <= 0 or oh <= 0:
+        return False
+    cx = ix + iw / 2.0
+    cy = iy + ih / 2.0
+    return float(ox) <= cx <= float(ox + ow) and float(oy) <= cy <= float(oy + oh)
+
+
+def _text_area_graph_is_deterministic_background_root(container: TextAreaContainer | Mapping[str, Any]) -> bool:
+    role = _text_area_graph_semantic_role(container)
+    if role not in {SEMANTIC_KIND_BACKGROUND_NARRATION, SEMANTIC_KIND_CAPTION}:
+        return False
+    evidence = _container_semantic_role_evidence(container)
+    reasons = _text_area_graph_reason_codes(container)
+    authority_kind = str(evidence.get("authority_evidence_kind") or "")
+    return (
+        "typed_deterministic_side_narration_background_authority" in authority_kind
+        or "text_area_plan:deterministic_vertical_side_caption_search" in reasons
+        or "text_area_plan:vertical_side_caption_authorized_columns_grouped_root" in reasons
+    )
+
+
+def _text_area_graph_root_evidence_ids(container: TextAreaContainer | Mapping[str, Any]) -> set[str]:
+    evidence_ids = set(_text_area_graph_container_source_ids(container))
+    evidence_ids.update(_text_area_graph_support_geometry_ids(container))
+    role_evidence = _container_semantic_role_evidence(container)
+    for key in ("text_unit_evidence_bboxes", "model_evidence_bboxes", "speech_mask_polygons"):
+        entries = role_evidence.get(key)
+        if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+            continue
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            evidence_id = str(entry.get("evidence_id") or entry.get("model_evidence_id") or "")
+            if evidence_id:
+                evidence_ids.add(evidence_id)
+    return {item for item in evidence_ids if item}
+
+
+def _text_area_graph_workflow_roots_should_merge(
+    first: TextAreaContainer | Mapping[str, Any],
+    second: TextAreaContainer | Mapping[str, Any],
+) -> bool:
+    first_role = _text_area_graph_semantic_role(first)
+    second_role = _text_area_graph_semantic_role(second)
+    if first_role != second_role:
+        return False
+    if first_role != SEMANTIC_KIND_SPEECH:
+        return False
+    first_bbox = _text_area_graph_container_bbox(first)
+    second_bbox = _text_area_graph_container_bbox(second)
+    metrics = _text_area_graph_axis_overlap_metrics(first_bbox, second_bbox)
+    if not metrics:
+        return False
+    shared_evidence = bool(_text_area_graph_root_evidence_ids(first) & _text_area_graph_root_evidence_ids(second))
+    if metrics["intersection_min_ratio"] >= 0.55:
+        return True
+    if shared_evidence and metrics["intersection_min_ratio"] >= 0.12:
+        return True
+    if metrics["x_overlap_min_ratio"] >= 0.55 and metrics["y_overlap"] > 0:
+        return True
+    if (
+        metrics["y_overlap_min_ratio"] >= 0.58
+        and metrics["x_overlap_min_ratio"] >= 0.08
+        and not _text_area_graph_has_text_unit_evidence(first)
+        and not _text_area_graph_has_text_unit_evidence(second)
+    ):
+        return True
+    if shared_evidence and metrics["x_overlap_min_ratio"] >= 0.55 and metrics["y_gap"] <= metrics["small_axis_gap"]:
+        return True
+    return False
+
+
+def _text_area_graph_has_text_unit_evidence(container: TextAreaContainer | Mapping[str, Any]) -> bool:
+    entries = _container_semantic_role_evidence(container).get("text_unit_evidence_bboxes") or []
+    return isinstance(entries, Sequence) and not isinstance(entries, (str, bytes)) and bool(entries)
+
+
+def _text_area_graph_axis_overlap_metrics(
+    first_bbox: Sequence[Any],
+    second_bbox: Sequence[Any],
+) -> Dict[str, float]:
+    ax, ay, aw, ah = _coerce_xywh(first_bbox)
+    bx, by, bw, bh = _coerce_xywh(second_bbox)
+    if aw <= 0 or ah <= 0 or bw <= 0 or bh <= 0:
+        return {}
+    ax1, ay1 = ax + aw, ay + ah
+    bx1, by1 = bx + bw, by + bh
+    x_overlap = max(0, min(ax1, bx1) - max(ax, bx))
+    y_overlap = max(0, min(ay1, by1) - max(ay, by))
+    x_gap = max(0, max(ax, bx) - min(ax1, bx1))
+    y_gap = max(0, max(ay, by) - min(ay1, by1))
+    min_width = float(max(1, min(aw, bw)))
+    min_height = float(max(1, min(ah, bh)))
+    inter_area = float(x_overlap * y_overlap)
+    min_area = float(max(1, min(aw * ah, bw * bh)))
+    return {
+        "x_overlap": float(x_overlap),
+        "y_overlap": float(y_overlap),
+        "x_gap": float(x_gap),
+        "y_gap": float(y_gap),
+        "x_overlap_min_ratio": float(x_overlap) / min_width,
+        "y_overlap_min_ratio": float(y_overlap) / min_height,
+        "intersection_min_ratio": inter_area / min_area,
+        "small_axis_gap": max(4.0, min(min_width, min_height) * 0.04),
+    }
+
+
+def _text_area_graph_plan_page_id(plan: "TextAreaPlan | Mapping[str, Any]") -> str:
+    if isinstance(plan, Mapping):
+        return str(plan.get("page_id") or "")
+    return str(getattr(plan, "page_id", "") or "")
+
+
+def _text_area_graph_plan_containers(plan: "TextAreaPlan | Mapping[str, Any]") -> List[TextAreaContainer | Mapping[str, Any]]:
+    if isinstance(plan, Mapping):
+        return [item for item in plan.get("containers", []) or [] if isinstance(item, Mapping)]
+    return [item for item in getattr(plan, "containers", []) or []]
+
+
+def _text_area_graph_plan_image_size(plan: "TextAreaPlan | Mapping[str, Any]") -> Tuple[int, int]:
+    raw = plan.get("image_size") if isinstance(plan, Mapping) else getattr(plan, "image_size", None)
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)) and len(raw) >= 2:
+        try:
+            return max(1, int(raw[0])), max(1, int(raw[1]))
+        except Exception:
+            pass
+    return 1, 1
+
+
+def _text_area_graph_plan_luma_image(plan: "TextAreaPlan | Mapping[str, Any]") -> Any:
+    image_path = plan.get("image_path") if isinstance(plan, Mapping) else getattr(plan, "image_path", "")
+    if not image_path:
+        return None
+    return _load_luma_image(str(image_path))
+
+
+def _text_area_graph_node_id(prefix: str, *parts: Any) -> str:
+    tokens = [_text_area_graph_token(part) for part in parts if str(part)]
+    return "_".join([prefix] + tokens)
+
+
+def _text_area_graph_token(value: Any) -> str:
+    text = str(value or "")
+    output = []
+    for char in text:
+        if char.isalnum() or char in {"_", "-"}:
+            output.append(char)
+        else:
+            output.append("_")
+    token = "".join(output).strip("_")
+    return token or "unknown"
+
+
+def _text_area_graph_container_id(container: TextAreaContainer | Mapping[str, Any]) -> str:
+    return str(_container_value(container, "container_id", "") or "")
+
+
+def _text_area_graph_container_bbox(container: TextAreaContainer | Mapping[str, Any]) -> List[int]:
+    return list(_container_value(container, "bbox", []) or [])
+
+
+def _text_area_graph_container_source_ids(container: TextAreaContainer | Mapping[str, Any]) -> List[str]:
+    role_evidence = _container_semantic_role_evidence(container)
+    semantic_ids = [
+        str(record.get("evidence_id") or "")
+        for record in _semantic_evidence_records(role_evidence)
+        if str(record.get("evidence_id") or "")
+    ]
+    return _text_area_graph_unique_strings(
+        _container_list_value(container, "source_model_ids")
+        + _container_list_value(container, "semantic_evidence_ids")
+        + semantic_ids
+    )
+
+
+def _text_area_graph_support_geometry_ids(container: TextAreaContainer | Mapping[str, Any]) -> List[str]:
+    output: List[str] = []
+    role_evidence = _container_semantic_role_evidence(container)
+    for key in (
+        "text_unit_evidence_bboxes",
+        "speech_mask_polygons",
+        "component_evidence_ids",
+        "assigned_component_ids",
+        "assigned_region_ids",
+    ):
+        value = role_evidence.get(key)
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            for entry in value:
+                if isinstance(entry, Mapping):
+                    evidence_id = str(entry.get("evidence_id") or entry.get("component_id") or entry.get("region_id") or "")
+                    if evidence_id:
+                        output.append(evidence_id)
+                elif str(entry):
+                    output.append(str(entry))
+        elif value:
+            output.append(str(value))
+    return _text_area_graph_unique_strings(output)
+
+
+def _text_area_graph_reason_codes(container: TextAreaContainer | Mapping[str, Any]) -> List[str]:
+    role_evidence = _container_semantic_role_evidence(container)
+    return _text_area_graph_unique_strings(
+        _container_list_value(container, "evidence_reason_codes")
+        + _container_list_value(container, "conflict_flags")
+        + _semantic_role_values(role_evidence, "typed_authority_reason_codes")
+    )
+
+
+def _text_area_graph_is_workflow_container(container: TextAreaContainer | Mapping[str, Any]) -> bool:
+    auth = str(
+        _container_value(container, "semantic_authorization_state", "")
+        or _container_value(container, "cleanup_authorization", "")
+        or ""
+    )
+    route = str(_container_value(container, "route_intent", "") or "")
+    ctype = str(_container_value(container, "container_type", "") or "")
+    if _component_auth_family(auth) == "cleanup":
+        return True
+    if auth and _component_auth_family(auth) != "cleanup":
+        return False
+    if route in {ROUTE_TRANSLATE_SPEECH, ROUTE_TRANSLATE_CAPTION} and ctype in {CONTAINER_SPEECH, CONTAINER_CAPTION}:
+        return True
+    return False
+
+
+def _text_area_graph_is_excluded_container(container: TextAreaContainer | Mapping[str, Any]) -> bool:
+    auth = str(
+        _container_value(container, "semantic_authorization_state", "")
+        or _container_value(container, "cleanup_authorization", "")
+        or ""
+    )
+    route = str(_container_value(container, "route_intent", "") or "")
+    ctype = str(_container_value(container, "container_type", "") or "")
+    return (
+        _component_auth_family(auth) in {"protected", "outside"}
+        or route == ROUTE_PRESERVE_SFX
+        or ctype == CONTAINER_SFX
+        or bool(_container_value(container, "must_not_mutate", False))
+    )
+
+
+def _text_area_graph_exclusion_kind(container: TextAreaContainer | Mapping[str, Any]) -> str:
+    auth = str(
+        _container_value(container, "semantic_authorization_state", "")
+        or _container_value(container, "cleanup_authorization", "")
+        or ""
+    )
+    if auth == AUTH_PROTECT_ART_OR_NON_TEXT:
+        return "art_or_non_text"
+    if auth == AUTH_OUTSIDE_CLEANUP_SCOPE:
+        return "outside_cleanup_scope"
+    if auth == AUTH_AMBIGUOUS_COMPONENT_OWNER:
+        return "ambiguous_component_owner"
+    return "sfx_decorative_or_protected"
+
+
+def _text_area_graph_semantic_role(container: TextAreaContainer | Mapping[str, Any]) -> str:
+    auth = str(
+        _container_value(container, "semantic_authorization_state", "")
+        or _container_value(container, "cleanup_authorization", "")
+        or ""
+    )
+    ctype = str(_container_value(container, "container_type", "") or "")
+    if auth == AUTH_CLEANUP_TRANSLATE_SPEECH or ctype == CONTAINER_SPEECH:
+        return SEMANTIC_KIND_SPEECH
+    if auth == AUTH_CLEANUP_TRANSLATE_CAPTION:
+        return SEMANTIC_KIND_CAPTION
+    if auth == AUTH_CLEANUP_TRANSLATE_BACKGROUND or ctype == CONTAINER_CAPTION:
+        return SEMANTIC_KIND_BACKGROUND_NARRATION
+    return SEMANTIC_KIND_UNKNOWN
+
+
+def _text_area_graph_parent_boundary_entries(
+    container: TextAreaContainer | Mapping[str, Any],
+    *,
+    image_size: Tuple[int, int] = (1, 1),
+    luma_image: Any = None,
+) -> List[Dict[str, Any]]:
+    if isinstance(container, TextAreaContainer):
+        entries = _semantic_unit_evidence_bboxes_for_container(container)
+    else:
+        entries = _text_area_graph_mapping_parent_boundary_entries(container)
+    if not entries:
+        entries = _text_area_graph_visual_parent_boundary_entries(
+            container,
+            image_size=image_size,
+            luma_image=luma_image,
+        )
+    output: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        bbox = _text_area_graph_bbox_from_entry(entry)
+        if not bbox:
+            continue
+        evidence_id = str(entry.get("evidence_id") or "")
+        key = evidence_id or ",".join(str(item) for item in bbox)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(
+            {
+                "evidence_id": evidence_id,
+                "class_name": str(entry.get("class_name") or ""),
+                "bbox": bbox,
+                "boundary_source": str(entry.get("boundary_source") or TEXT_AREA_GRAPH_PARENT_SOURCE_TEXT_UNIT),
+                "container_overlap_ratio": float(entry.get("container_overlap_ratio") or 0.0),
+                "is_explicit_parent_boundary_evidence": bool(
+                    entry.get("is_explicit_parent_boundary_evidence", True)
+                ),
+            }
+        )
+    return output
+
+
+def _text_area_graph_visual_parent_boundary_entries(
+    container: TextAreaContainer | Mapping[str, Any],
+    *,
+    image_size: Tuple[int, int],
+    luma_image: Any,
+) -> List[Dict[str, Any]]:
+    if luma_image is None or np is None or cv2 is None:
+        return []
+    if not _text_area_graph_visual_parent_provider_allowed(container):
+        return []
+    root_bbox = _text_area_graph_container_bbox(container)
+    role = _text_area_graph_semantic_role(container)
+    island_bboxes = _text_area_graph_root_local_visual_text_island_bboxes(
+        luma_image=luma_image,
+        root_bbox=root_bbox,
+        image_size=image_size,
+    )
+    island_bboxes = _text_area_graph_filter_visual_parent_islands(root_bbox, island_bboxes)
+    if not island_bboxes:
+        return []
+    container_id = _text_area_graph_container_id(container)
+    class_name = "text_bubble" if role == SEMANTIC_KIND_SPEECH else "text_free"
+    explicit = len(island_bboxes) == 1
+    entries: List[Dict[str, Any]] = []
+    for index, bbox in enumerate(island_bboxes):
+        entries.append(
+            {
+                "bbox": bbox,
+                "evidence_id": f"{container_id}_visual_text_island_{index:02d}" if container_id else f"visual_text_island_{index:02d}",
+                "class_name": class_name,
+                "boundary_source": TEXT_AREA_GRAPH_PARENT_SOURCE_ROOT_VISUAL_TEXT_ISLAND,
+                "container_overlap_ratio": 1.0,
+                "is_explicit_parent_boundary_evidence": explicit,
+            }
+        )
+    return entries
+
+
+def _text_area_graph_filter_visual_parent_islands(
+    root_bbox: Sequence[Any],
+    island_bboxes: Sequence[Sequence[Any]],
+) -> List[List[int]]:
+    rx, ry, rw, rh = _coerce_xywh(root_bbox)
+    if rw <= 0 or rh <= 0:
+        return []
+    root_area = float(max(1, rw * rh))
+    filtered: List[List[int]] = []
+    for raw_bbox in island_bboxes:
+        bbox = _text_area_graph_bbox_from_entry({"bbox": raw_bbox})
+        if not bbox:
+            continue
+        x, y, w, h = _coerce_xywh(bbox)
+        area_ratio = (w * h) / root_area
+        width_ratio = w / float(max(1, rw))
+        height_ratio = h / float(max(1, rh))
+        touches_vertical_border = x <= rx + 1 or x + w >= rx + rw - 1
+        touches_horizontal_border = y <= ry + 1 or y + h >= ry + rh - 1
+        if area_ratio < 0.018:
+            continue
+        if h < max(28, int(round(rh * 0.12))):
+            continue
+        if touches_vertical_border and width_ratio < 0.18:
+            continue
+        if touches_horizontal_border and height_ratio < 0.18:
+            continue
+        filtered.append(bbox)
+    return filtered
+
+
+def _text_area_graph_visual_parent_provider_allowed(container: TextAreaContainer | Mapping[str, Any]) -> bool:
+    if bool(_container_value(container, "must_not_mutate", False)):
+        return False
+    ctype = str(_container_value(container, "container_type", "") or "")
+    if ctype != CONTAINER_SPEECH:
+        return False
+    auth = str(
+        _container_value(container, "semantic_authorization_state", "")
+        or _container_value(container, "cleanup_authorization", "")
+        or ""
+    )
+    route = str(_container_value(container, "route_intent", "") or "")
+    if auth == AUTH_CLEANUP_TRANSLATE_SPEECH:
+        return True
+    return route == ROUTE_TRANSLATE_SPEECH
+
+
+def _text_area_graph_root_local_visual_text_island_bboxes(
+    *,
+    luma_image: Any,
+    root_bbox: Sequence[Any],
+    image_size: Tuple[int, int],
+) -> List[List[int]]:
+    root = _normalize_xywh(root_bbox, image_size)
+    rx, ry, rw, rh = _coerce_xywh(root)
+    if rw <= 4 or rh <= 4:
+        return []
+    try:
+        crop = luma_image.crop((rx, ry, rx + rw, ry + rh)).convert("L")
+        arr = np.asarray(crop)
+        crop_h, crop_w = int(arr.shape[0]), int(arr.shape[1])
+        if crop_w <= 4 or crop_h <= 4:
+            return []
+        mean_luma = float(arr.mean())
+        dark_mask = arr <= (150 if mean_luma >= 135.0 else 112)
+        if float(dark_mask.sum()) / float(max(1, crop_w * crop_h)) < 0.0015 and mean_luma <= 160.0:
+            mask = (arr >= 190).astype("uint8")
+        else:
+            mask = dark_mask.astype("uint8")
+        _count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, 8)
+    except Exception:
+        return []
+
+    root_area = max(1, crop_w * crop_h)
+    components: List[Dict[str, Any]] = []
+    min_area = max(4, int(root_area * 0.00008))
+    max_area = max(140, int(root_area * 0.16))
+    for label in range(1, int(stats.shape[0])):
+        cx, cy, cw, ch, area = [int(value) for value in stats[label][:5]]
+        if area < min_area or area > max_area:
+            continue
+        if cw < 2 or ch < 2:
+            continue
+        density = area / float(max(1, cw * ch))
+        if density < 0.035:
+            continue
+        span_w = cw / float(max(1, crop_w))
+        span_h = ch / float(max(1, crop_h))
+        touches_border = cx <= 1 or cy <= 1 or cx + cw >= crop_w - 1 or cy + ch >= crop_h - 1
+        if span_w >= 0.72 and span_h >= 0.72:
+            continue
+        if touches_border and (span_w >= 0.48 or span_h >= 0.48):
+            continue
+        if span_w >= 0.62 and ch <= max(4, int(crop_h * 0.12)):
+            continue
+        if span_h >= 0.78 and cw <= max(4, int(crop_w * 0.08)):
+            continue
+        page_bbox = [rx + cx, ry + cy, cw, ch]
+        components.append(
+            {
+                "bbox": page_bbox,
+                "center_x": rx + cx + cw / 2.0,
+                "center_y": ry + cy + ch / 2.0,
+                "width": cw,
+                "height": ch,
+                "area": area,
+            }
+        )
+    if not components:
+        return []
+
+    median_width = _median_float([float(item["width"]) for item in components]) or 1.0
+    median_height = _median_float([float(item["height"]) for item in components]) or 1.0
+    column_threshold = max(8.0, median_width * 2.4, rw * 0.025)
+    columns: List[Dict[str, Any]] = []
+    for component in sorted(components, key=lambda item: float(item["center_x"]), reverse=True):
+        placed = False
+        for column in columns:
+            if abs(float(component["center_x"]) - float(column["center_x"])) <= column_threshold:
+                column["items"].append(component)
+                centers = [float(item["center_x"]) for item in column["items"]]
+                column["center_x"] = sum(centers) / float(len(centers))
+                placed = True
+                break
+        if not placed:
+            columns.append({"center_x": float(component["center_x"]), "items": [component]})
+
+    segment_gap_y = max(median_height * 2.8, rh * 0.10)
+    segments: List[Dict[str, Any]] = []
+    for column_index, column in enumerate(columns):
+        items = sorted(list(column.get("items") or []), key=lambda item: _coerce_xywh(item["bbox"])[1])
+        if not items:
+            continue
+        current = [items[0]]
+        for item in items[1:]:
+            _px, py, _pw, ph = _coerce_xywh(current[-1]["bbox"])
+            _ix, iy, _iw, _ih = _coerce_xywh(item["bbox"])
+            y_gap = iy - (py + ph)
+            if y_gap > segment_gap_y:
+                segments.append(_text_area_graph_segment_from_components(current, column_index))
+                current = [item]
+            else:
+                current.append(item)
+        if current:
+            segments.append(_text_area_graph_segment_from_components(current, column_index))
+    if not segments:
+        return []
+
+    merge_x_gap = max(median_width * 3.0, rw * 0.12)
+    merge_y_gap = max(median_height * 4.0, rh * 0.08)
+    parents = list(range(len(segments)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parents[rb] = ra
+
+    for left_index in range(len(segments)):
+        for right_index in range(left_index + 1, len(segments)):
+            if _text_area_graph_segments_should_merge(
+                segments[left_index],
+                segments[right_index],
+                max_x_gap=merge_x_gap,
+                max_y_gap=merge_y_gap,
+            ):
+                union(left_index, right_index)
+
+    grouped: Dict[int, List[Dict[str, Any]]] = {}
+    for index, segment in enumerate(segments):
+        grouped.setdefault(find(index), []).append(segment)
+
+    root_x1, root_y1 = rx + rw, ry + rh
+    bboxes: List[List[int]] = []
+    for group_segments in grouped.values():
+        component_bboxes: List[List[int]] = []
+        for segment in group_segments:
+            for component in segment.get("components") or []:
+                bbox = component.get("bbox") if isinstance(component, Mapping) else None
+                if isinstance(bbox, Sequence) and not isinstance(bbox, (str, bytes)):
+                    component_bboxes.append(list(bbox))
+        if not component_bboxes:
+            continue
+        bbox = _text_area_graph_union_xywh(component_bboxes)
+        if not bbox:
+            continue
+        pad_x = max(2, int(round(median_width * 0.75)))
+        pad_y = max(2, int(round(median_height * 0.75)))
+        x, y, w, h = _coerce_xywh(bbox)
+        x0 = max(rx, x - pad_x)
+        y0 = max(ry, y - pad_y)
+        x1 = min(root_x1, x + w + pad_x)
+        y1 = min(root_y1, y + h + pad_y)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        candidate = [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
+        coverage_w = candidate[2] / float(max(1, rw))
+        coverage_h = candidate[3] / float(max(1, rh))
+        if coverage_w >= 0.84 and coverage_h >= 0.84:
+            continue
+        bboxes.append(candidate)
+
+    bboxes.sort(key=lambda item: (-(item[0] + item[2] / 2.0), item[1], item[2] * item[3]))
+    deduped: List[List[int]] = []
+    for bbox in bboxes:
+        if any(_intersection_ratio_xywh(bbox, existing) >= 0.72 for existing in deduped):
+            continue
+        deduped.append(bbox)
+    return deduped
+
+
+def _text_area_graph_segment_from_components(
+    components: Sequence[Mapping[str, Any]],
+    column_index: int,
+) -> Dict[str, Any]:
+    bboxes = [list(item.get("bbox") or []) for item in components if isinstance(item.get("bbox"), Sequence)]
+    bbox = _text_area_graph_union_xywh(bboxes)
+    return {
+        "bbox": bbox,
+        "components": list(components),
+        "column_index": column_index,
+    }
+
+
+def _text_area_graph_segments_should_merge(
+    first: Mapping[str, Any],
+    second: Mapping[str, Any],
+    *,
+    max_x_gap: float,
+    max_y_gap: float,
+) -> bool:
+    ax, ay, aw, ah = _coerce_xywh(first.get("bbox") or [])
+    bx, by, bw, bh = _coerce_xywh(second.get("bbox") or [])
+    if aw <= 0 or ah <= 0 or bw <= 0 or bh <= 0:
+        return False
+    ax1, ay1 = ax + aw, ay + ah
+    bx1, by1 = bx + bw, by + bh
+    x_gap = max(0, max(ax, bx) - min(ax1, bx1))
+    if x_gap > max_x_gap:
+        return False
+    y_overlap = max(0, min(ay1, by1) - max(ay, by))
+    y_overlap_ratio = y_overlap / float(max(1, min(ah, bh)))
+    y_gap = max(0, max(ay, by) - min(ay1, by1))
+    return y_overlap_ratio >= 0.25 or y_gap <= max_y_gap
+
+
+def _text_area_graph_union_xywh(bboxes: Sequence[Sequence[Any]]) -> List[int]:
+    normalized: List[Tuple[int, int, int, int]] = []
+    for bbox in bboxes:
+        x, y, w, h = _coerce_xywh(bbox)
+        if w <= 0 or h <= 0:
+            continue
+        normalized.append((x, y, x + w, y + h))
+    if not normalized:
+        return []
+    x0 = min(item[0] for item in normalized)
+    y0 = min(item[1] for item in normalized)
+    x1 = max(item[2] for item in normalized)
+    y1 = max(item[3] for item in normalized)
+    return [int(x0), int(y0), max(1, int(x1 - x0)), max(1, int(y1 - y0))]
+
+
+def _median_float(values: Sequence[float]) -> float:
+    clean = sorted(float(value) for value in values if value is not None)
+    if not clean:
+        return 0.0
+    mid = len(clean) // 2
+    if len(clean) % 2:
+        return clean[mid]
+    return (clean[mid - 1] + clean[mid]) / 2.0
+
+
+def _text_area_graph_mapping_parent_boundary_entries(container: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    role_evidence = _container_semantic_role_evidence(container)
+    entries = role_evidence.get("text_unit_evidence_bboxes") or []
+    if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+        return []
+    auth = str(
+        _container_value(container, "semantic_authorization_state", "")
+        or _container_value(container, "cleanup_authorization", "")
+        or ""
+    )
+    if auth == AUTH_CLEANUP_TRANSLATE_SPEECH:
+        preferred_classes = {"text_bubble"}
+    elif auth in {AUTH_CLEANUP_TRANSLATE_BACKGROUND, AUTH_CLEANUP_TRANSLATE_CAPTION}:
+        preferred_classes = {"text_free", "text_bubble"}
+    else:
+        preferred_classes = set()
+    output: List[Dict[str, Any]] = []
+    container_bbox = _text_area_graph_container_bbox(container)
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        class_name = str(entry.get("class_name") or "")
+        if preferred_classes and class_name not in preferred_classes:
+            continue
+        bbox = _semantic_unit_bbox_from_evidence(entry)
+        if not bbox:
+            continue
+        overlap_ratio = _inside_ratio_xywh(bbox, container_bbox)
+        if overlap_ratio < 0.25:
+            continue
+        output.append(
+            {
+                "bbox": bbox,
+                "evidence_id": str(entry.get("evidence_id") or ""),
+                "class_name": class_name,
+                "container_overlap_ratio": round(overlap_ratio, 6),
+                "is_explicit_parent_boundary_evidence": bool(
+                    entry.get("is_explicit_parent_boundary_evidence", True)
+                ),
+            }
+        )
+    return output
+
+
+def _text_area_graph_parent_boundary_key(entry: Mapping[str, Any]) -> str:
+    evidence_id = str(entry.get("evidence_id") or "")
+    bbox = _text_area_graph_bbox_from_entry(entry)
+    if evidence_id:
+        return "evidence:{evidence}|bbox:{bbox}".format(
+            evidence=evidence_id,
+            bbox=",".join(str(item) for item in bbox),
+        )
+    return "bbox:" + ",".join(str(item) for item in bbox)
+
+
+def _text_area_graph_bbox_from_entry(entry: Mapping[str, Any]) -> List[int]:
+    bbox = entry.get("bbox")
+    if not isinstance(bbox, Sequence) or isinstance(bbox, (str, bytes)) or len(bbox) < 4:
+        return []
+    try:
+        x, y, w, h = [int(round(float(item or 0))) for item in bbox[:4]]
+    except Exception:
+        return []
+    if w <= 0 or h <= 0:
+        return []
+    return [max(0, x), max(0, y), max(1, w), max(1, h)]
+
+
+def _text_area_graph_container_local_bbox(child_bbox: Sequence[int], container_bbox: Sequence[int]) -> List[int]:
+    x, y, w, h = _coerce_xywh(child_bbox)
+    cx, cy, _, _ = _coerce_xywh(container_bbox)
+    if w <= 0 or h <= 0:
+        return []
+    return [max(0, x - cx), max(0, y - cy), w, h]
+
+
+def _text_area_graph_blocker_counts(blockers: Sequence[TextAreaGraphBlocker]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for blocker in blockers:
+        counts[blocker.blocker_kind] = counts.get(blocker.blocker_kind, 0) + 1
+    return counts
+
+
+def _text_area_graph_candidate_state_counts(candidates: Sequence[TextAreaParentBoundaryCandidate]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for candidate in candidates:
+        state = str(candidate.adjudication_state or "unknown")
+        counts[state] = counts.get(state, 0) + 1
+    return counts
+
+
+def _text_area_graph_parent_source_counts(parent_nodes: Sequence[TextAreaParentNode]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for parent in parent_nodes:
+        source = str(parent.boundary_source or "unknown")
+        counts[source] = counts.get(source, 0) + 1
+    return counts
+
+
+def _text_area_graph_unique_strings(values: Sequence[Any]) -> List[str]:
+    output: List[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        text = str(value or "")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        output.append(text)
+    return output
+
+
 @dataclass
 class TextAreaPlan:
     page_id: str
@@ -470,9 +2060,10 @@ class TextAreaPlan:
     runtime: TextAreaPlanRuntime = field(default_factory=TextAreaPlanRuntime)
     summary: Dict[str, Any] = field(default_factory=dict)
     stage: str = "pre_ocr"
+    root_parent_child_plan: Optional[TextAreaRootParentChildPlan | Mapping[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "page_id": self.page_id,
             "image_path": self.image_path,
             "image_size": list(self.image_size),
@@ -487,6 +2078,9 @@ class TextAreaPlan:
             "summary": dict(self.summary),
             "stage": self.stage,
         }
+        if self.root_parent_child_plan is not None:
+            payload["root_parent_child_plan"] = _root_parent_child_plan_to_dict(self.root_parent_child_plan)
+        return payload
 
 
 @dataclass
@@ -4022,6 +5616,10 @@ def write_text_area_plan_artifacts(
     paths["blocked_text_area_candidates"].write_text(json.dumps(blocked, ensure_ascii=False, indent=2), encoding="utf-8")
     caption_candidates = _caption_localization_candidates_from_plan(plan_dict)
     paths["caption_localization_candidates"].write_text(json.dumps(caption_candidates, ensure_ascii=False, indent=2), encoding="utf-8")
+    graph_plan = plan_dict.get("root_parent_child_plan")
+    if isinstance(graph_plan, Mapping):
+        paths["root_parent_child_plan"] = page_dir / "root_parent_child_plan.json"
+        paths["root_parent_child_plan"].write_text(json.dumps(dict(graph_plan), ensure_ascii=False, indent=2), encoding="utf-8")
     _write_plan_summary(paths["text_area_plan_summary"], plan_dict, scoped_detection_candidates or [], scoped_ocr_candidates or [], fallback_decisions or [], blocked)
     _write_plan_overlay(paths["text_area_plan_overlay"], image_path, plan_dict, scoped_detection_candidates or [])
     return {key: str(path) for key, path in paths.items()}
@@ -4520,6 +6118,13 @@ def _has_speech_authority(route: str, ctype: str, marker: str, role_evidence: Ma
     return _semantic_role_has_state(role_evidence, "cleanup_authority_states", AUTH_CLEANUP_TRANSLATE_SPEECH)
 
 
+def _has_unresolved_ogkalu_speech_risk(marker: str, role_evidence: Mapping[str, Any]) -> bool:
+    role_signals = set(_semantic_role_values(role_evidence, "role_signals"))
+    typed_reasons = set(_semantic_role_values(role_evidence, "typed_authority_reason_codes"))
+    text = " ".join([marker, " ".join(role_signals), " ".join(typed_reasons)]).lower()
+    return UNRESOLVED_OGKALU_SPEECH_RISK_REASON in text
+
+
 def _caption_background_authority_reason(marker: str, role_evidence: Mapping[str, Any]) -> str:
     del marker
     cleanup_states = set(_semantic_role_state_values(role_evidence, "cleanup_authority_states"))
@@ -4693,6 +6298,18 @@ def _adjudicate_text_area_semantic_authorization(
             must_not_mutate=True,
             protection_reason="recognized_sfx_decorative_typed_evidence",
             authorization_explicit=True,
+            reason_codes=adjudication_reason_codes,
+        )
+
+    if _has_unresolved_ogkalu_speech_risk(marker, role_evidence):
+        adjudication_reason_codes.append(f"text_area_plan:{UNRESOLVED_OGKALU_SPEECH_RISK_REASON}")
+        return TextAreaSemanticAdjudication(
+            cleanup_authorization=AUTH_AMBIGUOUS_COMPONENT_OWNER,
+            semantic_authorization_state=AUTH_AMBIGUOUS_COMPONENT_OWNER,
+            semantic_kind=SEMANTIC_KIND_SPEECH,
+            must_not_mutate=False,
+            protection_reason=UNRESOLVED_OGKALU_SPEECH_RISK_REASON,
+            authorization_explicit=False,
             reason_codes=adjudication_reason_codes,
         )
 
@@ -5078,6 +6695,9 @@ def _semantic_unit_evidence_bboxes_for_container(container: TextAreaContainer) -
         bbox = _semantic_unit_bbox_from_evidence(entry)
         if not bbox:
             continue
+        overlap_ratio = _inside_ratio_xywh(bbox, container.bbox)
+        if overlap_ratio < 0.25:
+            continue
         bbox = _semantic_unit_projection_bbox_for_container(container, entry, bbox)
         if not bbox:
             continue
@@ -5090,6 +6710,10 @@ def _semantic_unit_evidence_bboxes_for_container(container: TextAreaContainer) -
                 "bbox": bbox,
                 "evidence_id": str(entry.get("evidence_id") or ""),
                 "class_name": class_name,
+                "container_overlap_ratio": round(overlap_ratio, 6),
+                "is_explicit_parent_boundary_evidence": bool(
+                    entry.get("is_explicit_parent_boundary_evidence", True)
+                ),
             }
         )
     return bboxes
@@ -5259,6 +6883,8 @@ def _finish_plan(plan: TextAreaPlan, started: float) -> TextAreaPlan:
         container = containers_by_id.get(str(scope.container_id or ""))
         if container:
             _copy_container_authorization_to_scope(scope, container)
+    if plan.root_parent_child_plan is None:
+        plan.root_parent_child_plan = build_text_area_root_parent_child_plan(plan)
     for container in plan.containers:
         by_type[container.container_type] = by_type.get(container.container_type, 0) + 1
         by_intent[container.route_intent] = by_intent.get(container.route_intent, 0) + 1
@@ -5283,6 +6909,22 @@ def _finish_plan(plan: TextAreaPlan, started: float) -> TextAreaPlan:
         "fallback_count": len(plan.fallback_reasons),
         "compatibility_mode": plan.runtime.compatibility_mode,
     }
+    if plan.root_parent_child_plan is not None:
+        graph_plan = _root_parent_child_plan_to_dict(plan.root_parent_child_plan)
+        diagnostics = graph_plan.get("diagnostics") if isinstance(graph_plan.get("diagnostics"), Mapping) else {}
+        plan.summary["root_parent_child_plan"] = {
+            "root_node_count": len(graph_plan.get("root_nodes") or []),
+            "parent_boundary_candidate_count": len(graph_plan.get("parent_boundary_candidates") or []),
+            "parent_node_count": len(graph_plan.get("parent_nodes") or []),
+            "child_evidence_slot_count": len(graph_plan.get("child_evidence_slots") or []),
+            "excluded_inventory_count": len(graph_plan.get("excluded_inventory") or []),
+            "graph_blocker_count": len(graph_plan.get("graph_blockers") or []),
+            "source_evidence_payload_count": len(graph_plan.get("source_evidence_payloads") or []),
+            "parent_boundary_candidate_state_counts": dict(
+                diagnostics.get("parent_boundary_candidate_state_counts") or {}
+            ),
+            "blocker_counts": dict(diagnostics.get("blocker_counts") or {}),
+        }
     return plan
 
 
@@ -5330,6 +6972,8 @@ def _container_from_fused(
     if not container_id:
         return None
     fused_type = str(fused.get("fused_container_type") or "")
+    if fused_type == "text_evidence_only":
+        return None
     confidence = str(fused.get("confidence") or "low")
     reasons = list(fused.get("reason_codes") or [])
     conflicts = list(fused.get("conflict_flags") or [])
@@ -5597,6 +7241,46 @@ def _container_from_fused(
             ocr_eligibility_reason="blocked_sfx_decorative_art_container",
         )
 
+    if _looks_like_paired_ogkalu_speech_bubble(
+        fused_type=fused_type,
+        reasons=reasons,
+        bbox=bbox,
+        visual=visual,
+        image_size=image_size,
+        semantic_role_evidence=semantic_role_evidence,
+        clipped=clipped,
+        luma_image=luma_image,
+    ):
+        semantic_role_evidence = _semantic_role_evidence_with_state(
+            semantic_role_evidence,
+            "cleanup_authority_states",
+            AUTH_CLEANUP_TRANSLATE_SPEECH,
+            evidence_kind="typed_ogkalu_bubble_text_pair_speech_authority",
+        )
+        return TextAreaContainer(
+            container_id=container_id,
+            page_id=page_id,
+            container_type=CONTAINER_SPEECH,
+            bbox=bbox,
+            source_model_ids=source_ids,
+            semantic_role_evidence=semantic_role_evidence,
+            confidence=confidence,
+            confidence_tier=OGKALU_BUBBLE_TEXT_PAIR_AUTHORITY_REASON,
+            route_intent=ROUTE_TRANSLATE_SPEECH,
+            ocr_eligible=True,
+            comic_text_detector_scope_eligible=True,
+            fallback_reason=None,
+            evidence_reason_codes=reasons
+            + _visual_reason_codes(visual)
+            + [
+                f"text_area_plan:{OGKALU_BUBBLE_TEXT_PAIR_AUTHORITY_REASON}",
+                "text_area_plan:source_text_free_text_presence_proven",
+            ],
+            conflict_flags=conflicts,
+            human_review_required=False,
+            ocr_eligibility_reason=OGKALU_BUBBLE_TEXT_PAIR_AUTHORITY_REASON,
+        )
+
     if _looks_like_standalone_ogkalu_speech_bubble(
         fused_type=fused_type,
         reasons=reasons,
@@ -5630,7 +7314,42 @@ def _container_from_fused(
             + ["text_area_plan:bright_ogkalu_bubble_speech_authority"],
             conflict_flags=conflicts,
             human_review_required=False,
-            ocr_eligibility_reason="bright_ogkalu_bubble_speech_container",
+            ocr_eligibility_reason="bright_ogkalu_bubble_speech_authority",
+        )
+
+    if _looks_like_unresolved_ogkalu_speech_risk_candidate(
+        fused_type=fused_type,
+        reasons=reasons,
+        bbox=bbox,
+        visual=visual,
+        image_size=image_size,
+        semantic_role_evidence=semantic_role_evidence,
+        clipped=clipped,
+    ):
+        semantic_role_evidence = dict(semantic_role_evidence)
+        role_signals = set(_semantic_role_values(semantic_role_evidence, "role_signals"))
+        role_signals.add(UNRESOLVED_OGKALU_SPEECH_RISK_REASON)
+        semantic_role_evidence["role_signals"] = sorted(role_signals)
+        return TextAreaContainer(
+            container_id=container_id,
+            page_id=page_id,
+            container_type=CONTAINER_UNKNOWN,
+            bbox=bbox,
+            mask_summary={"mask_bbox": _safe_list(fused.get("mask_bbox"))},
+            source_model_ids=source_ids,
+            semantic_role_evidence=semantic_role_evidence,
+            confidence=confidence,
+            confidence_tier=UNRESOLVED_OGKALU_SPEECH_RISK_REASON,
+            route_intent=ROUTE_REVIEW_FALLBACK,
+            ocr_eligible=True,
+            comic_text_detector_scope_eligible=True,
+            fallback_reason=UNRESOLVED_OGKALU_SPEECH_RISK_REASON,
+            evidence_reason_codes=reasons
+            + _visual_reason_codes(visual)
+            + [f"text_area_plan:{UNRESOLVED_OGKALU_SPEECH_RISK_REASON}"],
+            conflict_flags=conflicts,
+            human_review_required=True,
+            ocr_eligibility_reason=UNRESOLVED_OGKALU_SPEECH_RISK_REASON,
         )
 
     if _looks_like_bright_unlinked_text_free_sfx_or_decorative(
@@ -6553,14 +8272,46 @@ def _append_deterministic_vertical_side_caption_containers(
                 authority_by_bbox[pre_index] = (
                     "text_area_plan:deterministic_side_narration_background_authority:sibling_column"
                 )
-        if not authority_by_bbox and not localized and len(localized_boxes) >= 2:
-            for pre_index, pre_bbox in enumerate(localized_boxes):
-                if _caption_search_overlaps_blocking_container(pre_bbox, plan.containers):
-                    continue
-                authority_by_bbox[pre_index] = (
-                    "text_area_plan:deterministic_side_narration_background_authority:coherent_column_group"
+        if not authority_by_bbox:
+            continue
+        authorized_indexes = [index for index in range(len(localized_boxes)) if index in authority_by_bbox]
+        if not authorized_indexes:
+            continue
+        caption_candidates: List[Dict[str, Any]] = []
+        if not localized and len(authorized_indexes) >= 2:
+            group_bbox = _text_area_graph_union_xywh([localized_boxes[index] for index in authorized_indexes])
+            if not group_bbox:
+                continue
+            authority_reasons = _text_area_graph_unique_strings(
+                [authority_by_bbox.get(index, "") for index in authorized_indexes]
+            )
+            caption_candidates.append(
+                {
+                    "bbox_index": authorized_indexes[0],
+                    "bbox": _normalize_xywh(group_bbox, image_size),
+                    "authority_reason": (
+                        "text_area_plan:deterministic_side_narration_background_authority:grouped_columns"
+                    ),
+                    "authority_reasons": authority_reasons,
+                    "source_indexes": list(authorized_indexes),
+                    "grouped_columns": True,
+                }
+            )
+        else:
+            for bbox_index in authorized_indexes:
+                caption_candidates.append(
+                    {
+                        "bbox_index": bbox_index,
+                        "bbox": localized_boxes[bbox_index],
+                        "authority_reason": authority_by_bbox.get(bbox_index, ""),
+                        "authority_reasons": [authority_by_bbox.get(bbox_index, "")],
+                        "source_indexes": [bbox_index],
+                        "grouped_columns": False,
+                    }
                 )
-        for bbox_index, bbox in enumerate(localized_boxes):
+        for candidate in caption_candidates:
+            bbox_index = int(candidate.get("bbox_index") or 0)
+            bbox = list(candidate.get("bbox") or [])
             duplicate_threshold = 0.62 if list(bbox) != list(search_bbox) else 0.35
             if any(_intersection_ratio_xywh(bbox, existing) >= duplicate_threshold for existing in added_boxes):
                 continue
@@ -6571,37 +8322,46 @@ def _append_deterministic_vertical_side_caption_containers(
             if seen is not None and container_id in seen:
                 continue
             visual = _container_visual_stats(luma_image, bbox, image_size)
-            authority_reason = authority_by_bbox.get(bbox_index, "")
+            authority_reason = str(candidate.get("authority_reason") or "")
             reason_codes = [
                 SIDE_CAPTION_SEARCH_REASON,
                 "text_area_plan:caption_background_container",
                 "text_area_plan:vertical_side_caption_search",
                 f"text_area_plan:vertical_side_caption_{side}_search",
             ] + _visual_reason_codes(visual)
-            if authority_reason:
-                reason_codes.append(authority_reason)
-            if localized:
+            reason_codes.extend(str(item) for item in candidate.get("authority_reasons") or [] if str(item))
+            reason_codes.append(authority_reason)
+            if bool(candidate.get("grouped_columns")):
+                reason_codes.append("text_area_plan:vertical_side_caption_authorized_columns_grouped_root")
+            elif localized:
                 reason_codes.append("text_area_plan:vertical_side_caption_localized_ink")
             elif list(bbox) != list(search_bbox):
                 reason_codes.append("text_area_plan:vertical_side_caption_localized_character_column")
             else:
                 reason_codes.append("text_area_plan:vertical_side_caption_seed_scope")
             role_signals = ["side_narration_candidate"]
-            if authority_reason:
-                role_signals.append("side_narration_background_authority")
+            role_signals.append("side_narration_background_authority")
             semantic_role_evidence: Dict[str, Any] = {
                 "role_signals": sorted(set(role_signals)),
                 "source": "text_area_plan_deterministic_vertical_side",
                 "side": side,
                 "column_index": bbox_index,
+                "column_indexes": list(candidate.get("source_indexes") or [bbox_index]),
             }
-            if authority_reason:
-                semantic_role_evidence = _semantic_role_evidence_with_state(
-                    semantic_role_evidence,
-                    "cleanup_authority_states",
-                    AUTH_CLEANUP_TRANSLATE_BACKGROUND,
-                    evidence_kind="typed_deterministic_side_narration_background_authority",
-                )
+            semantic_role_evidence["text_unit_evidence_bboxes"] = [
+                {
+                    "evidence_id": f"{container_id}_side_caption_text_island_00",
+                    "class_name": "text_free",
+                    "bbox": [bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]],
+                    "is_explicit_parent_boundary_evidence": True,
+                }
+            ]
+            semantic_role_evidence = _semantic_role_evidence_with_state(
+                semantic_role_evidence,
+                "cleanup_authority_states",
+                AUTH_CLEANUP_TRANSLATE_BACKGROUND,
+                evidence_kind="typed_deterministic_side_narration_background_authority",
+            )
             plan.containers.append(
                 TextAreaContainer(
                     container_id=container_id,
@@ -6611,17 +8371,13 @@ def _append_deterministic_vertical_side_caption_containers(
                     source_model_ids=[item_id] if item_id else [],
                     semantic_role_evidence=semantic_role_evidence,
                     confidence="deterministic",
-                    confidence_tier=(
-                        "deterministic_side_narration_background_authority"
-                        if authority_reason
-                        else "deterministic_vertical_side_caption_search"
-                    ),
+                    confidence_tier="deterministic_side_narration_background_authority",
                     route_intent=ROUTE_TRANSLATE_CAPTION,
                     ocr_eligible=True,
                     comic_text_detector_scope_eligible=True,
-                    fallback_reason=None if authority_reason else "deterministic_vertical_side_caption_search",
+                    fallback_reason=None,
                     evidence_reason_codes=reason_codes,
-                    human_review_required=not bool(authority_reason),
+                    human_review_required=False,
                     ocr_eligibility_reason="caption_background_container_strict_ocr_gate",
                 )
             )
@@ -7034,7 +8790,7 @@ def _side_caption_signal_item_has_background_authority(
     existing_containers: Sequence[TextAreaContainer],
 ) -> bool:
     class_name = str(item.get("class_name") or item.get("fused_container_type") or "")
-    if class_name not in {"text_free", "free_text", "text_bubble", "caption_or_background_candidate"}:
+    if class_name not in {"text_free", "free_text", "text_bubble", "bubble", "caption_or_background_candidate"}:
         return False
     if _caption_search_overlaps_blocking_container(bbox, existing_containers):
         return False
@@ -7056,11 +8812,36 @@ def _side_caption_signal_item_has_background_authority(
         return False
     bright = _optional_float(visual.get("bright_ratio"))
     dark = _optional_float(visual.get("dark_ratio"))
-    if dark is not None and dark >= 0.48:
+    dark_panel_light_text = bool(
+        dark is not None
+        and dark >= 0.42
+        and bright is not None
+        and bright >= 0.025
+    )
+    if dark is not None and dark >= 0.48 and not dark_panel_light_text:
         return False
-    if bright is not None and bright < 0.18:
+    if bright is not None and bright < 0.18 and not dark_panel_light_text:
         return False
     return _side_caption_column_has_text_structure(luma_image, bbox, image_size)
+
+
+def _side_caption_text_structure_mask(
+    arr: Any,
+    *,
+    dark_threshold: int,
+    light_threshold: int,
+) -> Any:
+    dark_mask = arr <= int(dark_threshold)
+    try:
+        total = float(max(1, arr.size))
+        mean_luma = float(arr.mean())
+        bright_ratio = float((arr >= int(light_threshold)).sum()) / total
+        dark_ratio = float(dark_mask.sum()) / total
+    except Exception:
+        return dark_mask.astype("uint8")
+    if mean_luma <= 155.0 and dark_ratio >= 0.36 and bright_ratio >= 0.015:
+        return (arr >= int(light_threshold)).astype("uint8")
+    return dark_mask.astype("uint8")
 
 
 def _side_caption_column_has_text_structure(
@@ -7077,7 +8858,7 @@ def _side_caption_column_has_text_structure(
     try:
         crop = luma_image.crop((max(0, x), max(0, y), min(width, x + w), min(height, y + h))).convert("L")
         arr = np.asarray(crop)
-        mask = (arr <= 112).astype("uint8")
+        mask = _side_caption_text_structure_mask(arr, dark_threshold=112, light_threshold=190)
         _count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, 8)
     except Exception:
         return False
@@ -7126,7 +8907,7 @@ def _side_caption_character_column_bboxes(
     try:
         crop = luma_image.crop((max(0, x), max(0, y), min(width, x + w), min(height, y + h))).convert("L")
         arr = np.asarray(crop)
-        mask = (arr <= 108).astype("uint8")
+        mask = _side_caption_text_structure_mask(arr, dark_threshold=108, light_threshold=190)
         _count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, 8)
     except Exception:
         return []
@@ -7582,6 +9363,8 @@ def _semantic_role_evidence_from_fused(fused: Mapping[str, Any]) -> Dict[str, An
     if fused_type == "sfx_or_decorative_candidate":
         role_signals.add("sfx_decorative_candidate")
     for reason in reasons:
+        if reason == OGKALU_BUBBLE_TEXT_PAIR_REASON:
+            role_signals.add("ogkalu_bubble_text_pair")
         if "ogkalu_text_free" in reason:
             ogkalu_classes.add("text_free")
         if "ogkalu_text_bubble" in reason:
@@ -8112,6 +9895,143 @@ def _top_band_right_column_has_background_context(
     return bool(bright <= 0.49 or dark >= 0.36)
 
 
+def _text_evidence_bbox_xywh(entry: Mapping[str, Any], image_size: Tuple[int, int]) -> List[int]:
+    bbox = entry.get("bbox") or []
+    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+        return [0, 0, 0, 0]
+    try:
+        x0, y0, third, fourth = [float(value) for value in list(bbox)[:4]]
+    except Exception:
+        return [0, 0, 0, 0]
+    width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    if third > x0 and fourth > y0 and third <= width and fourth <= height:
+        return _bbox_xyxy_to_xywh([x0, y0, third, fourth], image_size)
+    return _normalize_xywh([x0, y0, third, fourth], image_size)
+
+
+def _luma_bbox_has_text_like_dark_components(
+    luma_image: Any,
+    bbox: Sequence[Any],
+    image_size: Tuple[int, int],
+) -> bool:
+    if luma_image is None:
+        return False
+    x, y, w, h = _normalize_xywh(bbox, image_size)
+    if w < 8 or h < 12:
+        return False
+    try:
+        crop = luma_image.crop((x, y, x + w, y + h)).convert("L")
+    except Exception:
+        return False
+    if np is None:
+        pixels = list(crop.getdata())
+        if not pixels:
+            return False
+        dark_count = sum(1 for value in pixels if value <= 120)
+        area = max(1, len(pixels))
+        return bool(max(16, int(area * 0.003)) <= dark_count <= int(area * 0.35))
+    arr = np.asarray(crop)
+    if arr.size <= 0:
+        return False
+    dark_mask = (arr <= 120).astype("uint8")
+    dark_count = int(dark_mask.sum())
+    area = int(arr.size)
+    dark_ratio = dark_count / float(max(1, area))
+    if dark_ratio < 0.20 or dark_ratio > 0.55:
+        return False
+    if cv2 is None:
+        return True
+    try:
+        _count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(dark_mask, 8)
+    except Exception:
+        return True
+    text_like = 0
+    oversized = 0
+    largest_component_area = 0
+    for label in range(1, int(stats.shape[0])):
+        cx, cy, cw, ch, component_area = [int(value) for value in stats[label][:5]]
+        del cx, cy
+        if component_area < 8:
+            continue
+        largest_component_area = max(largest_component_area, component_area)
+        density = component_area / float(max(1, cw * ch))
+        if cw > max(72, int(w * 0.82)) or ch > max(120, int(h * 0.95)):
+            oversized += 1
+            continue
+        if 0.06 <= density <= 1.0 and 2 <= cw <= max(72, int(w * 0.72)) and 4 <= ch <= max(120, int(h * 0.92)):
+            text_like += 1
+    if largest_component_area / float(max(1, dark_count)) > 0.55:
+        return False
+    return bool(text_like >= 3 and oversized <= 1)
+
+
+def _paired_ogkalu_text_presence_proven(
+    *,
+    luma_image: Any,
+    semantic_role_evidence: Mapping[str, Any],
+    image_size: Tuple[int, int],
+) -> bool:
+    entries = [
+        entry
+        for entry in (semantic_role_evidence.get("text_unit_evidence_bboxes") or [])
+        if isinstance(entry, Mapping) and str(entry.get("class_name") or "") == "text_bubble"
+    ]
+    if not entries:
+        return False
+    for entry in entries:
+        if _optional_float(entry.get("confidence")) is not None and float(entry.get("confidence") or 0.0) < OGKALU_SINGLE_MODEL_AUTHORITY_CONFIDENCE:
+            continue
+        if _luma_bbox_has_text_like_dark_components(luma_image, _text_evidence_bbox_xywh(entry, image_size), image_size):
+            return True
+    return False
+
+
+def _looks_like_paired_ogkalu_speech_bubble(
+    *,
+    fused_type: str,
+    reasons: Sequence[Any],
+    bbox: Sequence[Any],
+    visual: Mapping[str, Any],
+    image_size: Tuple[int, int],
+    semantic_role_evidence: Mapping[str, Any],
+    clipped: bool,
+    luma_image: Any,
+) -> bool:
+    del visual
+    if clipped or fused_type not in {"ambiguous", "speech_bubble"}:
+        return False
+    reason_text = " ".join(str(item).lower() for item in reasons)
+    role_classes = set(_semantic_role_values(semantic_role_evidence, "ogkalu_class_names"))
+    role_signals = set(_semantic_role_values(semantic_role_evidence, "role_signals"))
+    if OGKALU_BUBBLE_TEXT_PAIR_REASON not in reason_text and "ogkalu_bubble_text_pair" not in role_signals:
+        return False
+    if not {"bubble", "text_bubble"}.issubset(role_classes):
+        return False
+    if any(token in reason_text for token in ("sfx", "decorative", "preserve", "text_free", "art_only", "non_text", "non-text")):
+        return False
+    conflicts = set(_semantic_role_values(semantic_role_evidence, "conflict_evidence"))
+    if any(any(token in conflict.lower() for token in ("sfx", "decorative", "preserve", "art", "non_text", "non-text")) for conflict in conflicts):
+        return False
+    if _semantic_role_model_confidence(semantic_role_evidence) < OGKALU_SINGLE_MODEL_AUTHORITY_CONFIDENCE:
+        return False
+    x, y, w, h = _coerce_xywh(bbox)
+    width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    if w <= 0 or h <= 0:
+        return False
+    if w < width * 0.08 or h < height * 0.055:
+        return False
+    if w > width * 0.42 or h > height * 0.34:
+        return False
+    area_ratio = _bbox_area_xywh([x, y, w, h]) / max(1.0, float(width * height))
+    if area_ratio <= 0.0 or area_ratio > 0.10:
+        return False
+    return _paired_ogkalu_text_presence_proven(
+        luma_image=luma_image,
+        semantic_role_evidence=semantic_role_evidence,
+        image_size=image_size,
+    )
+
+
 def _looks_like_standalone_ogkalu_speech_bubble(
     *,
     fused_type: str,
@@ -8122,70 +10042,64 @@ def _looks_like_standalone_ogkalu_speech_bubble(
     semantic_role_evidence: Mapping[str, Any],
     clipped: bool,
 ) -> bool:
-    if fused_type not in {"ambiguous", "speech_bubble"}:
+    del fused_type, reasons, bbox, visual, image_size, semantic_role_evidence, clipped
+    return False
+
+
+def _looks_like_unresolved_ogkalu_speech_risk_candidate(
+    *,
+    fused_type: str,
+    reasons: Sequence[Any],
+    bbox: Sequence[Any],
+    visual: Mapping[str, Any],
+    image_size: Tuple[int, int],
+    semantic_role_evidence: Mapping[str, Any],
+    clipped: bool,
+) -> bool:
+    if clipped or fused_type not in {"ambiguous", "speech_bubble"}:
         return False
     role_classes = set(_semantic_role_values(semantic_role_evidence, "ogkalu_class_names"))
     role_signals = set(_semantic_role_values(semantic_role_evidence, "role_signals"))
-    if "text_bubble" not in role_classes:
-        return False
-    text_unit_entries = [
-        entry
-        for entry in (semantic_role_evidence.get("text_unit_evidence_bboxes") or [])
-        if isinstance(entry, Mapping) and str(entry.get("class_name") or "") == "text_bubble"
-    ]
-    if not text_unit_entries:
+    if not (role_classes & {"bubble", "text_bubble"}):
         return False
     if "speech_bubble_mask_evidence" in role_signals:
         return False
     reason_text = " ".join(str(item).lower() for item in reasons)
-    if any(token in reason_text for token in ("sfx", "decorative", "preserve", "text_free")):
+    if not any(
+        token in reason_text
+        for token in ("ogkalu_bubble_without_kitsumed_mask", "ogkalu_text_bubble_without_kitsumed_mask")
+    ):
+        return False
+    if any(token in reason_text for token in ("sfx", "decorative", "preserve", "text_free", "art_only", "non_text", "non-text")):
         return False
     conflicts = set(_semantic_role_values(semantic_role_evidence, "conflict_evidence"))
-    if any(any(token in conflict.lower() for token in ("sfx", "decorative", "preserve", "art")) for conflict in conflicts):
+    if any(any(token in conflict.lower() for token in ("sfx", "decorative", "preserve", "art", "non_text", "non-text")) for conflict in conflicts):
         return False
     confidence = _semantic_role_model_confidence(semantic_role_evidence)
-    neighbor_ids = _semantic_role_values(semantic_role_evidence, "neighboring_speech_context_ids")
-    supported_by_context = bool(
-        confidence >= OGKALU_SINGLE_MODEL_AUTHORITY_CONFIDENCE
-        and neighbor_ids
-        and "text_bubble" in role_classes
-    )
-    if clipped and not supported_by_context:
+    if confidence < OGKALU_SINGLE_MODEL_AUTHORITY_CONFIDENCE:
         return False
     x, y, w, h = _coerce_xywh(bbox)
     width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
     if w <= 0 or h <= 0:
         return False
-    page_edge_touching = x <= 1 or y <= 1 or x + w >= width - 1 or y + h >= height - 1
-    if page_edge_touching and not supported_by_context:
-        return False
-    if w < width * 0.08 or h < height * 0.06:
+    if w < width * 0.08 or h < height * 0.055:
         return False
     if w > width * 0.36 or h > height * 0.30:
         return False
     area_ratio = float(visual.get("area_ratio") or 0.0)
+    if area_ratio <= 0.0 or area_ratio > 0.08:
+        return False
+    page_edge_touching = x <= 1 or y <= 1 or x + w >= width - 1 or y + h >= height - 1
     dark = _optional_float(visual.get("dark_ratio"))
     bright = _optional_float(visual.get("bright_ratio"))
-    if area_ratio > 0.08:
-        return False
-    if _looks_like_side_narration_background_bbox(
-        fused_type=fused_type,
-        reasons=reasons,
-        bbox=bbox,
-        visual=visual,
-        image_size=image_size,
-        semantic_role_evidence=semantic_role_evidence,
-    ):
-        return False
     dark_or_art_context = bool(
         (dark is not None and dark >= 0.15)
         or (bright is not None and bright < 0.62)
     )
-    if not supported_by_context:
+    neighbor_ids = _semantic_role_values(semantic_role_evidence, "neighboring_speech_context_ids")
+    if not neighbor_ids:
         return False
-    if not (clipped or page_edge_touching or dark_or_art_context):
-        return False
-    return True
+    return bool(page_edge_touching or dark_or_art_context or "text_bubble" in role_classes)
 
 
 def _semantic_role_model_confidence(role_evidence: Mapping[str, Any]) -> float:
