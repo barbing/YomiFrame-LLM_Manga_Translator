@@ -7281,11 +7281,6 @@ def _container_from_fused(
             AUTH_CLEANUP_TRANSLATE_SPEECH,
             evidence_kind="typed_ogkalu_bubble_text_pair_speech_authority",
         )
-        root_bbox = _paired_text_boundary_root_bbox(semantic_role_evidence, bbox, image_size)
-        root_bbox_reasons: List[str] = []
-        if root_bbox and list(root_bbox) != list(bbox):
-            bbox = root_bbox
-            root_bbox_reasons.append("text_area_plan:paired_ogkalu_root_bbox_from_text_boundary")
         return TextAreaContainer(
             container_id=container_id,
             page_id=page_id,
@@ -7301,14 +7296,21 @@ def _container_from_fused(
             fallback_reason=None,
             evidence_reason_codes=reasons
             + _visual_reason_codes(visual)
-            + root_bbox_reasons
             + [
+                "text_area_plan:paired_ogkalu_root_bbox_from_bubble_support",
                 f"text_area_plan:{OGKALU_BUBBLE_TEXT_PAIR_AUTHORITY_REASON}",
                 "text_area_plan:source_text_free_text_presence_proven",
             ],
             conflict_flags=conflicts,
             human_review_required=False,
             ocr_eligibility_reason=OGKALU_BUBBLE_TEXT_PAIR_AUTHORITY_REASON,
+            cleanup_authorization=AUTH_CLEANUP_TRANSLATE_SPEECH,
+            semantic_kind=SEMANTIC_KIND_SPEECH,
+            semantic_authorization_state=AUTH_CLEANUP_TRANSLATE_SPEECH,
+            authorization_source_stage="text_area_plan",
+            authorization_basis=OGKALU_BUBBLE_TEXT_PAIR_AUTHORITY_REASON,
+            authorization_explicit=True,
+            authorization_field_origin=FRESH_AUTHORIZATION_FIELD_ORIGIN,
         )
 
     if _looks_like_standalone_ogkalu_speech_bubble(
