@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 
-BUBBLE_DETECTION_VERSION = "phase4b22_bubble_detection_semantic_authority_contract_v4"
-BUBBLE_DETECTION_CACHE_VERSION = "phase4b22_bubble_detection_semantic_authority_cache_v4"
+BUBBLE_DETECTION_VERSION = "phase4b23_bubble_detection_semantic_authority_contract_v5"
+BUBBLE_DETECTION_CACHE_VERSION = "phase4b23_bubble_detection_semantic_authority_cache_v5"
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = ROOT / "scripts"
@@ -39,6 +39,8 @@ KITSUMED_MODEL_NAME = "kitsumed/yolov8m_seg-speech-bubble"
 OGKALU_MODEL_NAME = "ogkalu/comic-text-and-bubble-detector"
 KITSUMED_MODEL_ROLE = "speech_bubble_mask"
 OGKALU_MODEL_ROLE = "text_area_detector"
+# Cache identity must change if the OGKALU ONNX target-size contract changes.
+OGKALU_TARGET_SIZE_ORDER = "width_height"
 PROVIDER_PREFERENCE = ["CUDAExecutionProvider", "CPUExecutionProvider"]
 KITSUMED_CONFIDENCE_THRESHOLD = 0.30
 KITSUMED_NMS_IOU_THRESHOLD = 0.50
@@ -69,6 +71,7 @@ def _semantic_contract_identity() -> Dict[str, Any]:
         "semantic_evidence_contract_version": SEMANTIC_EVIDENCE_CONTRACT_VERSION,
         "semantic_evidence_provider_version": SEMANTIC_EVIDENCE_PROVIDER_VERSION,
         "ogkalu_neighboring_speech_context_version": OGKALU_NEIGHBORING_SPEECH_CONTEXT_VERSION,
+        "ogkalu_target_size_order": OGKALU_TARGET_SIZE_ORDER,
         "semantic_evidence_providers": [
             PROVIDER_KITSUMED_SPEECH_MASK,
             PROVIDER_OGKALU_TEXT_BUBBLE,
@@ -678,6 +681,7 @@ def _build_cache_state(
             "ogkalu_labels": {str(key): value for key, value in runtime.ogkalu_labels.items()},
             "ogkalu_config_path": str(OGKALU_CONFIG.resolve()),
             "ogkalu_config_sha256": _sha256_file(OGKALU_CONFIG) if OGKALU_CONFIG.exists() else None,
+            "ogkalu_target_size_order": OGKALU_TARGET_SIZE_ORDER,
         },
         "semantic_contract": _semantic_contract_identity(),
         "requested_models": list(req.requested_models),

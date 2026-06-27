@@ -1182,26 +1182,12 @@ def _text_area_graph_physical_root_bbox(
     image_size: Tuple[int, int] = (1, 1),
 ) -> Tuple[List[int], List[str]]:
     member_bboxes = [_text_area_graph_container_bbox(member) for member in members]
-    physical_bboxes = list(member_bboxes)
-    group_ids = {_text_area_graph_container_id(member) for member in members}
-    added_text_unit_geometry = False
-    for member in members:
-        for bbox in _text_area_graph_owned_text_unit_physical_bboxes(
-            member,
-            active_containers=active_containers,
-            group_container_ids=group_ids,
-        ):
-            physical_bboxes.append(bbox)
-            added_text_unit_geometry = True
-    root_bbox = _text_area_graph_union_xywh(physical_bboxes)
+    root_bbox = _text_area_graph_union_xywh(member_bboxes)
     if not root_bbox:
         return [], []
     if image_size != (1, 1):
         root_bbox = _normalize_xywh(root_bbox, image_size)
-    reasons: List[str] = []
-    if added_text_unit_geometry and root_bbox != _text_area_graph_union_xywh(member_bboxes):
-        reasons.append("text_area_plan:phase2_root_physical_region_from_text_unit_geometry")
-    return root_bbox, reasons
+    return root_bbox, []
 
 
 def _text_area_graph_owned_text_unit_physical_bboxes(
@@ -1365,9 +1351,9 @@ def _text_area_graph_workflow_roots_should_merge(
     if (
         metrics["y_overlap_min_ratio"] >= 0.58
         and metrics["x_overlap_min_ratio"] >= 0.08
-        and not _text_area_graph_has_text_unit_evidence(first)
-        and not _text_area_graph_has_text_unit_evidence(second)
     ):
+        if _text_area_graph_shared_text_unit_evidence_ids(first, second):
+            return False
         return True
     if shared_evidence and metrics["x_overlap_min_ratio"] >= 0.55 and metrics["y_gap"] <= metrics["small_axis_gap"]:
         return True
@@ -1377,6 +1363,27 @@ def _text_area_graph_workflow_roots_should_merge(
 def _text_area_graph_has_text_unit_evidence(container: TextAreaContainer | Mapping[str, Any]) -> bool:
     entries = _container_semantic_role_evidence(container).get("text_unit_evidence_bboxes") or []
     return isinstance(entries, Sequence) and not isinstance(entries, (str, bytes)) and bool(entries)
+
+
+def _text_area_graph_shared_text_unit_evidence_ids(
+    first: TextAreaContainer | Mapping[str, Any],
+    second: TextAreaContainer | Mapping[str, Any],
+) -> set[str]:
+    return _text_area_graph_text_unit_evidence_ids(first) & _text_area_graph_text_unit_evidence_ids(second)
+
+
+def _text_area_graph_text_unit_evidence_ids(container: TextAreaContainer | Mapping[str, Any]) -> set[str]:
+    entries = _container_semantic_role_evidence(container).get("text_unit_evidence_bboxes") or []
+    if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+        return set()
+    ids: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        evidence_id = str(entry.get("evidence_id") or entry.get("model_evidence_id") or "")
+        if evidence_id:
+            ids.add(evidence_id)
+    return ids
 
 
 def _text_area_graph_axis_overlap_metrics(
@@ -7215,6 +7222,23 @@ def _container_from_fused(
             ocr_eligibility_reason="caption_background_container",
         )
 
+    if fused_type in {"free_text", "caption_or_background_candidate"}:
+        side_caption_signal = _looks_like_vertical_side_caption_signal_bbox(
+            bbox,
+            image_size,
+        ) or _looks_like_side_narration_background_bbox(
+            fused_type=fused_type,
+            reasons=reasons,
+            bbox=bbox,
+            visual=visual,
+            image_size=image_size,
+            semantic_role_evidence=semantic_role_evidence,
+        )
+        if side_caption_signal:
+            # Deterministic side-caption localization owns these roots so broad
+            # text_free fused evidence cannot preempt them as protected SFX.
+            return None
+
     if fused_type == "sfx_or_decorative_candidate" or _looks_like_pre_ocr_sfx_or_decorative(fused_type, reasons, bbox, visual, image_size):
         semantic_role_evidence = _semantic_role_evidence_with_state(
             semantic_role_evidence,
@@ -7257,6 +7281,11 @@ def _container_from_fused(
             AUTH_CLEANUP_TRANSLATE_SPEECH,
             evidence_kind="typed_ogkalu_bubble_text_pair_speech_authority",
         )
+        root_bbox = _paired_text_boundary_root_bbox(semantic_role_evidence, bbox, image_size)
+        root_bbox_reasons: List[str] = []
+        if root_bbox and list(root_bbox) != list(bbox):
+            bbox = root_bbox
+            root_bbox_reasons.append("text_area_plan:paired_ogkalu_root_bbox_from_text_boundary")
         return TextAreaContainer(
             container_id=container_id,
             page_id=page_id,
@@ -7272,6 +7301,7 @@ def _container_from_fused(
             fallback_reason=None,
             evidence_reason_codes=reasons
             + _visual_reason_codes(visual)
+            + root_bbox_reasons
             + [
                 f"text_area_plan:{OGKALU_BUBBLE_TEXT_PAIR_AUTHORITY_REASON}",
                 "text_area_plan:source_text_free_text_presence_proven",
@@ -7595,6 +7625,22 @@ def _container_from_unlinked_text_area_evidence(
             human_review_required=not has_background_authority,
             ocr_eligibility_reason="caption_background_container",
         )
+    if class_name == "text_free":
+        side_caption_signal = _looks_like_vertical_side_caption_signal_bbox(
+            bbox,
+            image_size,
+        ) or _looks_like_side_narration_background_bbox(
+            fused_type="free_text",
+            reasons=[f"ogkalu_class:{class_name}"],
+            bbox=bbox,
+            visual=visual,
+            image_size=image_size,
+            semantic_role_evidence=semantic_role_evidence,
+        )
+        if side_caption_signal:
+            # Deterministic side-caption localization owns these roots so broad
+            # text_free evidence cannot preempt them as protected SFX.
+            return None
     if class_name == "text_free" and _looks_like_pre_ocr_sfx_or_decorative("free_text", [f"ogkalu_class:{class_name}"], bbox, visual, image_size):
         return TextAreaContainer(
             container_id=f"ogkalu_{evidence_id}",
@@ -8241,44 +8287,58 @@ def _append_deterministic_vertical_side_caption_containers(
         if trimmed is None:
             continue
         search_bbox = trimmed
-        localized = _localize_side_caption_bbox(luma_image, search_bbox, image_size)
-        localized_boxes = [localized] if localized else _side_caption_character_column_bboxes(luma_image, search_bbox, image_size)
+        paired_text_boxes = _side_caption_paired_text_boundary_bboxes(result, item, search_bbox, image_size)
+        paired_text_boundary = bool(paired_text_boxes)
+        localized = None if paired_text_boundary else _localize_side_caption_bbox(luma_image, search_bbox, image_size)
+        localized_boxes = (
+            paired_text_boxes
+            if paired_text_boundary
+            else ([localized] if localized else _side_caption_character_column_bboxes(luma_image, search_bbox, image_size))
+        )
         if not localized_boxes:
             localized_boxes = [search_bbox]
         item_id = str(item.get("model_evidence_id") or item.get("evidence_id") or item.get("fused_container_id") or "")
         authority_by_bbox: Dict[int, str] = {}
-        for pre_index, pre_bbox in enumerate(localized_boxes):
-            if _caption_search_overlaps_blocking_container(pre_bbox, plan.containers):
-                continue
-            pre_visual = _container_visual_stats(luma_image, pre_bbox, image_size)
-            pre_authority_reason = _side_caption_scope_authority_reason(item_id, pre_bbox, plan.containers)
-            if not pre_authority_reason and _side_caption_signal_item_has_background_authority(
-                item=item,
-                bbox=pre_bbox,
-                visual=pre_visual,
-                image_size=image_size,
-                luma_image=luma_image,
-                existing_containers=plan.containers,
-            ):
-                pre_authority_reason = "text_area_plan:deterministic_side_narration_background_authority"
-            if pre_authority_reason:
-                authority_by_bbox[pre_index] = pre_authority_reason
-        if authority_by_bbox and len(localized_boxes) >= 2:
+        if paired_text_boundary:
             for pre_index, pre_bbox in enumerate(localized_boxes):
-                if pre_index in authority_by_bbox:
-                    continue
                 if _caption_search_overlaps_blocking_container(pre_bbox, plan.containers):
                     continue
                 authority_by_bbox[pre_index] = (
-                    "text_area_plan:deterministic_side_narration_background_authority:sibling_column"
+                    "text_area_plan:deterministic_side_narration_background_authority:paired_text_boundary"
                 )
+        else:
+            for pre_index, pre_bbox in enumerate(localized_boxes):
+                if _caption_search_overlaps_blocking_container(pre_bbox, plan.containers):
+                    continue
+                pre_visual = _container_visual_stats(luma_image, pre_bbox, image_size)
+                pre_authority_reason = _side_caption_scope_authority_reason(item_id, pre_bbox, plan.containers)
+                if not pre_authority_reason and _side_caption_signal_item_has_background_authority(
+                    item=item,
+                    bbox=pre_bbox,
+                    visual=pre_visual,
+                    image_size=image_size,
+                    luma_image=luma_image,
+                    existing_containers=plan.containers,
+                ):
+                    pre_authority_reason = "text_area_plan:deterministic_side_narration_background_authority"
+                if pre_authority_reason:
+                    authority_by_bbox[pre_index] = pre_authority_reason
+            if authority_by_bbox and len(localized_boxes) >= 2:
+                for pre_index, pre_bbox in enumerate(localized_boxes):
+                    if pre_index in authority_by_bbox:
+                        continue
+                    if _caption_search_overlaps_blocking_container(pre_bbox, plan.containers):
+                        continue
+                    authority_by_bbox[pre_index] = (
+                        "text_area_plan:deterministic_side_narration_background_authority:sibling_column"
+                    )
         if not authority_by_bbox:
             continue
         authorized_indexes = [index for index in range(len(localized_boxes)) if index in authority_by_bbox]
         if not authorized_indexes:
             continue
         caption_candidates: List[Dict[str, Any]] = []
-        if not localized and len(authorized_indexes) >= 2:
+        if (paired_text_boundary or not localized) and len(authorized_indexes) >= 2:
             group_bbox = _text_area_graph_union_xywh([localized_boxes[index] for index in authorized_indexes])
             if not group_bbox:
                 continue
@@ -8295,6 +8355,7 @@ def _append_deterministic_vertical_side_caption_containers(
                     "authority_reasons": authority_reasons,
                     "source_indexes": list(authorized_indexes),
                     "grouped_columns": True,
+                    "paired_text_boundary": paired_text_boundary,
                 }
             )
         else:
@@ -8307,6 +8368,7 @@ def _append_deterministic_vertical_side_caption_containers(
                         "authority_reasons": [authority_by_bbox.get(bbox_index, "")],
                         "source_indexes": [bbox_index],
                         "grouped_columns": False,
+                        "paired_text_boundary": paired_text_boundary,
                     }
                 )
         for candidate in caption_candidates:
@@ -8333,6 +8395,8 @@ def _append_deterministic_vertical_side_caption_containers(
             reason_codes.append(authority_reason)
             if bool(candidate.get("grouped_columns")):
                 reason_codes.append("text_area_plan:vertical_side_caption_authorized_columns_grouped_root")
+            if bool(candidate.get("paired_text_boundary")):
+                reason_codes.append("text_area_plan:vertical_side_caption_paired_text_boundary")
             elif localized:
                 reason_codes.append("text_area_plan:vertical_side_caption_localized_ink")
             elif list(bbox) != list(search_bbox):
@@ -8978,6 +9042,7 @@ def _side_caption_character_column_bboxes(
             [x + bx0 - pad_x, y + by0 - pad_y, bw + pad_x * 2, bh + pad_y * 2],
             image_size,
         )
+        candidate = _clip_xywh_to_xywh(candidate, search_bbox)
         if _side_caption_column_has_text_structure(luma_image, candidate, image_size):
             candidates.append(candidate)
     candidates.sort(key=lambda item: (item[0], item[1]))
@@ -8989,6 +9054,20 @@ def _side_caption_character_column_bboxes(
         if len(deduped) >= 4:
             break
     return deduped
+
+
+def _clip_xywh_to_xywh(bbox: Sequence[int], bounds: Sequence[int]) -> List[int]:
+    x, y, w, h = _coerce_xywh(bbox)
+    bx, by, bw, bh = _coerce_xywh(bounds)
+    if w <= 0 or h <= 0 or bw <= 0 or bh <= 0:
+        return []
+    x0 = max(x, bx)
+    y0 = max(y, by)
+    x1 = min(x + w, bx + bw)
+    y1 = min(y + h, by + bh)
+    if x1 <= x0 or y1 <= y0:
+        return []
+    return [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
 
 
 def _looks_like_vertical_side_caption_signal_bbox(bbox: Sequence[int], image_size: Tuple[int, int]) -> bool:
@@ -9909,6 +9988,131 @@ def _text_evidence_bbox_xywh(entry: Mapping[str, Any], image_size: Tuple[int, in
     return _normalize_xywh([x0, y0, third, fourth], image_size)
 
 
+def _paired_text_boundary_bboxes_from_role_evidence(
+    role_evidence: Mapping[str, Any],
+    image_size: Tuple[int, int],
+    *,
+    allowed_classes: Sequence[str] = ("text_bubble",),
+) -> List[List[int]]:
+    bboxes: List[List[int]] = []
+    seen_ids: set[str] = set()
+    accepted_classes = {str(value) for value in allowed_classes if str(value)}
+    for field_name in ("text_unit_evidence_bboxes", "model_evidence_bboxes"):
+        entries = role_evidence.get(field_name) or []
+        if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+            continue
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            if str(entry.get("class_name") or "") not in accepted_classes:
+                continue
+            confidence = _optional_float(entry.get("confidence"))
+            if confidence is not None and confidence < OGKALU_SINGLE_MODEL_AUTHORITY_CONFIDENCE:
+                continue
+            bbox = _text_evidence_bbox_xywh(entry, image_size)
+            x, y, w, h = _coerce_xywh(bbox)
+            if w <= 0 or h <= 0:
+                continue
+            evidence_id = str(entry.get("evidence_id") or "")
+            if evidence_id and evidence_id in seen_ids:
+                continue
+            if any(_intersection_ratio_xywh(bbox, existing) >= 0.86 for existing in bboxes):
+                continue
+            if evidence_id:
+                seen_ids.add(evidence_id)
+            bboxes.append([x, y, w, h])
+    return bboxes
+
+
+def _padded_text_boundary_union_bbox(
+    text_bboxes: Sequence[Sequence[int]],
+    support_bbox: Sequence[int],
+    image_size: Tuple[int, int],
+) -> List[int]:
+    union = _text_area_graph_union_xywh(text_bboxes)
+    if not union:
+        return []
+    x, y, w, h = _coerce_xywh(union)
+    if w <= 0 or h <= 0:
+        return []
+    pad_x = max(6, int(round(w * 0.10)))
+    pad_y = max(6, int(round(h * 0.10)))
+    padded = _normalize_xywh([x - pad_x, y - pad_y, w + pad_x * 2, h + pad_y * 2], image_size)
+    support = _normalize_xywh(support_bbox, image_size)
+    clipped = _clip_xywh_to_xywh(padded, support) if support else []
+    return clipped or padded
+
+
+def _paired_text_boundary_root_bbox(
+    role_evidence: Mapping[str, Any],
+    support_bbox: Sequence[int],
+    image_size: Tuple[int, int],
+) -> List[int]:
+    text_bboxes = _paired_text_boundary_bboxes_from_role_evidence(role_evidence, image_size)
+    if not text_bboxes:
+        return []
+    support = _normalize_xywh(support_bbox, image_size)
+    if support:
+        owned = [
+            bbox
+            for bbox in text_bboxes
+            if _inside_ratio_xywh(bbox, support) >= 0.65
+            or _intersection_ratio_xywh(bbox, support) >= 0.65
+        ]
+    else:
+        owned = list(text_bboxes)
+    if not owned:
+        return []
+    return _padded_text_boundary_union_bbox(owned, support or _text_area_graph_union_xywh(owned), image_size)
+
+
+def _side_caption_paired_text_boundary_bboxes(
+    result: Mapping[str, Any],
+    item: Mapping[str, Any],
+    search_bbox: Sequence[int],
+    image_size: Tuple[int, int],
+) -> List[List[int]]:
+    item_id = str(item.get("model_evidence_id") or item.get("evidence_id") or item.get("fused_container_id") or "")
+    if not item_id:
+        return []
+    raw_bboxes: List[List[int]] = []
+
+    def collect(role_evidence: Any) -> None:
+        if not isinstance(role_evidence, Mapping):
+            return
+        for bbox in _paired_text_boundary_bboxes_from_role_evidence(
+            role_evidence,
+            image_size,
+            allowed_classes=("text_free", "text_bubble"),
+        ):
+            if _inside_ratio_xywh(bbox, search_bbox) < 0.65 and _intersection_ratio_xywh(bbox, search_bbox) < 0.65:
+                continue
+            if any(_intersection_ratio_xywh(bbox, existing) >= 0.86 for existing in raw_bboxes):
+                continue
+            raw_bboxes.append(bbox)
+
+    collect(item.get("semantic_role_evidence") or {})
+    for fused in result.get("fused_containers", []) or []:
+        if not isinstance(fused, Mapping):
+            continue
+        fused_id = str(fused.get("fused_container_id") or "")
+        linked_ids = {str(value) for value in fused.get("linked_ogkalu_detection_ids") or [] if str(value)}
+        linked_ids.update(str(value) for value in fused.get("source_model_ids") or [] if str(value))
+        if item_id != fused_id and item_id not in linked_ids:
+            continue
+        collect(fused.get("semantic_role_evidence") or {})
+
+    padded: List[List[int]] = []
+    for bbox in raw_bboxes:
+        candidate = _padded_text_boundary_union_bbox([bbox], search_bbox, image_size)
+        if not candidate:
+            continue
+        if any(_intersection_ratio_xywh(candidate, existing) >= 0.86 for existing in padded):
+            continue
+        padded.append(candidate)
+    return padded
+
+
 def _luma_bbox_has_text_like_dark_components(
     luma_image: Any,
     bbox: Sequence[Any],
@@ -9965,6 +10169,62 @@ def _luma_bbox_has_text_like_dark_components(
     return bool(text_like >= 3 and oversized <= 1)
 
 
+def _luma_bbox_has_sparse_vertical_text_components(
+    luma_image: Any,
+    bbox: Sequence[Any],
+    image_size: Tuple[int, int],
+) -> bool:
+    if luma_image is None or np is None or cv2 is None:
+        return False
+    x, y, w, h = _normalize_xywh(bbox, image_size)
+    if w < 16 or h < 40:
+        return False
+    try:
+        crop = luma_image.crop((x, y, x + w, y + h)).convert("L")
+    except Exception:
+        return False
+    arr = np.asarray(crop)
+    if arr.size <= 0:
+        return False
+    dark_mask = (arr <= 120).astype("uint8")
+    dark_count = int(dark_mask.sum())
+    area = int(arr.size)
+    dark_ratio = dark_count / float(max(1, area))
+    if dark_ratio < 0.025 or dark_ratio > 0.20:
+        return False
+    bright_ratio = float((arr >= 220).sum()) / float(max(1, area))
+    if bright_ratio < 0.70:
+        return False
+    try:
+        _count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(dark_mask, 8)
+    except Exception:
+        return False
+    components: List[Tuple[float, float, int]] = []
+    oversized = 0
+    for label in range(1, int(stats.shape[0])):
+        cx, cy, cw, ch, component_area = [int(value) for value in stats[label][:5]]
+        if component_area < 20:
+            continue
+        if cw > max(48, int(w * 0.72)) or ch > max(72, int(h * 0.72)):
+            oversized += 1
+            continue
+        density = component_area / float(max(1, cw * ch))
+        if 0.10 <= density <= 0.95 and 4 <= cw <= max(42, int(w * 0.65)) and 6 <= ch <= max(48, int(h * 0.45)):
+            components.append((cx + cw / 2.0, cy + ch / 2.0, component_area))
+    if oversized > 0 or len(components) < 3:
+        return False
+    x_centers = [item[0] for item in components]
+    y_centers = [item[1] for item in components]
+    if max(y_centers) - min(y_centers) < max(32.0, h * 0.35):
+        return False
+    if max(x_centers) - min(x_centers) > max(28.0, w * 0.42):
+        return False
+    component_area = sum(item[2] for item in components)
+    if component_area / float(max(1, dark_count)) < 0.58:
+        return False
+    return True
+
+
 def _paired_ogkalu_text_presence_proven(
     *,
     luma_image: Any,
@@ -9981,7 +10241,10 @@ def _paired_ogkalu_text_presence_proven(
     for entry in entries:
         if _optional_float(entry.get("confidence")) is not None and float(entry.get("confidence") or 0.0) < OGKALU_SINGLE_MODEL_AUTHORITY_CONFIDENCE:
             continue
-        if _luma_bbox_has_text_like_dark_components(luma_image, _text_evidence_bbox_xywh(entry, image_size), image_size):
+        bbox = _text_evidence_bbox_xywh(entry, image_size)
+        if _luma_bbox_has_text_like_dark_components(luma_image, bbox, image_size):
+            return True
+        if _luma_bbox_has_sparse_vertical_text_components(luma_image, bbox, image_size):
             return True
     return False
 
