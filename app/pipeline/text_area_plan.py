@@ -67,6 +67,7 @@ SEMANTIC_KIND_UNKNOWN = "unknown"
 
 TEXT_AREA_COMPONENT_AUTHORIZATION_MAP_VERSION = "text_area_component_authorization_map_v1"
 OGKALU_SINGLE_MODEL_AUTHORITY_CONFIDENCE = 0.85
+OGKALU_TEXT_FREE_BACKGROUND_ROOT_CONFIDENCE = 0.70
 
 PROJECTION_READY = "projection_ready"
 PROJECTION_NO_SEMANTIC_AUTHORITY = "projection_no_semantic_authority"
@@ -1352,6 +1353,14 @@ def _text_area_graph_workflow_roots_should_merge(
         metrics["y_overlap_min_ratio"] >= 0.58
         and metrics["x_overlap_min_ratio"] >= 0.08
     ):
+        first_text_ids = _text_area_graph_text_unit_evidence_ids(first)
+        second_text_ids = _text_area_graph_text_unit_evidence_ids(second)
+        if first_text_ids and second_text_ids and not (first_text_ids & second_text_ids) and not shared_evidence:
+            first_area = _bbox_area_xywh(first_bbox)
+            second_area = _bbox_area_xywh(second_bbox)
+            area_ratio = min(first_area, second_area) / max(1.0, float(max(first_area, second_area)))
+            if area_ratio < 0.35:
+                return False
         if _text_area_graph_shared_text_unit_evidence_ids(first, second):
             return False
         return True
@@ -7175,6 +7184,7 @@ def _container_from_fused(
                 visual=visual,
                 image_size=image_size,
                 luma_image=luma_image,
+                model_confidence=_semantic_role_model_confidence(semantic_role_evidence),
             )
             else "text_area_plan:caption_background_candidate"
         )
@@ -7967,17 +7977,13 @@ def _top_band_caption_background_authority_allowed(
     if x + w >= width - max(2, int(width * 0.002)):
         return False
     if candidate_kind == "visual_column":
-        if w < width * 0.030 or w > width * 0.10:
-            return False
-        if h < height * 0.045 or h > height * 0.24:
-            return False
-        return True
+        return False
     if w < width * 0.045 or w > width * 0.24:
         return False
     if h < height * 0.045 or h > height * 0.24:
         return False
     if candidate_kind == "visual":
-        return True
+        return False
     reason = str(search_reason)
     if "localized_ink" in reason:
         return True
@@ -8538,6 +8544,8 @@ def _demote_weak_background_authority_overlapping_protected(
             continue
         typed_reasons = {str(item) for item in _semantic_role_values(role_evidence, "typed_authority_reason_codes")}
         if not any(any(token in reason for token in WEAK_BACKGROUND_AUTHORITY_REASON_TOKENS) for reason in typed_reasons):
+            continue
+        if _has_explicit_text_free_background_model_boundary(role_evidence, image_size):
             continue
         bbox = _normalize_xywh(container.bbox, image_size)
         if not bbox:
@@ -9791,6 +9799,7 @@ def _text_free_caption_candidate_has_background_authority(
     visual: Mapping[str, Any],
     image_size: Tuple[int, int],
     luma_image: Any = None,
+    model_confidence: float | None = None,
 ) -> bool:
     if fused_type not in {"free_text", "caption_or_background_candidate"}:
         return False
@@ -9814,6 +9823,25 @@ def _text_free_caption_candidate_has_background_authority(
     wide_enough_for_caption = w >= width * 0.070
     not_page_edge_art = x + w < width - max(2, int(width * 0.002))
     typed_text_free_model = "ogkalu_text_free" in " ".join(str(item).lower() for item in reasons)
+    model_confident_text_free = (
+        typed_text_free_model
+        and model_confidence is not None
+        and model_confidence >= OGKALU_TEXT_FREE_BACKGROUND_ROOT_CONFIDENCE
+    )
+    if (
+        luma_image is not None
+        and model_confident_text_free
+        and not_page_edge_art
+        and y <= int(image_size[1]) * 0.12
+        and width * 0.025 <= w <= width * 0.11
+        and int(image_size[1]) * 0.025 <= h <= int(image_size[1]) * 0.12
+        and (
+            _luma_bbox_has_text_like_dark_components(luma_image, bbox, image_size)
+            or _luma_bbox_has_sparse_vertical_text_components(luma_image, bbox, image_size)
+            or _has_compact_top_title_text(luma_image, bbox, image_size)
+        )
+    ):
+        return True
     if (
         luma_image is not None
         and typed_text_free_model
@@ -9848,6 +9876,38 @@ def _text_free_caption_candidate_has_background_authority(
         and _has_coherent_caption_text_column(luma_image, bbox, image_size)
         and _top_band_right_column_has_background_context(luma_image, bbox, image_size)
     )
+
+
+def _has_explicit_text_free_background_model_boundary(
+    role_evidence: Mapping[str, Any],
+    image_size: Tuple[int, int],
+) -> bool:
+    reason_text = " ".join(
+        [str(role_evidence.get("authority_evidence_kind") or "")]
+        + [str(item) for item in _semantic_role_values(role_evidence, "typed_authority_reason_codes")]
+    )
+    if "typed_text_free_background_model_authority" not in reason_text:
+        return False
+    for field_name in ("text_unit_evidence_bboxes", "model_evidence_bboxes"):
+        entries = role_evidence.get(field_name) or []
+        if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+            continue
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            if str(entry.get("class_name") or "") != "text_free":
+                continue
+            confidence = _optional_float(entry.get("confidence"))
+            if confidence is None or confidence < OGKALU_TEXT_FREE_BACKGROUND_ROOT_CONFIDENCE:
+                continue
+            x, y, w, h = _coerce_xywh(_text_evidence_bbox_xywh(entry, image_size))
+            width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+            if w <= 0 or h <= 0:
+                continue
+            if w > width * 0.18 or h > height * 0.18:
+                continue
+            return True
+    return False
 
 
 def _has_coherent_caption_text_column(
