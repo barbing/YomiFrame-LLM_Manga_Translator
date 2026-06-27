@@ -6032,6 +6032,49 @@ def _semantic_role_evidence_with_state(
     return _semantic_role_evidence_with_provider_records(evidence)
 
 
+def _semantic_role_evidence_without_cleanup_authority(
+    role_evidence: Mapping[str, Any],
+    state: str,
+) -> Dict[str, Any]:
+    evidence = dict(role_evidence or {})
+    cleanup_states = [
+        str(item)
+        for item in _semantic_role_state_values(evidence, "cleanup_authority_states")
+        if str(item) != state
+    ]
+    if cleanup_states:
+        evidence["cleanup_authority_states"] = cleanup_states
+    else:
+        evidence.pop("cleanup_authority_states", None)
+    candidate_states = _text_area_graph_unique_strings(
+        _semantic_role_state_values(evidence, "cleanup_candidate_states") + [state]
+    )
+    if candidate_states:
+        evidence["cleanup_candidate_states"] = candidate_states
+    typed_reasons = [
+        str(item)
+        for item in _semantic_role_values(evidence, "typed_authority_reason_codes")
+        if "typed_speech_bubble_mask_authority" not in str(item)
+    ]
+    if typed_reasons:
+        evidence["typed_authority_reason_codes"] = typed_reasons
+    else:
+        evidence.pop("typed_authority_reason_codes", None)
+    records = []
+    for record in evidence.get("semantic_evidence_records") or []:
+        if not isinstance(record, Mapping):
+            continue
+        if str(record.get("authority_state") or "") == state:
+            continue
+        records.append(dict(record))
+    if records:
+        evidence["semantic_evidence_records"] = records
+    else:
+        evidence.pop("semantic_evidence_records", None)
+    evidence["authority_evidence_kind"] = "review_only_mask_primary_candidate"
+    return evidence
+
+
 def _container_marker_text(
     container: Mapping[str, Any] | TextAreaContainer,
     *,
@@ -7034,8 +7077,9 @@ def _container_from_fused(
         has_kitsumed = bool(fused.get("linked_kitsumed_mask_ids"))
         has_ogkalu = bool(fused.get("linked_ogkalu_detection_ids"))
         large_mask_primary = has_kitsumed and _bbox_area_xywh(bbox) >= 45000
+        speech_authority_evidence = semantic_role_evidence
         if has_kitsumed:
-            semantic_role_evidence = _semantic_role_evidence_with_state(
+            speech_authority_evidence = _semantic_role_evidence_with_state(
                 semantic_role_evidence,
                 "cleanup_authority_states",
                 AUTH_CLEANUP_TRANSLATE_SPEECH,
@@ -7050,7 +7094,7 @@ def _container_from_fused(
                 bbox=bbox,
                 mask_summary={"mask_bbox": _safe_list(fused.get("mask_bbox"))},
                 source_model_ids=source_ids,
-                semantic_role_evidence=semantic_role_evidence,
+                semantic_role_evidence=speech_authority_evidence,
                 confidence=confidence,
                 confidence_tier=confidence_tier,
                 route_intent=ROUTE_TRANSLATE_SPEECH,
@@ -7074,7 +7118,7 @@ def _container_from_fused(
                 bbox=bbox,
                 mask_summary={"mask_bbox": _safe_list(fused.get("mask_bbox"))},
                 source_model_ids=source_ids,
-                semantic_role_evidence=semantic_role_evidence,
+                semantic_role_evidence=speech_authority_evidence,
                 confidence=confidence,
                 confidence_tier=confidence_tier,
                 route_intent=ROUTE_TRANSLATE_SPEECH,
@@ -7104,7 +7148,7 @@ def _container_from_fused(
                 bbox=bbox,
                 mask_summary={"mask_bbox": _safe_list(fused.get("mask_bbox"))},
                 source_model_ids=source_ids,
-                semantic_role_evidence=semantic_role_evidence,
+                semantic_role_evidence=speech_authority_evidence,
                 confidence=confidence,
                 confidence_tier=confidence_tier,
                 route_intent=ROUTE_TRANSLATE_SPEECH,
@@ -7122,6 +7166,10 @@ def _container_from_fused(
         review_reason = "mask_primary_container_requires_review" if has_kitsumed else "low_confidence_speech_mask"
         if has_kitsumed and not has_ogkalu:
             reasons = reasons + ["text_area_plan:mask_primary_without_support_review_only"]
+            semantic_role_evidence = _semantic_role_evidence_without_cleanup_authority(
+                semantic_role_evidence,
+                AUTH_CLEANUP_TRANSLATE_SPEECH,
+            )
         return TextAreaContainer(
             container_id=container_id,
             page_id=page_id,
@@ -7141,7 +7189,17 @@ def _container_from_fused(
             ocr_eligibility_reason="blocked_mask_primary_review_only" if has_kitsumed and not has_ogkalu else "speech_mask_review_fallback",
         )
 
-    if (fused_type == "caption_or_background_candidate" or fused_type == "free_text") and _looks_like_caption_background_bbox(bbox, image_size):
+    caption_background_candidate_bbox = _looks_like_caption_background_bbox(
+        bbox,
+        image_size,
+    ) or _looks_like_high_confidence_top_text_free_background_bbox(
+        fused_type=fused_type,
+        reasons=reasons,
+        bbox=bbox,
+        image_size=image_size,
+        model_confidence=_semantic_role_model_confidence(semantic_role_evidence),
+    )
+    if (fused_type == "caption_or_background_candidate" or fused_type == "free_text") and caption_background_candidate_bbox:
         if _text_free_caption_candidate_is_protected_sfx(
             fused_type=fused_type,
             reasons=reasons,
@@ -7592,7 +7650,16 @@ def _container_from_unlinked_text_area_evidence(
     confidence = float(evidence.get("confidence") or 0.0)
     semantic_role_evidence = _semantic_role_evidence_from_text_area_evidence(evidence)
     visual = _container_visual_stats(luma_image, bbox, image_size)
-    top_caption = class_name == "text_free" and _looks_like_caption_background_bbox(bbox, image_size)
+    top_caption = class_name == "text_free" and (
+        _looks_like_caption_background_bbox(bbox, image_size)
+        or _looks_like_high_confidence_top_text_free_background_bbox(
+            fused_type="free_text",
+            reasons=["ogkalu_text_free_without_kitsumed_mask"],
+            bbox=bbox,
+            image_size=image_size,
+            model_confidence=confidence,
+        )
+    )
     if top_caption:
         reasons = ["ogkalu_text_free_without_kitsumed_mask", "text_area_plan:top_caption_background_candidate"]
         has_background_authority = (
@@ -9572,6 +9639,40 @@ def _looks_like_caption_background_bbox(bbox: Sequence[int], image_size: Tuple[i
     return top_band and narrow_text_column and caption_height and x < width * 0.96
 
 
+def _looks_like_high_confidence_top_text_free_background_bbox(
+    *,
+    fused_type: str,
+    reasons: Sequence[Any],
+    bbox: Sequence[Any],
+    image_size: Tuple[int, int],
+    model_confidence: float | None,
+) -> bool:
+    if fused_type not in {"free_text", "caption_or_background_candidate"}:
+        return False
+    if not _looks_like_top_caption_bbox(bbox, image_size):
+        return False
+    if _is_clipped_or_degenerate_bbox(bbox, image_size):
+        return False
+    reason_text = " ".join(str(item).lower() for item in reasons)
+    if "ogkalu_text_free" not in reason_text:
+        return False
+    if model_confidence is None or model_confidence < OGKALU_TEXT_FREE_BACKGROUND_ROOT_CONFIDENCE:
+        return False
+    x, y, w, h = _coerce_xywh(bbox)
+    width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    if w <= 0 or h <= 0:
+        return False
+    if x + w >= width - max(2, int(width * 0.002)):
+        return False
+    # This admits only typed model text_free columns; deterministic visual
+    # top-band searches remain non-authoritative root candidates.
+    return bool(
+        y <= height * 0.12
+        and width * 0.045 <= w <= width * 0.12
+        and height * 0.12 <= h <= height * 0.24
+    )
+
+
 def _looks_like_side_narration_background_bbox(
     *,
     fused_type: str,
@@ -9803,7 +9904,21 @@ def _text_free_caption_candidate_has_background_authority(
 ) -> bool:
     if fused_type not in {"free_text", "caption_or_background_candidate"}:
         return False
-    if not _looks_like_caption_background_bbox(bbox, image_size):
+    reason_text = " ".join(str(item).lower() for item in reasons)
+    typed_text_free_model = "ogkalu_text_free" in reason_text
+    model_confident_text_free = (
+        typed_text_free_model
+        and model_confidence is not None
+        and model_confidence >= OGKALU_TEXT_FREE_BACKGROUND_ROOT_CONFIDENCE
+    )
+    high_confidence_top_text_free_background = _looks_like_high_confidence_top_text_free_background_bbox(
+        fused_type=fused_type,
+        reasons=reasons,
+        bbox=bbox,
+        image_size=image_size,
+        model_confidence=model_confidence,
+    )
+    if not (_looks_like_caption_background_bbox(bbox, image_size) or high_confidence_top_text_free_background):
         return False
     if _text_free_caption_candidate_is_protected_sfx(
         fused_type=fused_type,
@@ -9822,12 +9937,26 @@ def _text_free_caption_candidate_has_background_authority(
     # final authority still needs a coherent localized text unit.
     wide_enough_for_caption = w >= width * 0.070
     not_page_edge_art = x + w < width - max(2, int(width * 0.002))
-    typed_text_free_model = "ogkalu_text_free" in " ".join(str(item).lower() for item in reasons)
-    model_confident_text_free = (
-        typed_text_free_model
-        and model_confidence is not None
-        and model_confidence >= OGKALU_TEXT_FREE_BACKGROUND_ROOT_CONFIDENCE
+    tall_top_band_model_text = (
+        model_confident_text_free
+        and not_page_edge_art
+        and y <= int(image_size[1]) * 0.12
+        and width * 0.045 <= w <= width * 0.12
+        and int(image_size[1]) * 0.12 <= h <= int(image_size[1]) * 0.24
     )
+    if tall_top_band_model_text:
+        if luma_image is not None:
+            if (
+                _luma_bbox_has_text_like_dark_components(luma_image, bbox, image_size)
+                or _luma_bbox_has_sparse_vertical_text_components(luma_image, bbox, image_size)
+                or _has_coherent_caption_text_column(luma_image, bbox, image_size)
+            ):
+                return True
+        else:
+            dark = _optional_float(visual.get("dark_ratio"))
+            bright = _optional_float(visual.get("bright_ratio"))
+            if dark is not None and dark >= 0.22 and bright is not None and bright <= 0.62:
+                return True
     if (
         luma_image is not None
         and model_confident_text_free
