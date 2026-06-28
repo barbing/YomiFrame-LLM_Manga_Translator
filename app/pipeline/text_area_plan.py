@@ -6757,9 +6757,6 @@ def _semantic_unit_evidence_bboxes_for_container(container: TextAreaContainer) -
         overlap_ratio = _inside_ratio_xywh(bbox, container.bbox)
         if overlap_ratio < 0.25:
             continue
-        bbox = _semantic_unit_projection_bbox_for_container(container, entry, bbox)
-        if not bbox:
-            continue
         key = tuple(bbox)
         if key in seen:
             continue
