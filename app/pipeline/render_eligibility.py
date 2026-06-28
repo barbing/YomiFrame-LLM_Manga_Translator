@@ -289,6 +289,7 @@ def _decision_for_region(
     semantic_class = _text_from(region, render, keys=("semantic_class", "type", "region_type"))
     cleanup_classes = _cleanup_classes(cleanup_records, mask_records)
     risky_source = _risky_detection_source(region, render)
+    source_glyph_erasure_coverage_proven = _source_glyph_erasure_coverage_proven(source_records)
     source_erasure_unproven = _source_erasure_required_but_unproven(
         source_records=source_records,
         cleanup_records=cleanup_records,
@@ -330,6 +331,7 @@ def _decision_for_region(
         ],
         "source_glyph_generated": any(_truthy(_get(record, "source_glyph_mask_generated", "generated")) for record in source_records),
         "source_glyph_compact": _has_compact_source_glyph_grounding(source_records),
+        "source_glyph_erasure_coverage_proven": source_glyph_erasure_coverage_proven,
         "source_erasure_required_but_unproven": source_erasure_unproven,
         "risky_caption_background_recovery": risky_caption_background_recovery,
         "valid_cleanup_mask_exists": _valid_cleanup_mask_exists(mask_records),
@@ -912,6 +914,42 @@ def _source_glyph_missing_failed_or_quality_failed(records: Sequence[Mapping[str
     return not generated
 
 
+def _source_glyph_erasure_coverage_proven(records: Sequence[Mapping[str, Any]]) -> bool:
+    """True when source-glyph erasure proof is already bound to this region.
+
+    This is not cleanup authorization and does not create a render target. It
+    only prevents fail-closed render suppression when a generated source-glyph
+    proof was already consumed and reports full cleanup coverage for the same
+    region.
+    """
+
+    for record in records:
+        status = str(_get(record, "source_glyph_mask_generation_status", "generation_status") or "").lower()
+        generated = _truthy(_get(record, "source_glyph_mask_generated", "generated")) or status.startswith("generated")
+        consumed = _truthy(_get(record, "source_glyph_mask_consumed_by_renderer", "consumed_by_renderer")) or "consumed" in status
+        if not (generated and consumed):
+            continue
+        if "failed" in status or "quality_failed" in status:
+            continue
+        if _get(record, "source_glyph_mask_missing_reason", "source_glyph_mask_not_generated_reason", "failure_reason"):
+            continue
+        coverage_ratio = max(
+            value
+            for value in (
+                _float_or_none(_first_present(record, "source_glyph_erasure_coverage_ratio", default=None)),
+                _float_or_none(_first_present(record, "source_glyph_mask_cleanup_overlap_ratio", default=None)),
+                _float_or_none(_first_present(record, "cleanup_source_glyph_coverage_ratio", default=None)),
+                _float_or_none(_first_present(record, "source_glyph_mask_expected_overlap_ratio", default=None)),
+                0.0,
+            )
+            if value is not None
+        )
+        covers_source = _truthy(_first_present(record, "cleanup_covers_source_glyphs", default=False))
+        if covers_source and coverage_ratio >= 0.98:
+            return True
+    return False
+
+
 def _expected_source_mask_missing(
     cleanup_records: Sequence[Mapping[str, Any]],
     mask_records: Sequence[Mapping[str, Any]],
@@ -931,7 +969,11 @@ def _source_erasure_required_but_unproven(
 ) -> bool:
     """True when source cleanup is required but no executable mask proof exists."""
 
-    if _cleanup_records_require_source_erasure(cleanup_records) and not _valid_cleanup_mask_exists(mask_records):
+    cleanup_erasure_required = _cleanup_records_require_source_erasure(cleanup_records)
+    valid_cleanup_mask_exists = _valid_cleanup_mask_exists(mask_records)
+    source_glyph_erasure_proven = _source_glyph_erasure_coverage_proven(source_records)
+
+    if cleanup_erasure_required and not valid_cleanup_mask_exists and not source_glyph_erasure_proven:
         return True
 
     source_required = any(
@@ -949,7 +991,9 @@ def _source_erasure_required_but_unproven(
         return False
     source_unproven = _source_glyph_missing_failed_or_quality_failed(source_records)
     expected_mask_missing = _expected_source_mask_missing(cleanup_records, mask_records)
-    return (source_unproven or expected_mask_missing) and not _valid_cleanup_mask_exists(mask_records)
+    return (source_unproven or expected_mask_missing) and not (
+        valid_cleanup_mask_exists or source_glyph_erasure_proven
+    )
 
 
 def _cleanup_records_require_source_erasure(cleanup_records: Sequence[Mapping[str, Any]]) -> bool:
