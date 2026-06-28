@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import difflib
 import math
 import re
-from typing import Any
+from typing import Any, Mapping
 
 
 LOGICAL_TEXT_BLOCK_VERSION = "speech_bubble_logical_text_blocks_v3_physical_source_conservation"
@@ -247,6 +247,7 @@ def apply_same_container_logical_text_blocks(
     """Assign speech-container OCR regions to conservative logical text blocks."""
     try:
         groups = _eligible_speech_groups(regions)
+        explicit_parent_nodes_by_container = _explicit_text_area_parent_nodes_by_container(text_area_plan)
         physical_groups, container_to_physical = _build_physical_bubble_groups(
             groups,
             page_id,
@@ -277,6 +278,7 @@ def apply_same_container_logical_text_blocks(
                 members,
                 image_size,
                 physical_group,
+                explicit_parent_nodes=[],
             )
             member_by_id = {str(region.get("region_id") or ""): region for region in members}
             for block in container_blocks:
@@ -301,6 +303,7 @@ def apply_same_container_logical_text_blocks(
                 members,
                 image_size,
                 container_to_physical.get(container_id),
+                explicit_parent_nodes=explicit_parent_nodes_by_container.get(container_id, []),
             )
             if not container_blocks and len(members) > 1:
                 skipped += 1
@@ -620,6 +623,39 @@ def _plan_speech_container_summaries(
             "speech_context_only": bool(is_speech_context and not is_speech_authority),
         }
     return summaries
+
+
+def _explicit_text_area_parent_nodes_by_container(text_area_plan: Any | None) -> dict[str, list[dict[str, Any]]]:
+    plan = _text_area_plan_to_dict(text_area_plan)
+    graph_plan = plan.get("root_parent_child_plan")
+    if hasattr(graph_plan, "to_dict"):
+        try:
+            graph_plan = graph_plan.to_dict()
+        except Exception:
+            graph_plan = {}
+    if not isinstance(graph_plan, Mapping):
+        return {}
+    by_container: dict[str, list[dict[str, Any]]] = {}
+    for node in graph_plan.get("parent_nodes") or []:
+        if hasattr(node, "to_dict"):
+            try:
+                node = node.to_dict()
+            except Exception:
+                continue
+        if not isinstance(node, Mapping):
+            continue
+        if not bool(node.get("is_explicit_parent_obligation")):
+            continue
+        if str(node.get("parent_kind") or "").strip() not in {"", "speech"}:
+            continue
+        container_id = str(node.get("container_id") or "").strip()
+        parent_node_id = str(node.get("parent_node_id") or "").strip()
+        if not container_id or not parent_node_id:
+            continue
+        by_container.setdefault(container_id, []).append(dict(node))
+    for nodes in by_container.values():
+        nodes.sort(key=lambda node: _manga_bbox_sort_key(_bbox(node.get("bbox"))))
+    return by_container
 
 
 def _is_ogkalu_bubble_speech_context(container: dict[str, Any]) -> bool:
@@ -970,11 +1006,22 @@ def _build_container_blocks(
     members: list[dict[str, Any]],
     image_size: tuple[int, int] | None,
     physical_group: PhysicalBubbleGroup | None,
+    explicit_parent_nodes: list[dict[str, Any]] | None = None,
 ) -> tuple[list[LogicalTextBlock], list[LogicalTextOwnershipRecord], set[str]]:
     candidates = [region for region in members if _clean_source_text(str(region.get("ocr_text") or ""))]
     if not candidates:
         return [], [], set()
     container_bbox = _union_region_bboxes(candidates, image_size)
+    explicit_parent_block = _single_explicit_parent_boundary_block_if_legacy_would_split(
+        page_id,
+        container_id,
+        candidates,
+        image_size,
+        physical_group,
+        explicit_parent_nodes or [],
+    )
+    if explicit_parent_block is not None:
+        return [explicit_parent_block], [], set()
     components = _container_components(candidates, container_bbox)
     multi_component = len(components) > 1
     blocks: list[LogicalTextBlock] = []
@@ -995,6 +1042,246 @@ def _build_container_blocks(
         records.extend(component_records)
         unowned_meaningful.update(component_unowned)
     return blocks, records, unowned_meaningful
+
+
+def _single_explicit_parent_boundary_block_if_legacy_would_split(
+    page_id: str,
+    container_id: str,
+    candidates: list[dict[str, Any]],
+    image_size: tuple[int, int] | None,
+    physical_group: PhysicalBubbleGroup | None,
+    explicit_parent_nodes: list[dict[str, Any]],
+) -> LogicalTextBlock | None:
+    if len(explicit_parent_nodes) != 1 or len(candidates) < 2:
+        return None
+    parent_node = explicit_parent_nodes[0]
+    parent_bbox = _clip_bbox(_bbox(parent_node.get("bbox")), image_size)
+    if parent_bbox == [0, 0, 1, 1]:
+        return None
+    parent_members = [
+        region
+        for region in candidates
+        if _region_within_explicit_parent_boundary(region, parent_bbox)
+    ]
+    if len(parent_members) < 2:
+        return None
+    source_members = [
+        region
+        for region in parent_members
+        if _source_body(_clean_source_text(str(region.get("ocr_text") or "")))
+    ]
+    if not _members_form_single_visual_column(source_members, parent_bbox):
+        return None
+    parent_member_ids = {str(region.get("region_id") or "") for region in parent_members if str(region.get("region_id") or "")}
+    candidate_ids = {str(region.get("region_id") or "") for region in candidates if str(region.get("region_id") or "")}
+    if parent_member_ids != candidate_ids:
+        return None
+    if len(_container_components(parent_members, parent_bbox)) < 2:
+        return None
+    return _build_explicit_parent_boundary_block(
+        page_id,
+        container_id,
+        parent_node,
+        parent_members,
+        parent_bbox,
+        image_size,
+        physical_group,
+    )
+
+
+def _region_within_explicit_parent_boundary(region: dict[str, Any], parent_bbox: list[int]) -> bool:
+    region_bbox = _bbox(region.get("bbox"))
+    if _bbox_inside_ratio(region_bbox, parent_bbox) >= 0.55:
+        return True
+    rx, ry, rw, rh = region_bbox
+    px, py, pw, ph = parent_bbox
+    center_x = rx + rw / 2.0
+    center_y = ry + rh / 2.0
+    return px <= center_x <= px + pw and py <= center_y <= py + ph
+
+
+def _build_explicit_parent_boundary_block(
+    page_id: str,
+    container_id: str,
+    parent_node: dict[str, Any],
+    members: list[dict[str, Any]],
+    parent_bbox: list[int],
+    image_size: tuple[int, int] | None,
+    physical_group: PhysicalBubbleGroup | None,
+) -> LogicalTextBlock | None:
+    source_texts = {
+        str(region.get("region_id") or ""): _clean_source_text(str(region.get("ocr_text") or ""))
+        for region in members
+    }
+    meaningful = [
+        region
+        for region in members
+        if _source_body(source_texts.get(str(region.get("region_id") or ""), ""))
+    ]
+    if not meaningful:
+        return None
+    ordered = _explicit_parent_source_order(members, parent_bbox, physical_group)
+    anchor = _explicit_parent_source_order(meaningful, parent_bbox, physical_group)[0]
+    anchor_id = str(anchor.get("region_id") or "")
+    parent_node_id = str(parent_node.get("parent_node_id") or "").strip()
+    if not anchor_id or not parent_node_id:
+        return None
+
+    reason_codes = [
+        "same_text_area_container",
+        "logical_text_block_v3",
+        "text_area_plan_explicit_parent_boundary",
+        "legacy_component_split_overridden_by_explicit_parent",
+        "source_evidence_attached_under_explicit_parent",
+        "translation_unit:single_block",
+    ]
+    for reason in _component_relation_reasons(members, parent_bbox):
+        reason_codes.append(reason)
+    for reason in parent_node.get("reason_codes") or []:
+        if str(reason).strip():
+            reason_codes.append(str(reason))
+
+    combined = ""
+    transferred: list[str] = []
+    duplicates: list[str] = []
+    punctuation_child_ids: list[str] = []
+    noise_child_ids: list[str] = []
+    ownership_status: dict[str, str] = {anchor_id: _OWNERSHIP_BLOCK_ANCHOR}
+    previous_source_region: dict[str, Any] | None = None
+
+    for region in ordered:
+        rid = str(region.get("region_id") or "")
+        if not rid:
+            continue
+        text = source_texts.get(rid, "")
+        if rid != anchor_id and (not _source_body(text) or _is_punctuation_or_ellipsis_only(text)):
+            punctuation_child_ids.append(rid)
+            ownership_status[rid] = _OWNERSHIP_PUNCTUATION_CHILD
+            reason_codes.append("punctuation_child_suppressed")
+            continue
+        merged, action = _merge_explicit_parent_source_fragment(
+            combined,
+            text,
+            previous_source_region,
+            region,
+            parent_bbox,
+        )
+        if rid == anchor_id:
+            combined = merged
+            previous_source_region = region if _source_body(text) else previous_source_region
+            if action == "overlap":
+                reason_codes.append("anchor_source_overlap_merged")
+            continue
+        if action == "duplicate":
+            duplicates.append(rid)
+            ownership_status[rid] = _OWNERSHIP_DUPLICATE_CHILD
+            reason_codes.append("duplicate_fragment_suppressed")
+            continue
+        if action == "same_column_append":
+            reason_codes.append("same_column_source_fragment_joined_under_explicit_parent")
+        elif action == "overlap":
+            reason_codes.append("overlapping_source_fragment_merged")
+        else:
+            reason_codes.append("adjacent_source_fragment_joined")
+        combined = merged
+        previous_source_region = region if _source_body(text) else previous_source_region
+        transferred.append(rid)
+        ownership_status[rid] = _OWNERSHIP_TRANSFERRED_CHILD
+
+    member_ids = [
+        rid
+        for rid in [str(region.get("region_id") or "") for region in ordered]
+        if rid in ownership_status
+    ]
+    block_bbox = _clip_bbox(_bbox(parent_bbox), image_size)
+    block = LogicalTextBlock(
+        block_id=parent_node_id,
+        page_id=page_id,
+        container_id=container_id,
+        role="speech_bubble",
+        member_region_ids=member_ids,
+        anchor_region_id=anchor_id,
+        transferred_region_ids=transferred,
+        duplicate_region_ids=duplicates,
+        punctuation_child_ids=punctuation_child_ids,
+        noise_child_ids=noise_child_ids,
+        source_text=combined,
+        reason_codes=sorted(set(reason_codes)),
+        confidence=_block_confidence(members, transferred, duplicates, punctuation_child_ids, noise_child_ids),
+        would_change_behavior=True,
+        member_source_texts={rid: source_texts.get(rid, "") for rid in member_ids},
+        anchor_original_text=source_texts.get(anchor_id, ""),
+        bbox=block_bbox,
+        allowed_bbox=block_bbox,
+        text_conservation_status=_text_conservation_status(transferred, duplicates, punctuation_child_ids, noise_child_ids),
+        ownership_status_by_region=ownership_status,
+        physical_bubble_id=physical_group.physical_bubble_id if physical_group else None,
+        physical_bubble_member_container_ids=list(physical_group.member_container_ids) if physical_group else [container_id],
+        physical_bubble_source=physical_group.source if physical_group else "region_text_area_assignment",
+        physical_bubble_reason_codes=list(physical_group.reason_codes) if physical_group else [],
+    )
+    _apply_source_quality_assessment(block, members)
+    return block
+
+
+def _merge_explicit_parent_source_fragment(
+    current: str,
+    new: str,
+    previous_region: dict[str, Any] | None,
+    region: dict[str, Any],
+    parent_bbox: list[int],
+) -> tuple[str, str]:
+    current = _clean_source_text(current)
+    new = _clean_source_text(new)
+    if not new:
+        return current, "duplicate"
+    if not current:
+        return new, "append"
+    merged, action = _merge_source_fragment(current, new)
+    if action in {"duplicate", "overlap"}:
+        return merged, action
+    if previous_region is not None and _same_visual_column_continuation(previous_region, region, parent_bbox):
+        return current + new, "same_column_append"
+    return merged, action
+
+
+def _same_visual_column_continuation(
+    previous_region: dict[str, Any],
+    region: dict[str, Any],
+    parent_bbox: list[int],
+) -> bool:
+    related, reason = _regions_related_for_block(previous_region, region, parent_bbox)
+    return bool(related and reason == "same_column_continuation")
+
+
+def _explicit_parent_source_order(
+    members: list[dict[str, Any]],
+    parent_bbox: list[int],
+    physical_group: PhysicalBubbleGroup | None,
+) -> list[dict[str, Any]]:
+    source_members = [
+        region
+        for region in members
+        if _source_body(_clean_source_text(str(region.get("ocr_text") or "")))
+    ]
+    if len(source_members) >= 2 and _members_form_single_visual_column(source_members, parent_bbox):
+        return sorted(members, key=lambda region: (_bbox(region.get("bbox"))[1], _bbox(region.get("bbox"))[0]))
+    return sorted(members, key=lambda region: _logical_block_member_sort_key(region, physical_group))
+
+
+def _members_form_single_visual_column(members: list[dict[str, Any]], parent_bbox: list[int]) -> bool:
+    if len(members) < 2:
+        return False
+    for index, left in enumerate(members):
+        left_box = _bbox(left.get("bbox"))
+        for right in members[index + 1 :]:
+            right_box = _bbox(right.get("bbox"))
+            if _horizontal_overlap_fraction(left_box, right_box) >= 0.35:
+                continue
+            if _horizontal_gap(left_box, right_box) <= max(8, int(0.08 * _bbox(parent_bbox)[2])):
+                continue
+            return False
+    return True
 
 
 def _container_components(members: list[dict[str, Any]], container_bbox: list[int]) -> list[list[dict[str, Any]]]:
@@ -2342,6 +2629,12 @@ def _region_confidence(region: dict[str, Any]) -> float:
 
 def _manga_region_sort_key(region: dict[str, Any]) -> tuple[int, int, int]:
     x, y, w, _h = _bbox(region.get("bbox"))
+    right = x + w
+    return (-right, y, x)
+
+
+def _manga_bbox_sort_key(bbox: list[int]) -> tuple[int, int, int]:
+    x, y, w, _h = _bbox(bbox)
     right = x + w
     return (-right, y, x)
 
