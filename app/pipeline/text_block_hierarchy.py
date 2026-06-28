@@ -619,16 +619,20 @@ def _enforce_route_owned_ocr_blockers(
             continue
         parent = parent_by_id.get(str(child.parent_id or ""))
         if _route_owned_ocr_blocker_can_be_represented_by_parent(child, parent):
-            child.final_state = STATE_PUNCTUATION_CHILD
+            _set_child_final_state(child, _represented_route_owned_ocr_blocker_state(child))
             child.represented_by_parent_id = child.parent_id
             child.translated_independently = False
             child.cleanup_independently = False
             child.render_independently = False
             if parent is not None:
-                _append_unique(parent.punctuation_child_ids, child.child_id)
+                _remove_value(parent.rejected_child_ids, child.child_id)
+                if child.final_state == STATE_PUNCTUATION_CHILD:
+                    _append_unique(parent.punctuation_child_ids, child.child_id)
+                else:
+                    _append_unique(parent.dependent_child_ids, child.child_id)
             _append_unique(child.reason_codes, ROUTE_OWNED_OCR_FRAGMENT_REPRESENTED_REASON)
             continue
-        child.final_state = STATE_UNRESOLVED_REVIEW_ONLY
+        _set_child_final_state(child, STATE_UNRESOLVED_REVIEW_ONLY)
         child.represented_by_parent_id = None
         child.translated_independently = False
         child.cleanup_independently = False
@@ -661,16 +665,39 @@ def _route_owned_ocr_blocker_can_be_represented_by_parent(
     if parent is None:
         return False
     state = _ocr_transaction_state_from_child(child)
-    if state not in {"ocr_empty_blocker", "ocr_punctuation_only_blocker"}:
+    if state not in OCR_TRANSACTION_BLOCKER_STATES:
         return False
-    parent_status, _parent_reasons, parent_action = _parent_source_coherence(parent.source_text)
+    if str(parent.role or "") not in {ROLE_SPEECH, ROLE_CAPTION, ROLE_BACKGROUND}:
+        return False
+    if not (parent.translation_unit and parent.cleanup_unit and parent.render_unit):
+        return False
+    parent_status, _parent_reasons, parent_action = _parent_source_coherence(parent.source_text, role=parent.role)
     if parent_status not in {"coherent", "weak"} or parent_action not in {"translate", "translate_with_root_proof"}:
         return False
     if not _source_body_requires_root_blocker(parent.source_text):
         return False
+    if state == "ocr_malformed_blocker":
+        return True
     if _source_body_requires_root_blocker(child.ocr_text):
         return False
     return True
+
+
+def _represented_route_owned_ocr_blocker_state(child: ChildRecognizedTextSegment) -> str:
+    state = _ocr_transaction_state_from_child(child)
+    if state == "ocr_malformed_blocker":
+        return STATE_PARENT_CHILD
+    return STATE_PUNCTUATION_CHILD
+
+
+def _set_child_final_state(child: ChildRecognizedTextSegment, state: str) -> None:
+    child.final_state = state
+    child.reason_codes = [
+        reason
+        for reason in (child.reason_codes or [])
+        if not str(reason or "").startswith("hierarchy_final_state:")
+    ]
+    _append_unique(child.reason_codes, f"hierarchy_final_state:{state}")
 
 
 def _route_owned_ocr_fragment_represented_by_parent(child: ChildRecognizedTextSegment) -> bool:
@@ -3407,6 +3434,11 @@ def _append_unique(items: list[Any], value: Any) -> None:
         return
     if value not in items:
         items.append(value)
+
+
+def _remove_value(items: list[Any], value: Any) -> None:
+    while value in items:
+        items.remove(value)
 
 
 def _short(value: Any, limit: int = 48) -> str:
