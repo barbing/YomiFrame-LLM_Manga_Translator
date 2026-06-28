@@ -1792,7 +1792,6 @@ def _maybe_add_root_final_state_closeout(
                 "source_glyph_mask_id",
                 "cleanup_partition_id",
                 "render_text_completeness_pass",
-                "render_wrapped_lines",
                 "render_missing_characters",
                 "render_outside_root_ratio",
                 "render_density_score",
@@ -1895,6 +1894,7 @@ def _maybe_add_root_final_state_closeout(
                 "caption_component_v4_reading_order",
             ):
                 region[key] = _json_safe(root.get(key))
+            region["root_render_wrapped_lines"] = _json_safe(root.get("render_wrapped_lines"))
         enriched = dict(audit)
         enriched["regions"] = regions
         enriched["text_block_hierarchy"] = enriched_hierarchy

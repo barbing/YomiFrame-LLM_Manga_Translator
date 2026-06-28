@@ -44,6 +44,7 @@ ROLE_SPEECH = "speech"
 ROLE_CAPTION = "caption"
 ROLE_BACKGROUND = "background"
 ROLE_REVIEW = "review"
+GRAPH_CAPTION_BACKGROUND_KINDS = {"caption", "background", "caption_background", "background_narration"}
 
 STATE_PARENT_ANCHOR = "parent_anchor"
 STATE_PARENT_CHILD = "parent_child"
@@ -242,6 +243,60 @@ class ChildRecognizedTextSegment:
 
 
 @dataclass
+class FinalizedTextExecutionParent:
+    parent_id: str
+    page_id: str
+    root_id: str
+    state: str
+    source_text: str = ""
+    role: str = ""
+    translation_required: bool = False
+    cleanup_required: bool = False
+    render_required: bool = False
+    represented_child_ids: list[str] = field(default_factory=list)
+    source_region_ids: list[str] = field(default_factory=list)
+    cleanup_target_bbox: list[int] = field(default_factory=list)
+    render_allowed_area: list[int] = field(default_factory=list)
+    reason_codes: list[str] = field(default_factory=list)
+    unresolved_reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.__dict__)
+
+
+@dataclass
+class FinalizedTextExecutionUnits:
+    page_id: str
+    active_translation_parents: list[FinalizedTextExecutionParent] = field(default_factory=list)
+    punctuation_parent_obligations: list[FinalizedTextExecutionParent] = field(default_factory=list)
+    blocked_or_unresolved_parents: list[FinalizedTextExecutionParent] = field(default_factory=list)
+    excluded_nonworkflow_children: list[ChildRecognizedTextSegment] = field(default_factory=list)
+    active_parent_ids: list[str] = field(default_factory=list)
+    punctuation_parent_ids: list[str] = field(default_factory=list)
+    blocked_parent_ids: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "page_id": self.page_id,
+            "active_parent_ids": list(self.active_parent_ids),
+            "punctuation_parent_ids": list(self.punctuation_parent_ids),
+            "blocked_parent_ids": list(self.blocked_parent_ids),
+            "active_translation_parents": [
+                parent.to_dict() for parent in self.active_translation_parents
+            ],
+            "punctuation_parent_obligations": [
+                parent.to_dict() for parent in self.punctuation_parent_obligations
+            ],
+            "blocked_or_unresolved_parents": [
+                parent.to_dict() for parent in self.blocked_or_unresolved_parents
+            ],
+            "excluded_nonworkflow_children": [
+                child.to_dict() for child in self.excluded_nonworkflow_children
+            ],
+        }
+
+
+@dataclass
 class TextBlockHierarchyResult:
     page_id: str
     version: str = TEXT_BLOCK_HIERARCHY_VERSION
@@ -404,22 +459,77 @@ class TextBlockHierarchyResult:
             "translation_unit_ids": list(self.translation_unit_ids),
             "cleanup_unit_ids": list(self.cleanup_unit_ids),
             "render_unit_ids": list(self.render_unit_ids),
+            "finalized_execution_units": self.finalized_execution_units().to_dict(),
             "text_block_hierarchy_summary": self.summary_counts(),
         }
+
+    def finalized_execution_units(self) -> FinalizedTextExecutionUnits:
+        children_by_parent: dict[str, list[ChildRecognizedTextSegment]] = {}
+        for child in self.child_segments:
+            if child.parent_id:
+                children_by_parent.setdefault(str(child.parent_id), []).append(child)
+
+        units = FinalizedTextExecutionUnits(page_id=self.page_id)
+        for parent in self.parent_units:
+            children = children_by_parent.get(parent.parent_id, [])
+            finalized_parent = _finalized_parent_record(parent, children)
+            if _parent_is_punctuation_identity(parent):
+                units.punctuation_parent_obligations.append(finalized_parent)
+                units.punctuation_parent_ids.append(parent.parent_id)
+            elif _parent_is_active_translation_unit(parent):
+                units.active_translation_parents.append(finalized_parent)
+                units.active_parent_ids.append(parent.parent_id)
+            else:
+                units.blocked_or_unresolved_parents.append(finalized_parent)
+                units.blocked_parent_ids.append(parent.parent_id)
+
+        units.excluded_nonworkflow_children = [
+            child for child in self.child_segments
+            if child.final_state in {STATE_BLOCKED_BY_ROOT_POLICY, STATE_NOISE_REVIEW_ONLY}
+        ]
+        return units
 
     def region_audit_fields(self) -> dict[str, dict[str, Any]]:
         fields: dict[str, dict[str, Any]] = {}
         root_by_id = {root.root_id: root for root in self.roots}
         parent_by_id = {parent.parent_id: parent for parent in self.parent_units}
+        children_by_parent: dict[str, list[ChildRecognizedTextSegment]] = {}
+        for child in self.child_segments:
+            if child.parent_id:
+                children_by_parent.setdefault(str(child.parent_id), []).append(child)
         for child in self.child_segments:
             root = root_by_id.get(child.root_id)
             parent = parent_by_id.get(str(child.parent_id or ""))
+            parent_children = children_by_parent.get(str(child.parent_id or ""), [])
+            parent_active = bool(parent and _parent_is_active_translation_unit(parent))
+            graph_ownership_status = _graph_child_ownership_status(child.final_state)
             fields[child.source_region_id] = {
                 "text_block_root_id": child.root_id,
                 "parent_logical_text_unit_id": child.parent_id,
                 "child_recognized_text_segment_id": child.child_id,
                 "child_final_state": child.final_state,
                 "represented_by_parent_id": child.represented_by_parent_id,
+                "logical_text_block_id": child.parent_id,
+                "logical_text_ownership_status": graph_ownership_status,
+                "logical_text_block_source_text": parent.source_text if parent else "",
+                "logical_text_block_bbox": list(parent.cleanup_target_bbox) if parent else [],
+                "logical_text_block_allowed_bbox": list(parent.render_allowed_area) if parent else [],
+                "parent_logical_text_unit_cleanup_target_bbox": list(parent.cleanup_target_bbox) if parent else [],
+                "parent_logical_text_unit_render_allowed_area": list(parent.render_allowed_area) if parent else [],
+                "logical_text_block_member_region_ids": [
+                    item.source_region_id for item in parent_children if item.source_region_id
+                ],
+                "logical_text_block_anchor_region_id": (
+                    next((item.source_region_id for item in parent_children if item.final_state == STATE_PARENT_ANCHOR), "")
+                ),
+                "logical_text_block_transferred_region_ids": [
+                    item.source_region_id for item in parent_children if item.final_state == STATE_PARENT_CHILD
+                ],
+                "logical_text_block_duplicate_region_ids": [
+                    item.source_region_id for item in parent_children if item.final_state == STATE_DUPLICATE_CHILD
+                ],
+                "logical_text_block_translation_unit": bool(parent_active and child.final_state == STATE_PARENT_ANCHOR),
+                "source_text_represented_by_block_id": child.represented_by_parent_id,
                 "translated_independently": child.translated_independently,
                 "cleanup_independently": child.cleanup_independently,
                 "render_independently": child.render_independently,
@@ -428,7 +538,7 @@ class TextBlockHierarchyResult:
                 ),
                 "hierarchy_reason_codes": list(child.reason_codes),
                 "active_translation_unit_id": (
-                    child.parent_id if child.parent_id and child.final_state in {STATE_PARENT_ANCHOR, STATE_STANDALONE_PARENT} else None
+                    child.parent_id if parent_active and child.parent_id and child.final_state in {STATE_PARENT_ANCHOR, STATE_STANDALONE_PARENT} else None
                 ),
                 "root_parent_count": root.root_parent_count if root else None,
                 "root_child_count": root.root_child_count if root else None,
@@ -470,7 +580,7 @@ class TextBlockHierarchyResult:
                 "source_glyph_mask_id": root.source_glyph_mask_id if root else "",
                 "cleanup_partition_id": root.cleanup_partition_id if root else "",
                 "render_text_completeness_pass": root.render_text_completeness_pass if root else None,
-                "render_wrapped_lines": list(root.render_wrapped_lines) if root else [],
+                "root_render_wrapped_lines": list(root.render_wrapped_lines) if root else [],
                 "render_missing_characters": root.render_missing_characters if root else "",
                 "render_outside_root_ratio": root.render_outside_root_ratio if root else None,
                 "render_density_score": root.render_density_score if root else None,
@@ -514,26 +624,38 @@ def build_text_block_hierarchy(
             if isinstance(region, dict) and str(region.get("region_id") or "")
         }
 
-        for block in blocks:
-            parent = _parent_from_logical_block(page_id, block, roots_by_container, roots_by_physical)
-            parent_units.append(parent)
-            root = roots_by_key.get(parent.root_id)
-            if root:
-                _append_unique(root.parent_unit_ids, parent.parent_id)
-            member_region_ids = [
-                str(rid)
-                for rid in (block.get("logical_text_block_member_region_ids") or [])
-                if str(rid)
-            ]
-            for rid in member_region_ids:
-                region = region_by_id.get(rid)
-                if not region:
-                    continue
-                child = _child_from_region(page_id, region, parent.root_id, parent.parent_id, block=block)
-                children.append(child)
-                child_by_region[rid] = child
+        graph_parent_nodes = _graph_parent_nodes(plan)
+        if graph_parent_nodes:
+            graph_children = _materialize_graph_plan_parents(
+                page_id=page_id,
+                regions=regions,
+                parent_nodes=graph_parent_nodes,
+                roots_by_key=roots_by_key,
+            )
+            parent_units.extend(graph_children[0])
+            children.extend(graph_children[1])
+            child_by_region.update(graph_children[2])
+        else:
+            for block in blocks:
+                parent = _parent_from_logical_block(page_id, block, roots_by_container, roots_by_physical)
+                parent_units.append(parent)
+                root = roots_by_key.get(parent.root_id)
                 if root:
-                    _append_unique(root.child_segment_ids, child.child_id)
+                    _append_unique(root.parent_unit_ids, parent.parent_id)
+                member_region_ids = [
+                    str(rid)
+                    for rid in (block.get("logical_text_block_member_region_ids") or [])
+                    if str(rid)
+                ]
+                for rid in member_region_ids:
+                    region = region_by_id.get(rid)
+                    if not region:
+                        continue
+                    child = _child_from_region(page_id, region, parent.root_id, parent.parent_id, block=block)
+                    children.append(child)
+                    child_by_region[rid] = child
+                    if root:
+                        _append_unique(root.child_segment_ids, child.child_id)
 
         for region in regions:
             rid = str(region.get("region_id") or "")
@@ -542,11 +664,19 @@ def build_text_block_hierarchy(
             root = _root_for_region(page_id, region, roots_by_container, roots_by_key)
             child = _child_from_region(page_id, region, root.root_id, None, block=None)
             if child.final_state == STATE_STANDALONE_PARENT:
-                parent = _standalone_parent_from_child(page_id, root.root_id, child, region)
-                parent_units.append(parent)
-                child.parent_id = parent.parent_id
-                child.represented_by_parent_id = parent.parent_id
-                _append_unique(root.parent_unit_ids, parent.parent_id)
+                if graph_parent_nodes:
+                    _set_child_final_state(child, STATE_UNRESOLVED_REVIEW_ONLY)
+                    child.translated_independently = False
+                    child.cleanup_independently = False
+                    child.render_independently = False
+                    child.represented_by_parent_id = None
+                    _append_unique(child.reason_codes, "text_area_graph_plan_unattached_source_evidence")
+                else:
+                    parent = _standalone_parent_from_child(page_id, root.root_id, child, region)
+                    parent_units.append(parent)
+                    child.parent_id = parent.parent_id
+                    child.represented_by_parent_id = parent.parent_id
+                    _append_unique(root.parent_unit_ids, parent.parent_id)
             children.append(child)
             child_by_region[rid] = child
             _append_unique(root.child_segment_ids, child.child_id)
@@ -581,9 +711,9 @@ def build_text_block_hierarchy(
         )
 
         unresolved = [child for child in children if child.final_state == STATE_UNRESOLVED_REVIEW_ONLY]
-        translation_units = [parent.parent_id for parent in parent_units if parent.translation_unit]
-        cleanup_units = [parent.parent_id for parent in parent_units if parent.cleanup_unit]
-        render_units = [parent.parent_id for parent in parent_units if parent.render_unit]
+        translation_units = [parent.parent_id for parent in parent_units if _parent_is_active_translation_unit(parent)]
+        cleanup_units = [parent.parent_id for parent in parent_units if parent.cleanup_unit and _parent_is_active_translation_unit(parent)]
+        render_units = [parent.parent_id for parent in parent_units if parent.render_unit and _parent_is_active_translation_unit(parent)]
         result = TextBlockHierarchyResult(
             page_id=page_id,
             roots=sorted(roots_by_key.values(), key=lambda root: (root.reading_order_index, root.root_id)),
@@ -893,35 +1023,11 @@ def _evaluate_root_source_coherence(
                 reject_reasons.append("caption_background_parent_incomplete_source")
             if reject_reasons:
                 _reject_parent_translation_unit(parent, child_by_parent.get(parent.parent_id, []), reject_reasons)
-        if root.root_transaction_status == "root_review_only_unresolved" and root.root_type in {ROOT_SPEECH, ROOT_CAPTION}:
-            for parent in root_parents:
-                if parent.translation_unit:
-                    _reject_parent_translation_unit(
-                        parent,
-                        child_by_parent.get(parent.parent_id, []),
-                        ["root_transaction_failed_closed"],
-                    )
-
     for root in roots_list:
         root_parents = sorted(parent_by_root.get(root.root_id, []), key=lambda parent: (parent.render_allowed_area[:2], parent.parent_id))
         root_children = child_by_root.get(root.root_id, [])
-        previous_status = root.root_transaction_status
         apply_strict_root_transaction_contract(root, root_parents, root_children)
         _enforce_translatable_route_transaction_blocker(root, root_children)
-        if (
-            root.root_transaction_status == ROOT_REVIEW_ONLY_UNRESOLVED
-            and previous_status != ROOT_REVIEW_ONLY_UNRESOLVED
-            and root.root_type in {ROOT_SPEECH, ROOT_CAPTION}
-        ):
-            for parent in root_parents:
-                if parent.translation_unit:
-                    _reject_parent_translation_unit(
-                        parent,
-                        child_by_parent.get(parent.parent_id, []),
-                        ["root_transaction_failed_closed"],
-                    )
-            apply_strict_root_transaction_contract(root, root_parents, root_children)
-            _enforce_translatable_route_transaction_blocker(root, root_children)
 
 
 def _evaluate_pre_render_root_final_states(
@@ -1045,9 +1151,56 @@ def _parent_is_active_translation_unit(parent: ParentLogicalTextUnit) -> bool:
         return False
     if parent.source_coherence_status == "rejected":
         return False
-    if parent.source_coherence_action in {"source_quality_blocked", "block_auto_translation", "split_required", "unresolved_review", "block_review_only"}:
+    if parent.source_coherence_action in {"source_quality_blocked", "block_auto_translation", "split_required", "unresolved_review", "block_review_only", "repair_required"}:
         return False
     return bool(_source_body(parent.source_text) or _valid_short_reaction_or_laugh(parent.source_text))
+
+
+def _parent_is_punctuation_identity(parent: ParentLogicalTextUnit) -> bool:
+    text = str(parent.source_text or "").strip()
+    if not text:
+        return False
+    if _source_body(text):
+        return False
+    return all(_is_punctuation(ch) for ch in text if not ch.isspace())
+
+
+def _finalized_parent_record(
+    parent: ParentLogicalTextUnit,
+    children: list[ChildRecognizedTextSegment],
+) -> FinalizedTextExecutionParent:
+    if _parent_is_punctuation_identity(parent):
+        state = "punctuation_identity_parent"
+        translation_required = False
+        cleanup_required = False
+        render_required = False
+    elif _parent_is_active_translation_unit(parent):
+        state = "active_translation_parent"
+        translation_required = True
+        cleanup_required = bool(parent.cleanup_unit)
+        render_required = bool(parent.render_unit)
+    else:
+        state = "blocked_or_unresolved_parent"
+        translation_required = False
+        cleanup_required = False
+        render_required = False
+    return FinalizedTextExecutionParent(
+        parent_id=parent.parent_id,
+        page_id=parent.page_id,
+        root_id=parent.root_id,
+        state=state,
+        source_text=parent.source_text,
+        role=parent.role,
+        translation_required=translation_required,
+        cleanup_required=cleanup_required,
+        render_required=render_required,
+        represented_child_ids=[child.child_id for child in children],
+        source_region_ids=[child.source_region_id for child in children if child.source_region_id],
+        cleanup_target_bbox=list(parent.cleanup_target_bbox),
+        render_allowed_area=list(parent.render_allowed_area),
+        reason_codes=list(parent.reason_codes),
+        unresolved_reason=parent.unresolved_reason,
+    )
 
 
 def _root_has_meaningful_visible_source(
@@ -1332,6 +1485,10 @@ def _weak_standalone_parent_in_root(
         return False
     if parent.role not in {ROLE_SPEECH, ROLE_CAPTION, ROLE_BACKGROUND}:
         return False
+    if _parent_has_explicit_text_area_graph_boundary(parent):
+        return False
+    if parent.source_reconstruction_status == "applied" and _source_body(parent.source_text):
+        return False
     body = _source_body(parent.source_text)
     if _valid_short_reaction_or_laugh(parent.source_text):
         return False
@@ -1345,12 +1502,23 @@ def _weak_standalone_parent_in_root(
 
 
 def _parent_requires_multi_parent_proof(parent: ParentLogicalTextUnit) -> bool:
-    if parent.source_reconstruction_status == "applied" and parent.source_coherence_action == "translate":
+    if _parent_has_explicit_text_area_graph_boundary(parent) and parent.source_coherence_action not in {"repair_required", "block_review_only"}:
+        return False
+    if parent.source_reconstruction_status == "applied" and parent.source_coherence_action in {"translate", "translate_with_root_proof"}:
         return False
     if parent.source_coherence_action in {"repair_required", "block_review_only", "translate_with_root_proof"}:
         return True
     body = _source_body(parent.source_text)
     return len(body) < 8 or _ends_with_incomplete_grammar(body)
+
+
+def _parent_has_explicit_text_area_graph_boundary(parent: ParentLogicalTextUnit) -> bool:
+    reasons = {str(reason) for reason in (parent.reason_codes or [])}
+    return bool(
+        parent.parent_visual_group_id
+        and "text_area_graph_parent_materialized" in reasons
+        and "text_area_plan:phase2_explicit_parent_boundary" in reasons
+    )
 
 
 def _root_fragmentation_score(
@@ -2806,12 +2974,820 @@ def write_text_block_hierarchy_artifacts(
     return paths
 
 
+def _graph_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    graph = plan.get("root_parent_child_plan")
+    return graph if isinstance(graph, dict) else {}
+
+
+def _graph_root_nodes(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    graph = _graph_plan(plan)
+    return [node for node in graph.get("root_nodes") or [] if isinstance(node, dict)]
+
+
+def _graph_parent_nodes(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    graph = _graph_plan(plan)
+    return [node for node in graph.get("parent_nodes") or [] if isinstance(node, dict)]
+
+
+def _graph_root_type(node: dict[str, Any]) -> str:
+    role = str(node.get("semantic_role") or "").strip()
+    if role == "speech":
+        return ROOT_SPEECH
+    if role in GRAPH_CAPTION_BACKGROUND_KINDS:
+        return ROOT_CAPTION
+    if role in {"sfx", "decorative", "art", "sfx_decorative_art"}:
+        return ROOT_SFX
+    return ROOT_REVIEW
+
+
+def _graph_route_policy(node: dict[str, Any]) -> str:
+    root_type = _graph_root_type(node)
+    if root_type == ROOT_SPEECH:
+        return ROUTE_TRANSLATE_SPEECH
+    if root_type == ROOT_CAPTION:
+        return ROUTE_TRANSLATE_CAPTION
+    if root_type == ROOT_SFX:
+        return ROUTE_PRESERVE
+    return ROUTE_REVIEW
+
+
+def _graph_parent_role(node: dict[str, Any]) -> str:
+    kind = str(node.get("parent_kind") or "").strip()
+    if kind == "speech":
+        return ROLE_SPEECH
+    if kind in GRAPH_CAPTION_BACKGROUND_KINDS:
+        return ROLE_CAPTION
+    return ROLE_REVIEW
+
+
+def _materialize_graph_plan_parents(
+    *,
+    page_id: str,
+    regions: list[dict[str, Any]],
+    parent_nodes: list[dict[str, Any]],
+    roots_by_key: dict[str, TextAreaRootBlock],
+) -> tuple[list[ParentLogicalTextUnit], list[ChildRecognizedTextSegment], dict[str, ChildRecognizedTextSegment]]:
+    parent_units: list[ParentLogicalTextUnit] = []
+    children: list[ChildRecognizedTextSegment] = []
+    child_by_region: dict[str, ChildRecognizedTextSegment] = {}
+
+    for parent_node in parent_nodes:
+        parent = _parent_from_graph_node(page_id, parent_node)
+        root = roots_by_key.get(parent.root_id)
+        if root is not None:
+            _append_unique(root.parent_unit_ids, parent.parent_id)
+
+        attached_regions = _regions_for_graph_parent(parent_node, regions, root_node=root)
+        source_text, source_region_ids, duplicate_region_ids = _graph_parent_source_from_regions(
+            attached_regions,
+            parent_node=parent_node,
+            sibling_parent_nodes=parent_nodes,
+        )
+        parent.source_text = source_text
+        parent.source_text_before_reconstruction = source_text
+        _attach_graph_parent_source_reconstruction(parent, attached_regions, source_region_ids)
+        parent.anchor_child_id = _child_id(page_id, source_region_ids[0]) if source_region_ids else None
+        parent.source_conservation_status = "complete" if source_text else "unresolved"
+        parent.confidence = _graph_parent_confidence(attached_regions)
+        if not source_text:
+            parent.translation_unit = False
+            parent.cleanup_unit = False
+            parent.render_unit = False
+            parent.unresolved_reason = "text_area_graph_parent_without_attached_source_evidence"
+            _append_unique(parent.reason_codes, parent.unresolved_reason)
+        elif _parent_is_punctuation_identity(parent):
+            parent.translation_unit = False
+            parent.cleanup_unit = False
+            parent.render_unit = False
+            _append_unique(parent.reason_codes, "text_area_graph_punctuation_identity_parent")
+        else:
+            parent.translation_unit = True
+            parent.cleanup_unit = True
+            parent.render_unit = True
+        parent_units.append(parent)
+
+        first_source_region = source_region_ids[0] if source_region_ids else ""
+        for region in attached_regions:
+            rid = str(region.get("region_id") or "")
+            if not rid or rid in child_by_region:
+                continue
+            if rid == first_source_region:
+                final_state = STATE_PARENT_ANCHOR
+            elif rid in duplicate_region_ids:
+                final_state = STATE_DUPLICATE_CHILD
+            elif rid in source_region_ids:
+                final_state = STATE_PARENT_CHILD
+            elif source_region_ids:
+                final_state = _graph_attached_non_authoring_child_state(region)
+            else:
+                final_state = STATE_UNRESOLVED_REVIEW_ONLY
+            child = _child_from_graph_region(
+                page_id=page_id,
+                region=region,
+                root_id=parent.root_id,
+                parent_id=parent.parent_id,
+                final_state=final_state,
+                source_authoring=rid in set(source_region_ids),
+            )
+            children.append(child)
+            child_by_region[rid] = child
+            if root is not None:
+                _append_unique(root.child_segment_ids, child.child_id)
+
+    return parent_units, children, child_by_region
+
+
+def _parent_from_graph_node(page_id: str, node: dict[str, Any]) -> ParentLogicalTextUnit:
+    parent_id = str(node.get("parent_node_id") or "")
+    root_id = str(node.get("root_node_id") or "")
+    bbox = _bbox(node.get("bbox"))
+    return ParentLogicalTextUnit(
+        parent_id=parent_id or _root_id(page_id, f"graph_parent_{node.get('container_id') or 'unknown'}"),
+        page_id=page_id,
+        root_id=root_id or _root_id(page_id, str(node.get("container_id") or parent_id or "graph_root")),
+        role=_graph_parent_role(node),
+        cleanup_target_bbox=list(bbox),
+        render_allowed_area=list(bbox),
+        reason_codes=_string_list(node.get("reason_codes")) + ["text_area_graph_parent_materialized"],
+        parent_visual_group_id=str(node.get("parent_boundary_id") or ""),
+        parent_visual_group_bbox=list(bbox),
+        parent_visual_group_child_ids=_string_list(node.get("support_geometry_ids")),
+    )
+
+
+def _attach_graph_parent_source_reconstruction(
+    parent: ParentLogicalTextUnit,
+    regions: list[dict[str, Any]],
+    source_region_ids: list[str],
+) -> None:
+    source_id_set = {str(rid) for rid in source_region_ids if str(rid)}
+    for region in regions:
+        rid = str(region.get("region_id") or "")
+        if not rid or rid not in source_id_set:
+            continue
+        status = str(region.get("logical_text_source_reconstruction_status") or "").strip()
+        if status != "applied":
+            continue
+        after_text = _clean_source_text(region.get("logical_text_source_reconstruction_after_text"))
+        if after_text and after_text != _clean_source_text(parent.source_text):
+            continue
+        parent.source_reconstruction_status = status
+        before_text = _clean_source_text(region.get("logical_text_source_reconstruction_before_text"))
+        if before_text:
+            parent.source_text_before_reconstruction = before_text
+        parent.source_reconstruction_crop_bbox = _bbox(region.get("logical_text_source_reconstruction_crop_bbox"))
+        parent.source_reconstruction_confidence = _float_or_none(region.get("logical_text_source_reconstruction_ocr_confidence"))
+        _append_unique(parent.reason_codes, "graph_parent_source_reconstruction_applied")
+        return
+
+
+def _regions_for_graph_parent(
+    parent_node: dict[str, Any],
+    regions: list[dict[str, Any]],
+    *,
+    root_node: TextAreaRootBlock | None = None,
+) -> list[dict[str, Any]]:
+    parent_box = _bbox(parent_node.get("bbox"))
+    container_id = str(parent_node.get("container_id") or "")
+    scored: list[tuple[float, tuple[Any, ...], dict[str, Any]]] = []
+    for region in regions:
+        if not isinstance(region, dict):
+            continue
+        rid = str(region.get("region_id") or "")
+        if not rid:
+            continue
+        if str(region.get("text_area_container_id") or "") != container_id and not _graph_region_can_attach_to_normalized_root_parent(
+            region,
+            parent_node=parent_node,
+            root_node=root_node,
+        ):
+            continue
+        score = _graph_parent_attachment_score(parent_box, _bbox(region.get("bbox")))
+        if score <= 0.0:
+            continue
+        scored.append((score, _graph_region_reading_key(region), region))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [region for _score, _key, region in scored]
+
+
+def _graph_region_can_attach_to_normalized_root_parent(
+    region: dict[str, Any],
+    *,
+    parent_node: dict[str, Any],
+    root_node: TextAreaRootBlock | None,
+) -> bool:
+    if root_node is None:
+        return False
+    region_box = _bbox(region.get("bbox"))
+    parent_box = _bbox(parent_node.get("bbox"))
+    root_box = list(root_node.bbox or [])
+    if not region_box or not parent_box or not root_box:
+        return False
+    if _xywh_intersection_area(root_box, region_box) / max(1.0, _xywh_area(region_box)) < 0.80:
+        return False
+    route_intent = str(
+        region.get("text_area_route_intent")
+        or (region.get("render") or {}).get("text_area_route_intent")
+        or ""
+    ).strip()
+    parent_kind = str(parent_node.get("parent_kind") or "").strip()
+    if parent_kind == "speech" and route_intent not in {"", "translate_speech"}:
+        return False
+    if parent_kind in GRAPH_CAPTION_BACKGROUND_KINDS and route_intent not in {
+        "",
+        "translate_caption",
+        "translate_caption_background",
+    }:
+        return False
+    intersection = _xywh_intersection_area(parent_box, region_box)
+    if intersection / max(1.0, _xywh_area(region_box)) >= 0.55:
+        return True
+    return _xywh_center_inside(region_box, parent_box)
+
+
+def _graph_parent_attachment_score(parent_box: list[int], region_box: list[int]) -> float:
+    if not parent_box or not region_box:
+        return 0.0
+    if _xywh_center_inside(region_box, parent_box):
+        return 1.0
+    intersection = _xywh_intersection_area(parent_box, region_box)
+    region_area = max(1.0, _xywh_area(region_box))
+    parent_area = max(1.0, _xywh_area(parent_box))
+    region_overlap = intersection / region_area
+    parent_overlap = intersection / parent_area
+    if region_overlap >= 0.45 or (region_overlap >= 0.20 and parent_overlap >= 0.03):
+        return max(region_overlap, parent_overlap)
+    return 0.0
+
+
+def _graph_parent_source_from_regions(
+    regions: list[dict[str, Any]],
+    *,
+    parent_node: dict[str, Any] | None = None,
+    sibling_parent_nodes: list[dict[str, Any]] | None = None,
+) -> tuple[str, list[str], set[str]]:
+    reconstructed = _graph_parent_reconstructed_source_from_regions(
+        regions,
+        parent_node=parent_node,
+        sibling_parent_nodes=sibling_parent_nodes,
+    )
+    if reconstructed is not None:
+        return reconstructed
+    selected, duplicate_region_ids = _graph_parent_source_from_regions_pass(
+        regions,
+        parent_node=parent_node,
+        sibling_parent_nodes=sibling_parent_nodes,
+        allow_ignored_duplicate=False,
+    )
+    dominant = _graph_parent_dominant_boundary_source(
+        selected,
+        regions,
+        parent_node=parent_node,
+    )
+    if dominant is not None:
+        return dominant
+    if selected:
+        supplemental, supplemental_duplicate_region_ids = _graph_parent_source_from_regions_pass(
+            regions,
+            parent_node=parent_node,
+            sibling_parent_nodes=sibling_parent_nodes,
+            allow_ignored_duplicate=True,
+        )
+        selected_region_ids = {str(item["region"].get("region_id") or "") for item in selected}
+        for item in supplemental:
+            rid = str(item["region"].get("region_id") or "")
+            if rid and rid not in selected_region_ids:
+                selected.append(item)
+                selected_region_ids.add(rid)
+        duplicate_region_ids.update(supplemental_duplicate_region_ids)
+    else:
+        selected, duplicate_region_ids = _graph_parent_source_from_regions_pass(
+            regions,
+            parent_node=parent_node,
+            sibling_parent_nodes=sibling_parent_nodes,
+            allow_ignored_duplicate=True,
+        )
+    selected.sort(key=lambda item: _graph_region_reading_key(item["region"]))
+    source_region_ids = [str(item["region"].get("region_id") or "") for item in selected]
+    source_text = "".join(str(item["text"]) for item in selected)
+    return source_text, source_region_ids, duplicate_region_ids
+
+
+def _graph_parent_dominant_boundary_source(
+    selected: list[dict[str, Any]],
+    regions: list[dict[str, Any]],
+    *,
+    parent_node: dict[str, Any] | None,
+) -> tuple[str, list[str], set[str]] | None:
+    if not selected or not parent_node:
+        return None
+    parent_box = _bbox(parent_node.get("bbox"))
+    if not parent_box:
+        return None
+    candidates: list[tuple[int, tuple[Any, ...], dict[str, Any]]] = []
+    for item in selected:
+        region = item.get("region") if isinstance(item, dict) else None
+        text = str(item.get("text") or "") if isinstance(item, dict) else ""
+        if not isinstance(region, dict) or not text:
+            continue
+        region_box = _bbox(region.get("bbox"))
+        if not _graph_region_covers_parent_boundary(region_box, parent_box):
+            continue
+        status_name, _reasons, action = _parent_source_coherence(
+            text,
+            role=_graph_parent_role(parent_node),
+        )
+        if status_name == "malformed" or action in {"repair_required", "block_review_only"}:
+            continue
+        candidates.append((len(_source_body(text) or text), _graph_region_reading_key(region), item))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    _length, _key, dominant = candidates[0]
+    dominant_region = dominant["region"]
+    dominant_region_id = str(dominant_region.get("region_id") or "")
+    dominant_box = _bbox(dominant_region.get("bbox"))
+    if not dominant_region_id or not dominant_box:
+        return None
+    for item in selected:
+        region = item.get("region") if isinstance(item, dict) else None
+        if not isinstance(region, dict):
+            continue
+        rid = str(region.get("region_id") or "")
+        if not rid or rid == dominant_region_id:
+            continue
+        if not _graph_region_is_structurally_represented_by_box(region, dominant_box):
+            return None
+    duplicate_region_ids: set[str] = set()
+    for item in selected:
+        region = item.get("region") if isinstance(item, dict) else None
+        if not isinstance(region, dict):
+            continue
+        rid = str(region.get("region_id") or "")
+        if not rid or rid == dominant_region_id:
+            continue
+        if _graph_region_is_structurally_represented_by_box(region, dominant_box):
+            duplicate_region_ids.add(rid)
+    return str(dominant["text"]), [dominant_region_id], duplicate_region_ids
+
+
+def _graph_region_covers_parent_boundary(region_box: list[int], parent_box: list[int]) -> bool:
+    if not region_box or not parent_box:
+        return False
+    intersection = _xywh_intersection_area(region_box, parent_box)
+    parent_area = max(1.0, _xywh_area(parent_box))
+    region_area = max(1.0, _xywh_area(region_box))
+    return intersection / parent_area >= 0.80 and intersection / region_area >= 0.80
+
+
+def _graph_region_is_structurally_represented_by_box(region: dict[str, Any], source_box: list[int]) -> bool:
+    region_box = _bbox(region.get("bbox"))
+    if not region_box or not source_box:
+        return False
+    intersection = _xywh_intersection_area(region_box, source_box)
+    region_area = max(1.0, _xywh_area(region_box))
+    return intersection / region_area >= 0.80 or _xywh_center_inside(region_box, source_box)
+
+
+def _graph_parent_reconstructed_source_from_regions(
+    regions: list[dict[str, Any]],
+    *,
+    parent_node: dict[str, Any] | None,
+    sibling_parent_nodes: list[dict[str, Any]] | None,
+) -> tuple[str, list[str], set[str]] | None:
+    candidates: list[tuple[int, tuple[Any, ...], dict[str, Any], str]] = []
+    for region in regions:
+        rid = str(region.get("region_id") or "")
+        if not rid:
+            continue
+        status = str(region.get("logical_text_source_reconstruction_status") or "").strip()
+        if status != "applied":
+            continue
+        source_text = _clean_source_text(region.get("logical_text_source_reconstruction_after_text"))
+        if not source_text:
+            continue
+        if _graph_region_is_overbroad_for_parent_boundary(
+            region,
+            parent_node=parent_node,
+            sibling_parent_nodes=sibling_parent_nodes,
+        ):
+            continue
+        route_intent = str(
+            region.get("text_area_route_intent")
+            or (region.get("render") or {}).get("text_area_route_intent")
+            or ""
+        ).strip()
+        if route_intent not in {"", "translate_speech", "translate_caption", "translate_caption_background"}:
+            continue
+        status_name, _reasons, action = _parent_source_coherence(source_text, role=_graph_parent_role(parent_node or {}))
+        if status_name == "malformed" or action in {"repair_required", "block_review_only"}:
+            continue
+        candidates.append((len(_source_body(source_text)), _graph_region_reading_key(region), region, source_text))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    _length, _key, region, source_text = candidates[0]
+    return source_text, [str(region.get("region_id") or "")], set()
+
+
+def _graph_parent_source_from_regions_pass(
+    regions: list[dict[str, Any]],
+    *,
+    parent_node: dict[str, Any] | None,
+    sibling_parent_nodes: list[dict[str, Any]] | None,
+    allow_ignored_duplicate: bool,
+) -> tuple[list[dict[str, Any]], set[str]]:
+    selected: list[dict[str, Any]] = []
+    duplicate_region_ids: set[str] = set()
+    for region in sorted(regions, key=_graph_region_reading_key):
+        rid = str(region.get("region_id") or "")
+        text = _clean_source_text(region.get("ocr_text"))
+        if not rid or not text:
+            continue
+        if not _graph_region_can_author_parent_source(
+            region,
+            parent_node=parent_node,
+            sibling_parent_nodes=sibling_parent_nodes,
+            allow_ignored_duplicate=allow_ignored_duplicate,
+        ):
+            continue
+        rank = _graph_region_source_rank(region)
+        absorbed = False
+        next_selected: list[dict[str, Any]] = []
+        for item in selected:
+            existing_text = str(item["text"])
+            if _source_text_contains(existing_text, text):
+                if _source_text_contains(text, existing_text) and rank > item["rank"]:
+                    duplicate_region_ids.add(str(item["region"].get("region_id") or ""))
+                    continue
+                duplicate_region_ids.add(rid)
+                absorbed = True
+                next_selected.append(item)
+                continue
+            if _source_text_contains(text, existing_text):
+                duplicate_region_ids.add(str(item["region"].get("region_id") or ""))
+                continue
+            next_selected.append(item)
+        if absorbed:
+            selected = next_selected
+            continue
+        next_selected.append({"region": region, "text": text, "rank": rank})
+        selected = next_selected
+    return selected, duplicate_region_ids
+
+
+def _graph_region_can_author_parent_source(
+    region: dict[str, Any],
+    *,
+    parent_node: dict[str, Any] | None,
+    sibling_parent_nodes: list[dict[str, Any]] | None,
+    allow_ignored_duplicate: bool,
+) -> bool:
+    if _graph_region_is_overbroad_for_parent_boundary(
+        region,
+        parent_node=parent_node,
+        sibling_parent_nodes=sibling_parent_nodes,
+    ):
+        return False
+    flags = region.get("flags") if isinstance(region.get("flags"), dict) else {}
+    render = region.get("render") if isinstance(region.get("render"), dict) else {}
+    child_state = str(region.get("child_final_state") or render.get("child_final_state") or "").strip()
+    ownership_status = str(
+        region.get("logical_text_ownership_status")
+        or render.get("logical_text_ownership_status")
+        or ""
+    ).strip()
+    if bool(flags.get("ignore")) and not (
+        allow_ignored_duplicate
+        and _graph_region_is_ignored_source_fragment(region, child_state, ownership_status)
+    ):
+        return False
+    if child_state in {
+        STATE_DUPLICATE_CHILD,
+        STATE_NOISE_REVIEW_ONLY,
+        STATE_BLOCKED_BY_ROOT_POLICY,
+        STATE_UNRESOLVED_REVIEW_ONLY,
+    } and not (
+        (allow_ignored_duplicate and child_state == STATE_DUPLICATE_CHILD)
+        or (
+            allow_ignored_duplicate
+            and child_state == STATE_UNRESOLVED_REVIEW_ONLY
+            and _graph_region_has_route_owned_source_evidence(region)
+        )
+        or (
+            allow_ignored_duplicate
+            and child_state == STATE_NOISE_REVIEW_ONLY
+            and _graph_region_has_stale_route_owned_blocker_label(region)
+            and _graph_region_has_route_owned_source_evidence(region)
+        )
+    ):
+        return False
+    if ownership_status in {
+        "noise_review_only",
+        "blocked_by_root_policy",
+        "unresolved_review_only",
+        "duplicate_child",
+    } and not (
+        allow_ignored_duplicate
+        and (
+            (
+                child_state == STATE_DUPLICATE_CHILD
+                and ownership_status in {"duplicate_child", "noise_review_only"}
+            )
+            or (
+                ownership_status in {"unresolved_review_only", "duplicate_child"}
+                and _graph_region_has_route_owned_source_evidence(region)
+            )
+            or (
+                ownership_status == "noise_review_only"
+                and _graph_region_has_stale_route_owned_blocker_label(region)
+                and _graph_region_has_route_owned_source_evidence(region)
+            )
+        )
+    ):
+        return False
+    source_action = str(
+        region.get("logical_text_source_quality_action")
+        or render.get("logical_text_source_quality_action")
+        or ""
+    ).strip()
+    return source_action not in {
+        "source_quality_blocked",
+        "block_auto_translation",
+        "split_required",
+        "unresolved_review",
+        "block_review_only",
+    }
+
+
+def _graph_region_is_ignored_source_fragment(
+    region: dict[str, Any],
+    child_state: str,
+    ownership_status: str,
+) -> bool:
+    if not _graph_region_has_route_owned_source_evidence(region):
+        return False
+    if child_state in {STATE_PARENT_ANCHOR, STATE_PARENT_CHILD, STATE_DUPLICATE_CHILD}:
+        return ownership_status not in {"noise_review_only", "blocked_by_root_policy"}
+    if (
+        ownership_status == "noise_review_only"
+        and child_state in {"", STATE_NOISE_REVIEW_ONLY, STATE_UNRESOLVED_REVIEW_ONLY}
+        and _graph_region_has_stale_route_owned_blocker_label(region)
+    ):
+        return True
+    return ownership_status in {"transferred_child", "duplicate_child", "block_anchor"}
+
+
+def _graph_region_has_stale_route_owned_blocker_label(region: dict[str, Any]) -> bool:
+    render = region.get("render") if isinstance(region.get("render"), dict) else {}
+    flags = region.get("flags") if isinstance(region.get("flags"), dict) else {}
+    cleanup_mode = str(render.get("cleanup_mode") or region.get("cleanup_mode") or "").strip()
+    classification = str(region.get("classification_reason") or render.get("classification_reason") or "").strip()
+    return bool(
+        region.get("translation_blocked_by_ocr_transaction")
+        or render.get("translation_blocked_by_ocr_transaction")
+        or flags.get("hard_fail")
+        or cleanup_mode == "ocr_blocked_no_cleanup"
+        or classification == "text_area_route_authority_root_blocker"
+    )
+
+
+def _graph_region_has_route_owned_source_evidence(region: dict[str, Any]) -> bool:
+    render = region.get("render") if isinstance(region.get("render"), dict) else {}
+    if not _clean_source_text(region.get("ocr_text")):
+        return False
+    ocr_state = str(
+        region.get("text_area_ocr_transaction_state")
+        or render.get("text_area_ocr_transaction_state")
+        or ""
+    ).strip()
+    if ocr_state and ocr_state not in OCR_TRANSLATION_QUEUED_STATES:
+        return False
+    route_intent = str(
+        region.get("text_area_route_intent")
+        or render.get("text_area_route_intent")
+        or ""
+    ).strip()
+    return route_intent in {"", "translate_speech", "translate_caption", "translate_caption_background"}
+
+
+def _graph_region_is_overbroad_for_parent_boundary(
+    region: dict[str, Any],
+    *,
+    parent_node: dict[str, Any] | None,
+    sibling_parent_nodes: list[dict[str, Any]] | None,
+) -> bool:
+    if not parent_node:
+        return False
+    parent_box = _bbox(parent_node.get("bbox"))
+    region_box = _bbox(region.get("bbox"))
+    if not parent_box or not region_box:
+        return False
+    parent_area = max(1.0, _xywh_area(parent_box))
+    region_area = max(1.0, _xywh_area(region_box))
+    if region_area <= parent_area * 1.35:
+        return False
+    intersection = _xywh_intersection_area(parent_box, region_box)
+    if intersection / parent_area < 0.80:
+        return False
+    if intersection / region_area >= 0.78:
+        return False
+    parent_id = str(parent_node.get("parent_node_id") or "")
+    container_id = str(parent_node.get("container_id") or "")
+    for sibling in sibling_parent_nodes or []:
+        if not isinstance(sibling, dict):
+            continue
+        if str(sibling.get("parent_node_id") or "") == parent_id:
+            continue
+        if container_id and str(sibling.get("container_id") or "") != container_id:
+            continue
+        sibling_box = _bbox(sibling.get("bbox"))
+        if sibling_box and _xywh_intersection_area(sibling_box, region_box) > 0:
+            return True
+    return False
+
+
+def _graph_attached_non_authoring_child_state(region: dict[str, Any]) -> str:
+    render = region.get("render") if isinstance(region.get("render"), dict) else {}
+    child_state = str(region.get("child_final_state") or render.get("child_final_state") or "").strip()
+    if child_state == STATE_DUPLICATE_CHILD:
+        return STATE_DUPLICATE_CHILD
+    if child_state in {STATE_PARENT_ANCHOR, STATE_STANDALONE_PARENT, STATE_PARENT_CHILD}:
+        return STATE_DUPLICATE_CHILD
+    if child_state in {STATE_NOISE_REVIEW_ONLY, STATE_BLOCKED_BY_ROOT_POLICY}:
+        return child_state
+    ownership_status = str(
+        region.get("logical_text_ownership_status")
+        or render.get("logical_text_ownership_status")
+        or ""
+    ).strip()
+    if ownership_status == "duplicate_child":
+        return STATE_DUPLICATE_CHILD
+    if ownership_status in {"noise_review_only", "blocked_by_root_policy"}:
+        return ownership_status
+    flags = region.get("flags") if isinstance(region.get("flags"), dict) else {}
+    if bool(flags.get("ignore")):
+        return STATE_NOISE_REVIEW_ONLY
+    if _clean_source_text(region.get("ocr_text")):
+        return STATE_DUPLICATE_CHILD
+    return STATE_UNRESOLVED_REVIEW_ONLY
+
+
+def _child_from_graph_region(
+    *,
+    page_id: str,
+    region: dict[str, Any],
+    root_id: str,
+    parent_id: str,
+    final_state: str,
+    source_authoring: bool,
+) -> ChildRecognizedTextSegment:
+    rid = str(region.get("region_id") or "")
+    render = region.get("render") if isinstance(region.get("render"), dict) else {}
+    represented_by = parent_id if final_state in {
+        STATE_PARENT_ANCHOR,
+        STATE_PARENT_CHILD,
+        STATE_DUPLICATE_CHILD,
+        STATE_PUNCTUATION_CHILD,
+    } else None
+    reasons = _child_reason_codes(region, str(region.get("logical_text_ownership_status") or ""), final_state)
+    _append_unique(reasons, "text_area_graph_child_attachment")
+    if source_authoring and _graph_region_has_stale_route_owned_blocker_label(region):
+        _append_unique(reasons, ROUTE_OWNED_OCR_FRAGMENT_REPRESENTED_REASON)
+    child = ChildRecognizedTextSegment(
+        child_id=_child_id(page_id, rid),
+        page_id=page_id,
+        root_id=root_id,
+        parent_id=parent_id,
+        source_region_id=rid,
+        bbox=_bbox(region.get("bbox")),
+        polygon=list(region.get("polygon") or []),
+        ocr_text=str(region.get("ocr_text") or ""),
+        ocr_confidence=_ocr_confidence(region),
+        source_orientation=render.get("source_orientation"),
+        detection_source=region.get("text_area_detection_source"),
+        final_state=final_state,
+        represented_by_parent_id=represented_by,
+        translated_independently=False,
+        cleanup_independently=final_state == STATE_PARENT_ANCHOR,
+        render_independently=final_state == STATE_PARENT_ANCHOR,
+        reason_codes=reasons,
+        confidence=_ocr_confidence(region),
+    )
+    if final_state == STATE_PARENT_ANCHOR:
+        region["active_translation_unit_id"] = parent_id
+    return child
+
+
+def _graph_parent_confidence(regions: list[dict[str, Any]]) -> float | None:
+    values = [_ocr_confidence(region) for region in regions]
+    clean = [value for value in values if value is not None]
+    if not clean:
+        return None
+    return sum(clean) / len(clean)
+
+
+def _graph_region_source_rank(region: dict[str, Any]) -> tuple[int, int, float]:
+    reconstructed = int(
+        str(region.get("logical_text_source_reconstruction_status") or "").startswith("root_reconstruction")
+        or str(region.get("text_area_detection_source") or "") == "root_reconstruction_reocr"
+    )
+    text = _clean_source_text(region.get("ocr_text"))
+    return (reconstructed, len(_source_body(text) or text), float(_ocr_confidence(region) or 0.0))
+
+
+def _graph_region_reading_key(region: dict[str, Any]) -> tuple[Any, ...]:
+    box = _bbox(region.get("bbox"))
+    if not box:
+        return (0, 0, str(region.get("region_id") or ""))
+    x, y, w, _h = box
+    render = region.get("render") if isinstance(region.get("render"), dict) else {}
+    orientation = str(region.get("source_orientation") or render.get("source_orientation") or "").lower()
+    if orientation.startswith("horizontal"):
+        return (y, x, str(region.get("region_id") or ""))
+    center_x = x + (w / 2.0)
+    column = int(round(center_x / 24.0))
+    return (-column, y, -x, str(region.get("region_id") or ""))
+
+
+def _source_text_contains(container: str, contained: str) -> bool:
+    outer = _clean_source_text(container)
+    inner = _clean_source_text(contained)
+    if not outer or not inner:
+        return False
+    outer_body = _source_body(outer)
+    inner_body = _source_body(inner)
+    if outer_body and inner_body:
+        return inner_body in outer_body
+    return inner in outer
+
+
+def _xywh_area(box: list[int]) -> float:
+    if not box or len(box) < 4:
+        return 0.0
+    return float(max(0, int(box[2])) * max(0, int(box[3])))
+
+
+def _xywh_intersection_area(a: list[int], b: list[int]) -> float:
+    if not a or not b or len(a) < 4 or len(b) < 4:
+        return 0.0
+    ax0, ay0, aw, ah = a
+    bx0, by0, bw, bh = b
+    ax1, ay1 = ax0 + max(0, aw), ay0 + max(0, ah)
+    bx1, by1 = bx0 + max(0, bw), by0 + max(0, bh)
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    return float(max(0, ix1 - ix0) * max(0, iy1 - iy0))
+
+
+def _xywh_center_inside(inner: list[int], outer: list[int]) -> bool:
+    if not inner or not outer or len(inner) < 4 or len(outer) < 4:
+        return False
+    ix, iy, iw, ih = inner
+    ox, oy, ow, oh = outer
+    cx = ix + iw / 2.0
+    cy = iy + ih / 2.0
+    return ox <= cx <= ox + max(0, ow) and oy <= cy <= oy + max(0, oh)
+
+
 def _build_roots(
     page_id: str,
     plan: dict[str, Any],
     physical_groups: list[dict[str, Any]],
 ) -> dict[str, TextAreaRootBlock]:
     roots: dict[str, TextAreaRootBlock] = {}
+    graph_roots = _graph_root_nodes(plan)
+    if graph_roots:
+        containers_by_root: dict[str, list[str]] = {}
+        for parent in _graph_parent_nodes(plan):
+            root_id = str(parent.get("root_node_id") or "")
+            container_id = str(parent.get("container_id") or "")
+            if root_id and container_id:
+                containers_by_root.setdefault(root_id, [])
+                _append_unique(containers_by_root[root_id], container_id)
+        for index, node in enumerate(graph_roots):
+            root_id = str(node.get("root_node_id") or "")
+            container_id = str(node.get("container_id") or "")
+            if not root_id:
+                continue
+            container_ids = list(containers_by_root.get(root_id) or [])
+            if container_id:
+                _append_unique(container_ids, container_id)
+            roots[root_id] = TextAreaRootBlock(
+                root_id=root_id,
+                page_id=page_id,
+                root_type=_graph_root_type(node),
+                text_area_container_ids=container_ids,
+                bbox=_bbox(node.get("bbox")),
+                mask_source_ids=_string_list(node.get("source_evidence_ids")),
+                route_policy=_graph_route_policy(node),
+                ocr_eligible=_graph_route_policy(node) in {ROUTE_TRANSLATE_SPEECH, ROUTE_TRANSLATE_CAPTION},
+                ctd_scope_eligible=True,
+                reading_order_index=index,
+                reason_codes=_string_list(node.get("reason_codes")) + ["text_area_graph_root_materialized"],
+            )
+        return roots
+
     container_to_physical: dict[str, dict[str, Any]] = {}
     for group in physical_groups:
         physical_id = str(group.get("logical_text_physical_bubble_id") or group.get("physical_bubble_graph_id") or "")
@@ -3028,7 +4004,11 @@ def _stamp_regions(regions: list[dict[str, Any]], result: TextBlockHierarchyResu
             represented_blocker = _route_owned_ocr_fragment_represented_by_region(region)
             blocked = _route_owned_ocr_blocker(region) and not represented_blocker
             warning = state == OCR_STATE_RECOGNIZED_LOW_CONFIDENCE_WARNING
-            parent_active = bool(parent and parent.translation_unit)
+            parent_active = bool(parent and _parent_is_active_translation_unit(parent))
+            active_source_anchor = bool(
+                parent_active
+                and fields.get("child_final_state") in {STATE_PARENT_ANCHOR, STATE_STANDALONE_PARENT}
+            )
             region["route_owned_translatable"] = True
             region["route_owned_ocr_blocked"] = blocked
             region["route_owned_ocr_fragment_represented_by_parent"] = represented_blocker
@@ -3072,6 +4052,17 @@ def _stamp_regions(regions: list[dict[str, Any]], result: TextBlockHierarchyResu
                 "cleanup_activation_state",
             ):
                 render[key] = region[key]
+            if active_source_anchor:
+                flags = region.setdefault("flags", {})
+                flags["ignore"] = False
+                flags.pop("hard_fail", None)
+                region.pop("skip_reason", None)
+                region.pop("translation_blocked_by_ocr_transaction", None)
+                render.pop("translation_blocked_by_ocr_transaction", None)
+                if route_intent == "translate_speech":
+                    render["cleanup_mode"] = "bubble"
+                elif route_intent == "translate_caption_background":
+                    render["cleanup_mode"] = "background"
             if represented_blocker:
                 flags = region.setdefault("flags", {})
                 flags["ignore"] = False
@@ -3079,6 +4070,10 @@ def _stamp_regions(regions: list[dict[str, Any]], result: TextBlockHierarchyResu
                 region.pop("translation_blocked_by_ocr_transaction", None)
                 render.pop("translation_blocked_by_ocr_transaction", None)
                 render["classification_reason"] = "route_owned_ocr_fragment_represented_by_parent"
+                if route_intent == "translate_speech":
+                    render["cleanup_mode"] = "bubble"
+                elif route_intent == "translate_caption_background":
+                    render["cleanup_mode"] = "background"
             if blocked:
                 flags = region.setdefault("flags", {})
                 flags["ignore"] = False
@@ -3224,6 +4219,22 @@ def _child_final_state(region: dict[str, Any], status: str, has_block: bool, has
     if str(region.get("translation") or "").strip() or (not has_block and str(region.get("ocr_text") or "").strip()):
         return STATE_STANDALONE_PARENT
     return STATE_UNRESOLVED_REVIEW_ONLY
+
+
+def _graph_child_ownership_status(final_state: str) -> str:
+    if final_state == STATE_PARENT_ANCHOR:
+        return "block_anchor"
+    if final_state == STATE_PARENT_CHILD:
+        return "transferred_child"
+    if final_state == STATE_DUPLICATE_CHILD:
+        return "duplicate_child"
+    if final_state == STATE_PUNCTUATION_CHILD:
+        return "punctuation_child"
+    if final_state == STATE_NOISE_REVIEW_ONLY:
+        return "noise_review_only"
+    if final_state == STATE_STANDALONE_PARENT:
+        return "standalone_block"
+    return "unresolved_review_only"
 
 
 def _route_owned_ocr_blocker(region: dict[str, Any] | None) -> bool:

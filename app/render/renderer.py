@@ -1875,7 +1875,21 @@ def render_translations(
             render_debug = {
                 "final_render_bbox": list(render_box),
                 "selected_font_family": region_font,
+                "translated_text": text,
             }
+            for key in (
+                "text_block_root_id",
+                "parent_logical_text_unit_id",
+                "active_translation_unit_id",
+                "parent_logical_text_unit_anchor_child_id",
+                "parent_logical_text_unit_represented_child_ids",
+                "parent_logical_text_unit_child_segment_ids",
+                "represented_by_parent_id",
+                "source_text_represented_by_block_id",
+            ):
+                value = _canonical_region_render_value(region, render, key)
+                if value not in (None, ""):
+                    render_debug[key] = value
             render_debug.update(render_quality_debug)
             if obstacle_adjustment:
                 render_debug["render_box_adjustment"] = obstacle_adjustment
@@ -2348,6 +2362,10 @@ def render_translations(
                     compact_layout=bool((render_fit_adjustment or {}).get("render_fit_compact_layout")),
                 )
                 if isinstance(vertical_diag, dict):
+                    vertical_diag["text_completeness_passed"] = _wrapped_text_contains_translated_text(
+                        text,
+                        [str(line) for line in (vertical_diag.get("wrapped_lines") or [])],
+                    )
                     if render_constraint_adjustment and render_constraint_adjustment.get("model_fusion_mutation_proof_applied"):
                         vertical_diag.update(_model_fusion_mutation_proof_after_fields(text, vertical_diag.get("wrapped_lines")))
                     mark_render_region(debug_context, region_id, **vertical_diag)
@@ -2401,6 +2419,7 @@ def render_translations(
                 region_id,
                 selected_font_size=getattr(best_font, "size", None),
                 wrapped_lines=best_lines,
+                text_completeness_passed=_wrapped_text_contains_translated_text(text, best_lines),
                 measured_rendered_width=max((_text_width(best_font, line) for line in best_lines), default=0),
                 measured_rendered_height=best_height,
                 fit_ratio=max(
@@ -6708,6 +6727,13 @@ def _text_area_speech_container_limit_box(region: dict, render: dict, img_w: int
             )
         )
     ownership_status = str(_canonical_region_render_value(region, render, "logical_text_ownership_status") or "").strip()
+    if source_recovered or ownership_status in {"block_anchor", "standalone_block"}:
+        candidates.append(
+            (
+                "logical_text_block_allowed_bbox",
+                _canonical_region_render_value(region, render, "logical_text_block_allowed_bbox"),
+            )
+        )
     if source_recovered or ownership_status in {"block_anchor", "standalone_block"}:
         candidates.append(
             (

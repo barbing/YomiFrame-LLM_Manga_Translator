@@ -31,6 +31,23 @@ import logging
 
 logger = logging.getLogger(__name__)
 _GLOSSARY_DEBUG = os.getenv("MT_DEBUG_GLOSSARY") == "1"
+_PARENT_SOURCE_BLOCKING_ACTIONS = {
+    "source_quality_blocked",
+    "block_auto_translation",
+    "split_required",
+    "unresolved_review",
+    "block_review_only",
+    "repair_required",
+}
+
+
+@dataclass(frozen=True)
+class TranslationAssignment:
+    assignment_id: str
+    parent_id: str
+    source_text: str
+    cache_key: str
+    region_ids: list[str]
 
 
 def _page014_timeout_diag_enabled() -> bool:
@@ -8683,8 +8700,9 @@ def _process_page(
                 int(post_plan_logical_repairs.get("logical_text_render_eligibility_repair_count") or 0),
             )
     translation_start = time.time()
-    translation_touched = bool(pending_texts)
-    if pending_texts:
+    translation_assignments = _translation_assignments_from_regions(regions, pending_texts)
+    translation_touched = bool(translation_assignments)
+    if translation_assignments:
         translation_perf_records = _translation_perf_records_for_page(
             debug_context,
             pending_texts,
@@ -8693,16 +8711,19 @@ def _process_page(
             target_lang=target_lang,
             settings=settings,
         )
+        assignment_source_texts = [assignment.source_text for assignment in translation_assignments.values()]
         prompt_style_guide = _build_page_style_guide(
             active_style_guide,
-            list(pending_texts.keys()),
+            assignment_source_texts,
         )
         prompt_has_glossary = bool((prompt_style_guide.get("glossary") or []) or (prompt_style_guide.get("characters") or []))
         batch_items = []
-        id_to_text: dict[str, str] = {}
-        text_to_translation: dict[str, str] = {}
-        single_texts: list[str] = []
-        for idx, (text, region_ids) in enumerate(pending_texts.items()):
+        id_to_assignment_id: dict[str, str] = {}
+        assignment_to_translation: dict[str, str] = {}
+        single_assignment_ids: list[str] = []
+        for idx, (assignment_id, assignment) in enumerate(translation_assignments.items()):
+            text = assignment.source_text
+            region_ids = assignment.region_ids
             available_terms = _matched_glossary_terms(text, active_style_guide)
             prompt_terms = _matched_glossary_terms(text, prompt_style_guide)
             _translation_perf_set_glossary_context(translation_perf_records.get(text), available_terms)
@@ -8720,11 +8741,11 @@ def _process_page(
                     prompt_glossary_section_included=prompt_has_glossary,
                 )
             if _should_single_translate_text(text, region_ids, regions):
-                single_texts.append(text)
+                single_assignment_ids.append(assignment_id)
                 continue
             item_id = f"t{idx:03d}"
             batch_items.append({"id": item_id, "text": text})
-            id_to_text[item_id] = text
+            id_to_assignment_id[item_id] = assignment_id
         translations = {}
         if batch_items:
             translations = _batch_translate(
@@ -8740,8 +8761,10 @@ def _process_page(
             )
         if translations:
             for item_id, translation in translations.items():
-                text = id_to_text.get(item_id)
-                if text is not None:
+                assignment_id = id_to_assignment_id.get(item_id)
+                assignment = translation_assignments.get(assignment_id or "")
+                if assignment is not None:
+                    text = assignment.source_text
                     # Apply glossary enforcement to ensure consistent name translations
                     enforced = _enforce_glossary(translation, text, active_style_guide)
                     if _has_glossary_count_mismatch(text, enforced, active_style_guide):
@@ -8764,13 +8787,17 @@ def _process_page(
                         if protected:
                             enforced = _enforce_glossary(protected, text, active_style_guide)
                     if not _translation_reuses_recent_context(enforced, text, context_lines):
-                        text_to_translation[text] = enforced
-        missing_texts = list(single_texts)
-        for text in pending_texts.keys():
-            if text not in text_to_translation and text not in missing_texts:
-                missing_texts.append(text)
-        for text in missing_texts:
-            region_ids = pending_texts.get(text, [])
+                        assignment_to_translation[assignment.assignment_id] = enforced
+        missing_assignment_ids = list(single_assignment_ids)
+        for assignment_id in translation_assignments.keys():
+            if assignment_id not in assignment_to_translation and assignment_id not in missing_assignment_ids:
+                missing_assignment_ids.append(assignment_id)
+        for assignment_id in missing_assignment_ids:
+            assignment = translation_assignments.get(assignment_id)
+            if assignment is None:
+                continue
+            text = assignment.source_text
+            region_ids = assignment.region_ids
             text_context_lines = context_lines if _should_use_context_for_text(text, region_ids, regions) else []
             unit_record = translation_perf_records.get(text)
             raw_trans = _translate_single(
@@ -8819,8 +8846,10 @@ def _process_page(
                 )
                 if protected:
                     enforced = _enforce_glossary(protected, text, active_style_guide)
-            text_to_translation[text] = enforced
-        for text, region_ids in pending_texts.items():
+            assignment_to_translation[assignment_id] = enforced
+        for assignment_id, assignment in translation_assignments.items():
+            text = assignment.source_text
+            region_ids = assignment.region_ids
             is_bubble = False
             for region in regions:
                 if region["region_id"] in region_ids and region.get("type") == "speech_bubble":
@@ -8833,7 +8862,7 @@ def _process_page(
                 source_lang,
                 target_lang,
                 text,
-                text_to_translation.get(text, ""),
+                assignment_to_translation.get(assignment_id, ""),
                 is_bubble=is_bubble,
                 debug_record=translation_perf_records.get(text),
             )
@@ -8896,7 +8925,7 @@ def _process_page(
                             translation=translation,
                             status="bubble_local_translation_repair",
                         )
-                translation_cache[text] = translation
+                translation_cache[assignment.cache_key] = translation
             matched_terms = _matched_glossary_terms(text, active_style_guide)
             applied_terms = []
             ignored_terms = []
@@ -10028,6 +10057,16 @@ def _rebuild_translation_inputs_from_regions(regions: list[dict]) -> tuple[dict[
     pending: dict[str, list[str]] = {}
     glossary: list[str] = []
     for region in regions:
+        if _region_is_active_graph_parent_anchor(region):
+            text = _region_parent_source_text(region)
+            rid = str(region.get("region_id", "") or "")
+            if not rid or not text or str(region.get("translation", "") or "").strip():
+                continue
+            if _region_parent_source_action(region) in _PARENT_SOURCE_BLOCKING_ACTIONS:
+                continue
+            glossary.append(text)
+            pending.setdefault(text, []).append(rid)
+            continue
         flags = region.get("flags", {}) or {}
         if flags.get("ignore"):
             continue
@@ -10053,7 +10092,7 @@ def _rebuild_translation_inputs_from_regions(regions: list[dict]) -> tuple[dict[
             action = str(region.get("logical_text_source_quality_action") or (region.get("render") or {}).get("logical_text_source_quality_action") or "").strip()
             if status not in {"block_anchor", "standalone_block", "standalone_utterance"}:
                 continue
-            if action in {"source_quality_blocked", "block_auto_translation", "split_required", "unresolved_review"}:
+            if action in _PARENT_SOURCE_BLOCKING_ACTIONS:
                 continue
         text = str(region.get("ocr_text", "") or "").strip()
         if not text:
@@ -10064,9 +10103,147 @@ def _rebuild_translation_inputs_from_regions(regions: list[dict]) -> tuple[dict[
     return pending, glossary
 
 
+def _translation_assignments_from_regions(
+    regions: list[dict],
+    pending_texts: dict[str, list[str]],
+) -> dict[str, TranslationAssignment]:
+    region_by_id = {
+        str(region.get("region_id") or ""): region
+        for region in regions
+        if str(region.get("region_id") or "")
+    }
+    pending_region_ids = {
+        str(rid)
+        for region_ids in pending_texts.values()
+        for rid in (region_ids or [])
+        if str(rid)
+    }
+    assignments: dict[str, TranslationAssignment] = {}
+    consumed_region_ids: set[str] = set()
+    for region in regions:
+        rid = str(region.get("region_id") or "")
+        if not rid or rid not in pending_region_ids:
+            continue
+        if not _region_is_active_graph_parent_anchor(region):
+            continue
+        parent_id = _region_parent_id(region)
+        source_text = _region_parent_source_text(region)
+        if not parent_id or not source_text:
+            continue
+        if _region_parent_source_action(region) in _PARENT_SOURCE_BLOCKING_ACTIONS:
+            continue
+        parent_region_ids: list[str] = []
+        for candidate_id in pending_region_ids:
+            candidate = region_by_id.get(candidate_id)
+            if not candidate:
+                continue
+            if _region_parent_id(candidate) != parent_id:
+                continue
+            if _region_parent_source_text(candidate) != source_text:
+                continue
+            if not _region_is_active_graph_parent_anchor(candidate):
+                continue
+            parent_region_ids.append(candidate_id)
+        parent_region_ids.sort(key=lambda item: _region_order_index(region_by_id.get(item)))
+        if not parent_region_ids:
+            parent_region_ids = [rid]
+        assignments[parent_id] = TranslationAssignment(
+            assignment_id=parent_id,
+            parent_id=parent_id,
+            source_text=source_text,
+            cache_key=source_text,
+            region_ids=parent_region_ids,
+        )
+        consumed_region_ids.update(parent_region_ids)
+
+    for text, region_ids in pending_texts.items():
+        legacy_ids = [str(rid) for rid in (region_ids or []) if str(rid) and str(rid) not in consumed_region_ids]
+        if not legacy_ids:
+            continue
+        assignment_id = str(text or "")
+        if not assignment_id:
+            continue
+        suffix = 1
+        base_assignment_id = assignment_id
+        while assignment_id in assignments:
+            suffix += 1
+            assignment_id = f"{base_assignment_id}#{suffix}"
+        assignments[assignment_id] = TranslationAssignment(
+            assignment_id=assignment_id,
+            parent_id="",
+            source_text=str(text or ""),
+            cache_key=str(text or ""),
+            region_ids=legacy_ids,
+        )
+    return assignments
+
+
+def _region_order_index(region: dict | None) -> int:
+    if not isinstance(region, dict):
+        return 0
+    try:
+        return int(region.get("order_index"))
+    except Exception:
+        return 0
+
+
+def _region_parent_id(region: dict) -> str:
+    render = region.get("render") or {}
+    return str(
+        region.get("parent_logical_text_unit_id")
+        or render.get("parent_logical_text_unit_id")
+        or region.get("active_translation_unit_id")
+        or render.get("active_translation_unit_id")
+        or ""
+    ).strip()
+
+
+def _region_parent_source_text(region: dict) -> str:
+    render = region.get("render") or {}
+    return str(
+        region.get("logical_text_block_source_text")
+        or render.get("logical_text_block_source_text")
+        or region.get("parent_logical_text_unit_source_text")
+        or render.get("parent_logical_text_unit_source_text")
+        or ""
+    ).strip()
+
+
+def _region_child_final_state(region: dict) -> str:
+    render = region.get("render") or {}
+    return str(region.get("child_final_state") or render.get("child_final_state") or "").strip()
+
+
+def _region_parent_source_action(region: dict) -> str:
+    render = region.get("render") or {}
+    return str(
+        region.get("parent_source_coherence_action")
+        or render.get("parent_source_coherence_action")
+        or region.get("logical_text_source_quality_action")
+        or render.get("logical_text_source_quality_action")
+        or ""
+    ).strip()
+
+
+def _region_is_active_graph_parent_anchor(region: dict) -> bool:
+    if not isinstance(region, dict):
+        return False
+    parent_id = _region_parent_id(region)
+    if not parent_id:
+        return False
+    state = _region_child_final_state(region)
+    if state not in {"parent_anchor", "standalone_parent"}:
+        return False
+    if str(region.get("active_translation_unit_id") or (region.get("render") or {}).get("active_translation_unit_id") or parent_id).strip() != parent_id:
+        return False
+    return bool(_region_parent_source_text(region))
+
+
 def _region_requires_logical_translation_unit(region: dict) -> bool:
     if not isinstance(region, dict):
         return False
+    if _region_parent_id(region):
+        return True
     render = region.get("render") or {}
     container_type = str(region.get("text_area_container_type") or render.get("text_area_container_type") or "").strip()
     route_intent = str(region.get("text_area_route_intent") or render.get("text_area_route_intent") or "").strip()
