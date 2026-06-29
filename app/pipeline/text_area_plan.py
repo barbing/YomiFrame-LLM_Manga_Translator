@@ -817,7 +817,10 @@ def build_text_area_root_parent_child_plan(plan: "TextAreaPlan | Mapping[str, An
                 )
             )
 
-    for group in root_groups:
+    root_groups = _text_area_graph_sort_root_groups_for_reading_order(root_groups)
+    root_sequence_keys_by_root_id: Dict[str, str] = {}
+
+    for root_index, group in enumerate(root_groups):
         group_containers = list(group.get("containers") or [])
         if not group_containers:
             continue
@@ -825,8 +828,9 @@ def build_text_area_root_parent_child_plan(plan: "TextAreaPlan | Mapping[str, An
         primary_container_id = _text_area_graph_container_id(primary)
         if not primary_container_id:
             continue
+        root_sequence_key = f"r{root_index:03d}"
         root = TextAreaRootNode(
-            root_node_id=_text_area_graph_node_id("tap_root", page_id, primary_container_id),
+            root_node_id=_text_area_graph_node_id("tap_root", page_id, root_sequence_key),
             page_id=page_id,
             container_id=primary_container_id,
             semantic_role=str(group.get("semantic_role") or _text_area_graph_semantic_role(primary)),
@@ -843,6 +847,7 @@ def build_text_area_root_parent_child_plan(plan: "TextAreaPlan | Mapping[str, An
             support_geometry_ids=_text_area_graph_unique_strings(list(group.get("support_geometry_ids") or [])),
         )
         root_nodes.append(root)
+        root_sequence_keys_by_root_id[root.root_node_id] = root_sequence_key
         group_container_ids: List[str] = []
         for member in group_containers:
             member_id = _text_area_graph_container_id(member)
@@ -991,11 +996,14 @@ def build_text_area_root_parent_child_plan(plan: "TextAreaPlan | Mapping[str, An
                 )
             )
             continue
-        for candidate in accepted_candidates:
-            evidence_id = candidate.support_geometry_ids[0] if candidate.support_geometry_ids else candidate.candidate_id
+        root_sequence_key = root_sequence_keys_by_root_id.get(root.root_node_id) or root.container_id
+        for parent_index, candidate in enumerate(
+            _text_area_graph_sort_parent_candidates_for_reading_order(accepted_candidates)
+        ):
             container_id = candidate.container_id
-            parent_id = _text_area_graph_node_id("tap_parent", page_id, container_id, evidence_id)
-            boundary_id = _text_area_graph_node_id("tap_boundary", page_id, container_id, evidence_id)
+            parent_sequence_key = f"p{parent_index:03d}"
+            parent_id = _text_area_graph_node_id("tap_parent", page_id, root_sequence_key, parent_sequence_key)
+            boundary_id = _text_area_graph_node_id("tap_boundary", page_id, root_sequence_key, parent_sequence_key)
             bbox = list(candidate.bbox)
             parent = TextAreaParentNode(
                 parent_node_id=parent_id,
@@ -1021,7 +1029,7 @@ def build_text_area_root_parent_child_plan(plan: "TextAreaPlan | Mapping[str, An
             parent_nodes.append(parent)
             child_slots.append(
                 TextAreaChildEvidenceSlot(
-                    child_slot_id=_text_area_graph_node_id("tap_child_slot", page_id, container_id, evidence_id),
+                    child_slot_id=_text_area_graph_node_id("tap_child_slot", page_id, root_sequence_key, parent_sequence_key),
                     parent_node_id=parent_id,
                     root_node_id=root.root_node_id,
                     page_id=page_id,
@@ -1034,7 +1042,7 @@ def build_text_area_root_parent_child_plan(plan: "TextAreaPlan | Mapping[str, An
             )
             source_payloads.append(
                 TextAreaSourceEvidencePayload(
-                    source_evidence_id=_text_area_graph_node_id("tap_source_payload", page_id, container_id, evidence_id),
+                    source_evidence_id=_text_area_graph_node_id("tap_source_payload", page_id, root_sequence_key, parent_sequence_key),
                     page_id=page_id,
                     source_kind="parent_boundary_reference",
                     container_id=container_id,
@@ -1189,6 +1197,156 @@ def _text_area_graph_physical_root_bbox(
     if image_size != (1, 1):
         root_bbox = _normalize_xywh(root_bbox, image_size)
     return root_bbox, []
+
+
+def _text_area_graph_sort_root_groups_for_reading_order(
+    groups: Sequence[Mapping[str, Any]],
+) -> List[Mapping[str, Any]]:
+    """Sort root containers in Japanese manga page order.
+
+    The graph ID sequence is canonical identity, so it must be based on page
+    layout rather than detector/container ids. Roots are ordered by upper page
+    bands first, then right-to-left within each band.
+    """
+
+    records: List[Tuple[int, Mapping[str, Any], List[int]]] = []
+    for index, group in enumerate(groups or []):
+        bbox = _text_area_graph_bbox_from_any(group.get("bbox") if isinstance(group, Mapping) else [])
+        if not bbox and isinstance(group, Mapping):
+            bbox = _text_area_graph_union_xywh(
+                [
+                    _text_area_graph_container_bbox(container)
+                    for container in list(group.get("containers") or [])
+                ]
+            )
+        records.append((index, group, bbox))
+    if not records:
+        return []
+
+    heights = [float(bbox[3]) for _index, _group, bbox in records if _text_area_graph_valid_bbox(bbox)]
+    row_threshold = max(32.0, min(160.0, _median_float(heights) * 0.45)) if heights else 64.0
+
+    rows: List[Dict[str, Any]] = []
+    for record in sorted(
+        records,
+        key=lambda item: (
+            _text_area_graph_bbox_top(item[2]),
+            -_text_area_graph_bbox_right(item[2]),
+            item[0],
+        ),
+    ):
+        y = _text_area_graph_bbox_top(record[2])
+        target = None
+        for row in rows:
+            if abs(y - float(row["anchor_y"])) <= row_threshold:
+                target = row
+                break
+        if target is None:
+            rows.append({"anchor_y": y, "records": [record]})
+        else:
+            target["records"].append(record)
+
+    ordered: List[Mapping[str, Any]] = []
+    for row in sorted(rows, key=lambda item: float(item["anchor_y"])):
+        row_records = sorted(
+            row["records"],
+            key=lambda item: (
+                -_text_area_graph_bbox_right(item[2]),
+                _text_area_graph_bbox_top(item[2]),
+                item[0],
+            ),
+        )
+        ordered.extend(record[1] for record in row_records)
+    return ordered
+
+
+def _text_area_graph_sort_parent_candidates_for_reading_order(
+    candidates: Sequence[TextAreaParentBoundaryCandidate],
+) -> List[TextAreaParentBoundaryCandidate]:
+    """Sort accepted parent obligations inside one root.
+
+    Vertical manga text is read by columns: right-side columns before left-side
+    columns, and top-to-bottom within a column. Candidate ids and evidence ids
+    remain provenance only; the canonical parent sequence follows this order.
+    """
+
+    records: List[Tuple[int, TextAreaParentBoundaryCandidate, List[int]]] = [
+        (index, candidate, list(candidate.bbox or []))
+        for index, candidate in enumerate(candidates or [])
+    ]
+    if not records:
+        return []
+
+    widths = [float(bbox[2]) for _index, _candidate, bbox in records if _text_area_graph_valid_bbox(bbox)]
+    column_threshold = max(12.0, min(96.0, _median_float(widths) * 0.60)) if widths else 24.0
+
+    columns: List[Dict[str, Any]] = []
+    for record in sorted(
+        records,
+        key=lambda item: (
+            -_text_area_graph_bbox_center_x(item[2]),
+            _text_area_graph_bbox_top(item[2]),
+            item[0],
+        ),
+    ):
+        cx = _text_area_graph_bbox_center_x(record[2])
+        target = None
+        for column in columns:
+            if abs(cx - float(column["anchor_x"])) <= column_threshold:
+                target = column
+                break
+        if target is None:
+            columns.append({"anchor_x": cx, "records": [record]})
+        else:
+            target["records"].append(record)
+
+    ordered: List[TextAreaParentBoundaryCandidate] = []
+    for column in sorted(columns, key=lambda item: -float(item["anchor_x"])):
+        column_records = sorted(
+            column["records"],
+            key=lambda item: (
+                _text_area_graph_bbox_top(item[2]),
+                -_text_area_graph_bbox_right(item[2]),
+                item[0],
+            ),
+        )
+        ordered.extend(record[1] for record in column_records)
+    return ordered
+
+
+def _text_area_graph_bbox_from_any(value: Any) -> List[int]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or len(value) < 4:
+        return []
+    x, y, w, h = _coerce_xywh(value)
+    if w <= 0 or h <= 0:
+        return []
+    return [x, y, w, h]
+
+
+def _text_area_graph_valid_bbox(bbox: Sequence[Any]) -> bool:
+    _x, _y, w, h = _coerce_xywh(bbox)
+    return w > 0 and h > 0
+
+
+def _text_area_graph_bbox_top(bbox: Sequence[Any]) -> float:
+    x, y, w, h = _coerce_xywh(bbox)
+    if w <= 0 or h <= 0:
+        return float("inf")
+    return float(y)
+
+
+def _text_area_graph_bbox_right(bbox: Sequence[Any]) -> float:
+    x, _y, w, h = _coerce_xywh(bbox)
+    if w <= 0 or h <= 0:
+        return float("-inf")
+    return float(x + w)
+
+
+def _text_area_graph_bbox_center_x(bbox: Sequence[Any]) -> float:
+    x, _y, w, h = _coerce_xywh(bbox)
+    if w <= 0 or h <= 0:
+        return float("-inf")
+    return float(x + (w / 2.0))
 
 
 def _text_area_graph_owned_text_unit_physical_bboxes(

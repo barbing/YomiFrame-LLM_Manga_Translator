@@ -74,6 +74,7 @@ class ParentExecutionBundle:
     renderer_audit_id: str = ""
     render_style: dict[str, Any] = field(default_factory=dict)
     execution_region: dict[str, Any] = field(default_factory=dict)
+    reading_order_index: int = 0
 
     def to_audit_dict(self) -> dict[str, Any]:
         return {
@@ -117,6 +118,7 @@ class ParentExecutionBundle:
             "renderer_audit_id": self.renderer_audit_id,
             "render_style": _copy_jsonish(self.render_style),
             "execution_region": _copy_region_record(self.execution_region) if self.execution_region else self.to_region_record(),
+            "reading_order_index": int(self.reading_order_index),
         }
 
     def to_region_record(self) -> dict[str, Any]:
@@ -183,7 +185,8 @@ class ParentExecutionBundle:
             "translated_text": self.translated_text,
             "bbox": list(bbox),
             "polygon": _polygon_from_bbox(bbox),
-            "order_index": 0,
+            "order_index": int(self.reading_order_index),
+            "reading_order_index": int(self.reading_order_index),
             "flags": {
                 "ignore": not self.translation_required and self.state != "punctuation_identity_parent",
                 "bg_text": self.role in {"caption", "background", "caption_background", "background_narration"},
@@ -273,6 +276,8 @@ class ParentExecutionBundle:
                 "cleanup_mask_ids": list(self.cleanup_mask_ids),
                 "render_decision_id": self.render_decision_id,
                 "renderer_audit_id": self.renderer_audit_id,
+                "order_index": int(self.reading_order_index),
+                "reading_order_index": int(self.reading_order_index),
                 "parent_source_coherence_action": self.source_quality_action,
                 "logical_text_source_quality_action": self.source_quality_action,
                 "source_contract_owner": self.source_contract_owner,
@@ -377,6 +382,8 @@ def build_parent_execution_bundles(
         )
         result.blocked_bundles.append(bundle)
 
+    _assign_parent_execution_reading_order(result.bundles)
+    _assign_parent_execution_reading_order(result.blocked_bundles)
     _validate_bundle_result(result)
     return result
 
@@ -472,11 +479,189 @@ def parent_execution_bundles_from_audit_records(
             renderer_audit_id=str(record.get("renderer_audit_id") or ""),
             render_style=_render_style_contract_from_audit_record(record),
             execution_region=_copy_region_record(record.get("execution_region") or {}),
+            reading_order_index=int(record.get("reading_order_index") or record.get("order_index") or 0),
         )
         if not bundle.execution_region:
             bundle.to_region_record()
         bundles.append(bundle)
     return bundles
+
+
+def _assign_parent_execution_reading_order(bundles: list[ParentExecutionBundle]) -> None:
+    if not bundles:
+        return
+    bundles[:] = _sort_parent_execution_bundles_for_reading_order(bundles)
+    for index, bundle in enumerate(bundles):
+        bundle.reading_order_index = index
+        if bundle.execution_region:
+            bundle.to_region_record()
+
+
+def _sort_parent_execution_bundles_for_reading_order(
+    bundles: Sequence[ParentExecutionBundle],
+) -> list[ParentExecutionBundle]:
+    """Return bundles in Japanese manga page order without splitting roots.
+
+    Page-level order is root-first: upper bands before lower bands, then
+    right-to-left within a band. Parent order inside a root follows vertical
+    Japanese text flow: right-side columns before left-side columns, and
+    top-to-bottom within a column.
+    """
+
+    root_groups: dict[str, list[ParentExecutionBundle]] = {}
+    for bundle in bundles or []:
+        root_key = str(bundle.root_id or bundle.bundle_id or bundle.parent_id or "")
+        root_groups.setdefault(root_key, []).append(bundle)
+    if not root_groups:
+        return []
+
+    root_records: list[tuple[str, list[int], list[ParentExecutionBundle]]] = []
+    for root_id, root_bundles in root_groups.items():
+        root_bbox = _best_bbox(
+            root_bundles[0].root_bbox if root_bundles else [],
+            _union_bboxes([_bundle_reading_bbox(bundle) for bundle in root_bundles]),
+        )
+        root_records.append((root_id, root_bbox, root_bundles))
+
+    root_heights = [box[3] for _root_id, box, _items in root_records if _valid_bbox(box)]
+    root_band = max(128.0, _median(root_heights) * 0.45) if root_heights else 128.0
+
+    ordered: list[ParentExecutionBundle] = []
+    for _root_id, _root_bbox, root_bundles in _sort_root_records_for_page_reading(root_records, root_band):
+        ordered.extend(_sort_root_parent_bundles(root_bundles))
+    return ordered
+
+
+def _sort_root_records_for_page_reading(
+    root_records: Sequence[tuple[str, list[int], list[ParentExecutionBundle]]],
+    row_threshold: float,
+) -> list[tuple[str, list[int], list[ParentExecutionBundle]]]:
+    rows: list[dict[str, Any]] = []
+    for record in sorted(root_records, key=lambda item: (_root_top(item[1]), -_root_right(item[1]), item[0])):
+        y = _root_top(record[1])
+        target = None
+        for row in rows:
+            if abs(y - float(row["anchor_y"])) <= row_threshold:
+                target = row
+                break
+        if target is None:
+            rows.append({"anchor_y": y, "records": [record]})
+        else:
+            target["records"].append(record)
+            target["anchor_y"] = min(float(target["anchor_y"]), y)
+
+    ordered: list[tuple[str, list[int], list[ParentExecutionBundle]]] = []
+    for row in sorted(rows, key=lambda item: float(item["anchor_y"])):
+        ordered.extend(
+            sorted(
+                row["records"],
+                key=lambda item: _root_row_reading_key(item[1], item[0]),
+            )
+        )
+    return ordered
+
+
+def _root_row_reading_key(root_bbox: Sequence[int], root_id: str) -> tuple[float, float, float, str]:
+    box = _bbox(root_bbox)
+    if not _valid_bbox(box):
+        return (0.0, 0.0, 0.0, str(root_id or ""))
+    x, y, w, _h = [float(value) for value in box]
+    return (-(x + w), y, x, str(root_id or ""))
+
+
+def _root_top(root_bbox: Sequence[int]) -> float:
+    box = _bbox(root_bbox)
+    return float(box[1]) if _valid_bbox(box) else 0.0
+
+
+def _root_right(root_bbox: Sequence[int]) -> float:
+    box = _bbox(root_bbox)
+    return float(box[0] + box[2]) if _valid_bbox(box) else 0.0
+
+
+def _sort_root_parent_bundles(
+    bundles: Sequence[ParentExecutionBundle],
+) -> list[ParentExecutionBundle]:
+    entries: list[tuple[ParentExecutionBundle, list[int], float]] = []
+    for bundle in bundles or []:
+        box = _bundle_reading_bbox(bundle)
+        if not _valid_bbox(box):
+            entries.append((bundle, box, 0.0))
+            continue
+        x, _y, w, _h = box
+        entries.append((bundle, box, float(x) + float(w) / 2.0))
+    if len(entries) <= 1:
+        return [entry[0] for entry in entries]
+
+    widths = [box[2] for _bundle, box, _center_x in entries if _valid_bbox(box)]
+    column_threshold = max(32.0, _median(widths) * 0.45) if widths else 32.0
+    columns: list[dict[str, Any]] = []
+    column_by_bundle_id: dict[int, int] = {}
+    for bundle, box, center_x in sorted(entries, key=lambda item: (-item[2], _bbox(item[1])[1], str(item[0].parent_id))):
+        assigned = None
+        for index, column in enumerate(columns):
+            if abs(center_x - float(column["center_x"])) <= column_threshold:
+                assigned = index
+                values = list(column["centers"])
+                values.append(center_x)
+                column["centers"] = values
+                column["center_x"] = sum(values) / len(values)
+                break
+        if assigned is None:
+            assigned = len(columns)
+            columns.append({"center_x": center_x, "centers": [center_x]})
+        column_by_bundle_id[id(bundle)] = assigned
+
+    def parent_key(entry: tuple[ParentExecutionBundle, list[int], float]) -> tuple[Any, ...]:
+        bundle, box, _center_x = entry
+        if not _valid_bbox(box):
+            return (9999, 0, 0, str(bundle.parent_id or bundle.bundle_id or ""))
+        x, y, _w, _h = box
+        if _bundle_source_orientation(bundle).startswith("horizontal"):
+            return (0, y, x, str(bundle.parent_id or bundle.bundle_id or ""))
+        return (
+            column_by_bundle_id.get(id(bundle), 9999),
+            y,
+            -x,
+            str(bundle.parent_id or bundle.bundle_id or ""),
+        )
+
+    return [entry[0] for entry in sorted(entries, key=parent_key)]
+
+
+def _bundle_source_orientation(bundle: ParentExecutionBundle) -> str:
+    style = bundle.render_style if isinstance(bundle.render_style, Mapping) else {}
+    if style.get("source_orientation"):
+        return str(style.get("source_orientation") or "").strip().lower()
+    region = bundle.execution_region if isinstance(bundle.execution_region, Mapping) else {}
+    render = region.get("render") if isinstance(region.get("render"), Mapping) else {}
+    return str(region.get("source_orientation") or render.get("source_orientation") or "").strip().lower()
+
+
+def _bundle_reading_bbox(bundle: ParentExecutionBundle) -> list[int]:
+    return _best_bbox(bundle.parent_bbox, bundle.render_allowed_area, bundle.cleanup_target_bbox, bundle.root_bbox)
+
+
+def _union_bboxes(boxes: Sequence[Any]) -> list[int]:
+    valid = [_bbox(box) for box in boxes or []]
+    valid = [box for box in valid if _valid_bbox(box)]
+    if not valid:
+        return []
+    x1 = min(box[0] for box in valid)
+    y1 = min(box[1] for box in valid)
+    x2 = max(box[0] + box[2] for box in valid)
+    y2 = max(box[1] + box[3] for box in valid)
+    return [x1, y1, max(1, x2 - x1), max(1, y2 - y1)]
+
+
+def _median(values: Sequence[int | float]) -> float:
+    clean = sorted(float(value) for value in values if value is not None)
+    if not clean:
+        return 0.0
+    middle = len(clean) // 2
+    if len(clean) % 2:
+        return clean[middle]
+    return (clean[middle - 1] + clean[middle]) / 2.0
 
 
 def _bundle_from_finalized_parent(
@@ -622,6 +807,8 @@ def _sync_execution_region_from_bundle(
     record["source_quality_reason_codes"] = list(bundle.source_quality_reason_codes)
     record["translation"] = bundle.translated_text
     record["translated_text"] = bundle.translated_text
+    record["order_index"] = int(bundle.reading_order_index)
+    record["reading_order_index"] = int(bundle.reading_order_index)
     record["source_region_ids"] = list(bundle.source_region_ids)
     record["represented_child_ids"] = list(bundle.represented_child_ids)
     record["source_glyph_mask_ids"] = list(bundle.source_glyph_mask_ids)
@@ -659,6 +846,8 @@ def _sync_execution_region_from_bundle(
     render["source_quality_reason_codes"] = list(bundle.source_quality_reason_codes)
     render["translation"] = bundle.translated_text
     render["translated_text"] = bundle.translated_text
+    render["order_index"] = int(bundle.reading_order_index)
+    render["reading_order_index"] = int(bundle.reading_order_index)
     render["source_region_ids"] = list(bundle.source_region_ids)
     render["represented_child_ids"] = list(bundle.represented_child_ids)
     render["source_glyph_mask_ids"] = list(bundle.source_glyph_mask_ids)
