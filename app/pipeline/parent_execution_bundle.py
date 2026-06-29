@@ -12,6 +12,25 @@ from typing import Any, Mapping, Sequence
 
 
 PARENT_EXECUTION_BUNDLE_VERSION = "parent_execution_bundle_v1"
+PARENT_RENDER_STYLE_VERSION = "parent_render_style_v1"
+
+_RENDER_STYLE_FLAT_FIELDS = {
+    "font_family": "font",
+    "font_size": "font_size",
+    "font_size_hint": "source_size_hint",
+    "font_size_min": "source_size_min",
+    "font_size_max": "source_size_max",
+    "source_orientation": "source_orientation",
+    "wrap_mode": "wrap_mode",
+    "line_height": "line_height",
+    "align": "align",
+    "fill_color": "color",
+    "stroke_color": "stroke",
+    "stroke_width": "stroke_width",
+    "style_class": "font_style",
+    "font_weight": "font_weight",
+    "spacing_profile": "spacing_profile",
+}
 
 
 @dataclass
@@ -53,6 +72,7 @@ class ParentExecutionBundle:
     cleanup_mask_ids: list[str] = field(default_factory=list)
     render_decision_id: str = ""
     renderer_audit_id: str = ""
+    render_style: dict[str, Any] = field(default_factory=dict)
     execution_region: dict[str, Any] = field(default_factory=dict)
 
     def to_audit_dict(self) -> dict[str, Any]:
@@ -95,6 +115,7 @@ class ParentExecutionBundle:
             "cleanup_mask_ids": list(self.cleanup_mask_ids),
             "render_decision_id": self.render_decision_id,
             "renderer_audit_id": self.renderer_audit_id,
+            "render_style": _copy_jsonish(self.render_style),
             "execution_region": _copy_region_record(self.execution_region) if self.execution_region else self.to_region_record(),
         }
 
@@ -122,12 +143,20 @@ class ParentExecutionBundle:
         container_type = self.text_area_container_type or _container_type_for_role(self.role)
         semantic_kind = _semantic_kind_for_role(self.role)
         cleanup_authorization = _cleanup_authorization_for_role(self.role)
+        render_style = _render_style_contract_for_bundle(
+            self,
+            semantic_class=semantic_class,
+            semantic_kind=semantic_kind,
+            route_intent=route_intent,
+            render_allowed_area=render_allowed,
+        )
         record = {
             "region_id": self.bundle_id,
             "page_id": self.page_id,
             "type": semantic_class,
             "semantic_class": semantic_class,
             "semantic_kind": semantic_kind,
+            **_render_style_record_fields(render_style),
             "cleanup_authorization": cleanup_authorization,
             "text_area_cleanup_authorization": cleanup_authorization,
             "semantic_authorization_state": cleanup_authorization,
@@ -195,6 +224,8 @@ class ParentExecutionBundle:
             "render": {
                 "parent_execution_bundle_id": self.bundle_id,
                 "parent_execution_bundle_version": PARENT_EXECUTION_BUNDLE_VERSION,
+                **_render_style_record_fields(render_style),
+                **_render_style_flattened_fields(render_style),
                 "text_block_root_id": self.root_id,
                 "parent_logical_text_unit_id": self.parent_id,
                 "active_translation_unit_id": self.parent_id if self.translation_required else "",
@@ -376,6 +407,11 @@ def sync_bundles_from_region_records(
         bundle.cleanup_mask_ids = _list_strings(record.get("cleanup_mask_ids"))
         bundle.render_decision_id = str(record.get("render_decision_id") or "")
         bundle.renderer_audit_id = str(record.get("renderer_audit_id") or "")
+        bundle.render_style = _render_style_contract_from_region(
+            bundle.role,
+            record,
+            source_region_ids=bundle.source_region_ids,
+        )
         bundle.source_contract_owner = str(record.get("source_contract_owner") or bundle.source_contract_owner or "")
         bundle.source_contract_region_id = str(record.get("source_contract_region_id") or bundle.source_contract_region_id or "")
         if record.get("source_quality_reason_codes"):
@@ -434,6 +470,7 @@ def parent_execution_bundles_from_audit_records(
             cleanup_mask_ids=_list_strings(record.get("cleanup_mask_ids")),
             render_decision_id=str(record.get("render_decision_id") or ""),
             renderer_audit_id=str(record.get("renderer_audit_id") or ""),
+            render_style=_render_style_contract_from_audit_record(record),
             execution_region=_copy_region_record(record.get("execution_region") or {}),
         )
         if not bundle.execution_region:
@@ -549,6 +586,13 @@ def _bundle_from_finalized_parent(
         confidence=_float_or_none(getattr(parent_unit, "confidence", None)),
         reason_codes=_list_strings(getattr(parent, "reason_codes", [])),
         unresolved_reason=getattr(parent, "unresolved_reason", None),
+        render_style=_render_style_contract_from_source_regions(
+            role,
+            source_region_ids,
+            region_by_id,
+            semantic_class=_semantic_class_for_role(role),
+            render_allowed_area=render_allowed,
+        ),
     )
 
 
@@ -589,8 +633,20 @@ def _sync_execution_region_from_bundle(
     record["execution_region_role"] = "parent_execution"
     record["legacy_region_execution_authority"] = False
     record["source_region_evidence_only"] = True
+    render_style = _render_style_contract_for_bundle(
+        bundle,
+        semantic_class=str(record.get("semantic_class") or record.get("type") or ""),
+        semantic_kind=str(record.get("semantic_kind") or ""),
+        route_intent=str(record.get("route_intent") or record.get("text_area_route_intent") or ""),
+        render_allowed_area=_bbox(record.get("render_allowed_area") or record.get("bbox")),
+        record=record,
+    )
+    bundle.render_style = _copy_jsonish(render_style)
+    record.update(_render_style_record_fields(render_style))
     render["parent_execution_bundle_id"] = bundle.bundle_id
     render["parent_execution_bundle_version"] = PARENT_EXECUTION_BUNDLE_VERSION
+    render.update(_render_style_record_fields(render_style))
+    render.update(_render_style_flattened_fields(render_style))
     render["parent_execution_authoritative"] = True
     render["text_block_root_id"] = bundle.root_id
     render["parent_logical_text_unit_id"] = bundle.parent_id
@@ -664,6 +720,308 @@ def _source_candidate_from_region(region: Mapping[str, Any], region_id: str) -> 
             or render.get("parent_ocr_source_quality_reason_codes")
         ),
     }
+
+
+def _render_style_contract_from_audit_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(record, Mapping):
+        return {}
+    execution_region = record.get("execution_region")
+    if isinstance(execution_region, Mapping):
+        nested = _render_style_contract_from_region(
+            str(record.get("role") or execution_region.get("role") or ""),
+            execution_region,
+            source_region_ids=_list_strings(record.get("source_region_ids")),
+        )
+        if nested:
+            return nested
+    return _render_style_contract_from_region(
+        str(record.get("role") or ""),
+        record,
+        source_region_ids=_list_strings(record.get("source_region_ids")),
+    )
+
+
+def _render_style_contract_from_source_regions(
+    role: str,
+    source_region_ids: Sequence[str],
+    region_by_id: Mapping[str, Mapping[str, Any]],
+    *,
+    semantic_class: str = "",
+    render_allowed_area: Sequence[int] | None = None,
+) -> dict[str, Any]:
+    for region_id in source_region_ids or []:
+        region = region_by_id.get(str(region_id), {})
+        style = _render_style_contract_from_region(
+            role,
+            region,
+            source_region_ids=[str(region_id)],
+            semantic_class=semantic_class,
+            render_allowed_area=render_allowed_area,
+        )
+        if style and style.get("render_style_source") != "parent_execution_role_default":
+            return style
+    return _default_render_style_contract(
+        role,
+        semantic_class=semantic_class,
+        render_allowed_area=render_allowed_area,
+        source_region_ids=source_region_ids,
+    )
+
+
+def _render_style_contract_for_bundle(
+    bundle: ParentExecutionBundle,
+    *,
+    semantic_class: str,
+    semantic_kind: str,
+    route_intent: str,
+    render_allowed_area: Sequence[int] | None,
+    record: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    existing = _normalize_render_style_contract(
+        bundle.render_style,
+        role=bundle.role,
+        semantic_class=semantic_class,
+        semantic_kind=semantic_kind,
+        route_intent=route_intent,
+        render_allowed_area=render_allowed_area,
+        source_region_ids=bundle.source_region_ids,
+        source="parent_execution_bundle",
+    )
+    if existing:
+        return existing
+    if isinstance(record, Mapping):
+        from_record = _render_style_contract_from_region(
+            bundle.role,
+            record,
+            source_region_ids=bundle.source_region_ids,
+            semantic_class=semantic_class,
+            semantic_kind=semantic_kind,
+            route_intent=route_intent,
+            render_allowed_area=render_allowed_area,
+        )
+        if from_record:
+            return from_record
+    return _default_render_style_contract(
+        bundle.role,
+        semantic_class=semantic_class,
+        semantic_kind=semantic_kind,
+        route_intent=route_intent,
+        render_allowed_area=render_allowed_area,
+        source_region_ids=bundle.source_region_ids,
+    )
+
+
+def _render_style_contract_from_region(
+    role: str,
+    region: Mapping[str, Any],
+    *,
+    source_region_ids: Sequence[str] | None = None,
+    semantic_class: str = "",
+    semantic_kind: str = "",
+    route_intent: str = "",
+    render_allowed_area: Sequence[int] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(region, Mapping):
+        return {}
+    render = region.get("render")
+    if not isinstance(render, Mapping):
+        render = {}
+    for source in (region.get("render_style"), render.get("render_style")):
+        style = _normalize_render_style_contract(
+            source,
+            role=role,
+            semantic_class=semantic_class or str(region.get("semantic_class") or region.get("type") or ""),
+            semantic_kind=semantic_kind or str(region.get("semantic_kind") or ""),
+            route_intent=route_intent or str(region.get("route_intent") or render.get("route_intent") or ""),
+            render_allowed_area=render_allowed_area or _bbox(region.get("render_allowed_area") or region.get("bbox")),
+            source_region_ids=source_region_ids or _list_strings(region.get("source_region_ids")),
+            source="render_style_contract",
+        )
+        if style:
+            return style
+
+    collected: dict[str, Any] = {}
+    reverse = {flat: nested for nested, flat in _RENDER_STYLE_FLAT_FIELDS.items()}
+    for source in (render, region):
+        for flat_key, nested_key in reverse.items():
+            if nested_key in collected:
+                continue
+            value = source.get(flat_key) if isinstance(source, Mapping) else None
+            if _style_value_present(value):
+                collected[nested_key] = value
+    if "style_class" not in collected:
+        font_style = render.get("font_style") or region.get("font_style")
+        if _style_value_present(font_style):
+            collected["style_class"] = font_style
+    if not collected:
+        return {}
+    collected["render_style_source"] = str(
+        render.get("render_style_source")
+        or region.get("render_style_source")
+        or "legacy_region_render_hints"
+    )
+    collected["render_style_provider"] = str(
+        render.get("render_style_provider")
+        or region.get("render_style_provider")
+        or collected.get("render_style_provider")
+        or "legacy_region_render_hints"
+    )
+    return _normalize_render_style_contract(
+        collected,
+        role=role,
+        semantic_class=semantic_class or str(region.get("semantic_class") or region.get("type") or ""),
+        semantic_kind=semantic_kind or str(region.get("semantic_kind") or ""),
+        route_intent=route_intent or str(region.get("route_intent") or render.get("route_intent") or ""),
+        render_allowed_area=render_allowed_area or _bbox(region.get("render_allowed_area") or region.get("bbox")),
+        source_region_ids=source_region_ids or _list_strings(region.get("source_region_ids") or region.get("region_id")),
+        source="legacy_region_render_hints",
+    )
+
+
+def _default_render_style_contract(
+    role: str,
+    *,
+    semantic_class: str = "",
+    semantic_kind: str = "",
+    route_intent: str = "",
+    render_allowed_area: Sequence[int] | None = None,
+    source_region_ids: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    lowered = str(role or semantic_kind or semantic_class or route_intent or "").strip().lower()
+    caption_like = any(token in lowered for token in ("caption", "background", "narration", "sign"))
+    style = {
+        "render_style_source": "parent_execution_role_default",
+        "render_style_provider": "parent_execution_bundle",
+        "style_class": "caption" if caption_like else "dialogue",
+        "fill_color": "#000000",
+        "stroke_color": "#FFFFFF",
+        "stroke_width": 2 if caption_like else 1,
+        "source_orientation": "vertical",
+        "wrap_mode": "vertical",
+        "line_height": 1.1 if caption_like else 1.0,
+        "align": "center",
+    }
+    return _normalize_render_style_contract(
+        style,
+        role=role,
+        semantic_class=semantic_class,
+        semantic_kind=semantic_kind,
+        route_intent=route_intent,
+        render_allowed_area=render_allowed_area,
+        source_region_ids=source_region_ids,
+        source="parent_execution_role_default",
+    )
+
+
+def _normalize_render_style_contract(
+    value: Any,
+    *,
+    role: str = "",
+    semantic_class: str = "",
+    semantic_kind: str = "",
+    route_intent: str = "",
+    render_allowed_area: Sequence[int] | None = None,
+    source_region_ids: Sequence[str] | None = None,
+    source: str = "",
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    style = _copy_jsonish(value)
+    if not isinstance(style, dict):
+        return {}
+    style.setdefault("render_style_version", PARENT_RENDER_STYLE_VERSION)
+    style.setdefault("render_style_owner", "parent_execution_bundle")
+    if source and not style.get("render_style_source"):
+        style["render_style_source"] = source
+    provider = (
+        style.get("render_style_provider")
+        or style.get("provider")
+        or style.get("provider_name")
+        or style.get("model_provider")
+    )
+    if provider:
+        style["render_style_provider"] = str(provider)
+    model = (
+        style.get("render_style_provider_model")
+        or style.get("provider_model")
+        or style.get("model")
+        or style.get("model_name")
+        or style.get("model_id")
+    )
+    if model:
+        style["render_style_provider_model"] = str(model)
+    confidence = style.get("render_style_confidence")
+    if confidence is None:
+        confidence = style.get("confidence")
+    if confidence is not None:
+        coerced = _float_or_none(confidence)
+        if coerced is not None:
+            style["render_style_confidence"] = coerced
+    if role and not style.get("source_role"):
+        style["source_role"] = str(role)
+    if semantic_class and not style.get("semantic_class"):
+        style["semantic_class"] = str(semantic_class)
+    if semantic_kind and not style.get("semantic_kind"):
+        style["semantic_kind"] = str(semantic_kind)
+    if route_intent and not style.get("route_intent"):
+        style["route_intent"] = str(route_intent)
+    lowered = str(role or semantic_kind or semantic_class or route_intent or "").strip().lower()
+    caption_like = any(token in lowered for token in ("caption", "background", "narration", "sign"))
+    style.setdefault("style_class", "caption" if caption_like else "dialogue")
+    style.setdefault("fill_color", "#000000")
+    style.setdefault("stroke_color", "#FFFFFF")
+    style.setdefault("stroke_width", 2 if caption_like else 1)
+    style.setdefault("source_orientation", "vertical")
+    style.setdefault("wrap_mode", "vertical")
+    style.setdefault("line_height", 1.1 if caption_like else 1.0)
+    style.setdefault("align", "center")
+    bbox = _bbox(render_allowed_area)
+    if bbox and not style.get("render_allowed_area"):
+        style["render_allowed_area"] = bbox
+    ids = _list_strings(source_region_ids)
+    if ids and not style.get("source_region_ids"):
+        style["source_region_ids"] = ids
+    if style.get("stroke_width") is not None:
+        try:
+            style["stroke_width"] = max(0, int(style.get("stroke_width") or 0))
+        except Exception:
+            style.pop("stroke_width", None)
+    for key in ("font_size", "font_size_hint", "font_size_min", "font_size_max"):
+        if style.get(key) is not None:
+            try:
+                style[key] = max(0, int(style.get(key) or 0))
+            except Exception:
+                style.pop(key, None)
+    return style
+
+
+def _render_style_record_fields(render_style: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(render_style, Mapping) or not render_style:
+        return {}
+    return {
+        "render_style": _copy_jsonish(render_style),
+        "render_style_owner": render_style.get("render_style_owner"),
+        "render_style_version": render_style.get("render_style_version"),
+        "render_style_source": render_style.get("render_style_source"),
+        "render_style_provider": render_style.get("render_style_provider"),
+        "render_style_provider_model": render_style.get("render_style_provider_model"),
+        "render_style_confidence": render_style.get("render_style_confidence"),
+    }
+
+
+def _render_style_flattened_fields(render_style: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(render_style, Mapping):
+        return {}
+    fields: dict[str, Any] = {}
+    for nested_key, flat_key in _RENDER_STYLE_FLAT_FIELDS.items():
+        value = render_style.get(nested_key)
+        if _style_value_present(value):
+            fields[flat_key] = value
+    return fields
+
+
+def _style_value_present(value: Any) -> bool:
+    return value is not None and value != "" and value != []
 
 
 def _semantic_class_for_role(role: str) -> str:
@@ -781,6 +1139,16 @@ def _copy_region_record(record: Any) -> dict[str, Any]:
     if isinstance(flags, Mapping):
         copied["flags"] = dict(flags)
     return copied
+
+
+def _copy_jsonish(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _copy_jsonish(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_jsonish(item) for item in value]
+    if isinstance(value, tuple):
+        return [_copy_jsonish(item) for item in value]
+    return value
 
 
 def _list_strings(value: Any) -> list[str]:

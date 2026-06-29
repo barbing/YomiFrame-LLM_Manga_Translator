@@ -1209,6 +1209,7 @@ def render_translations(
             render = region.get("render") or {}
             if not isinstance(render, dict):
                 render = {}
+            render = _render_with_style_contract(region, render)
             source_orientation = str(render.get("source_orientation", "") or "").strip().lower()
             source_size_hint = max(0, int(render.get("source_size_hint", render.get("font_size", 0)) or 0))
             source_size_min = max(0, int(render.get("source_size_min", 0) or 0))
@@ -1974,6 +1975,7 @@ def render_translations(
                 "selected_font_family": region_font,
                 "translated_text": text,
             }
+            render_debug.update(_render_style_debug_fields(render))
             for key in (
                 "text_block_root_id",
                 "parent_logical_text_unit_id",
@@ -6333,6 +6335,82 @@ def _resolve_text_color(image, box, default=(0, 0, 0)):
     except Exception:
         return default
     return default
+
+
+_RENDER_STYLE_FLAT_FIELDS = {
+    "font_family": "font",
+    "font_size": "font_size",
+    "font_size_hint": "source_size_hint",
+    "font_size_min": "source_size_min",
+    "font_size_max": "source_size_max",
+    "source_orientation": "source_orientation",
+    "wrap_mode": "wrap_mode",
+    "line_height": "line_height",
+    "align": "align",
+    "fill_color": "color",
+    "stroke_color": "stroke",
+    "stroke_width": "stroke_width",
+    "style_class": "font_style",
+    "font_weight": "font_weight",
+    "spacing_profile": "spacing_profile",
+}
+
+
+def _render_with_style_contract(region: dict, render: dict) -> dict:
+    style = _render_style_contract(region, render)
+    if not style:
+        return render
+    merged = dict(render)
+    merged["render_style"] = style
+    for nested_key, flat_key in _RENDER_STYLE_FLAT_FIELDS.items():
+        value = style.get(nested_key)
+        if _style_value_present(value):
+            merged[flat_key] = value
+    return merged
+
+
+def _render_style_contract(region: dict, render: dict) -> dict:
+    for source in (render.get("render_style"), region.get("render_style")):
+        if isinstance(source, dict):
+            style = dict(source)
+            style.setdefault("render_style_owner", "parent_execution_bundle")
+            return style
+    return {}
+
+
+def _render_style_debug_fields(render: dict) -> dict:
+    style = render.get("render_style")
+    if not isinstance(style, dict) or not style:
+        return {}
+    fields = {
+        "render_style": dict(style),
+        "render_style_owner": style.get("render_style_owner"),
+        "render_style_version": style.get("render_style_version"),
+        "render_style_source": style.get("render_style_source"),
+        "render_style_provider": style.get("render_style_provider"),
+        "render_style_provider_model": style.get("render_style_provider_model"),
+        "render_style_confidence": style.get("render_style_confidence"),
+    }
+    for nested_key in (
+        "style_class",
+        "font_family",
+        "font_weight",
+        "fill_color",
+        "stroke_color",
+        "stroke_width",
+        "source_orientation",
+        "wrap_mode",
+        "line_height",
+        "spacing_profile",
+    ):
+        value = style.get(nested_key)
+        if _style_value_present(value):
+            fields[f"render_style_{nested_key}"] = value
+    return {key: value for key, value in fields.items() if value not in (None, "", [])}
+
+
+def _style_value_present(value) -> bool:
+    return value is not None and value != "" and value != []
 
 
 def _parse_color(value) -> Tuple[int, int, int] | None:
