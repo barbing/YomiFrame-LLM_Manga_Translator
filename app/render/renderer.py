@@ -1023,10 +1023,16 @@ def render_parent_execution_bundles(
 ) -> None:
     """Render translated text from finalized parent execution bundles."""
 
+    _stamp_parent_bundle_renderer_audit_ids(
+        parent_execution_bundles,
+        debug_context=debug_context,
+        perf_telemetry_context=perf_telemetry_context,
+    )
+    records = parent_execution_region_records(parent_execution_bundles)
     render_translations(
         image_path,
         output_path,
-        parent_execution_region_records(parent_execution_bundles),
+        records,
         font_name,
         inpaint_mode=inpaint_mode,
         use_gpu=use_gpu,
@@ -1036,6 +1042,50 @@ def render_parent_execution_bundles(
         render_eligibility=render_eligibility,
         perf_telemetry_context=perf_telemetry_context,
     )
+
+
+def _stamp_parent_bundle_renderer_audit_ids(
+    parent_execution_bundles: list[Any],
+    *,
+    debug_context: dict | None,
+    perf_telemetry_context: dict | None,
+) -> None:
+    for index, bundle in enumerate(parent_execution_bundles or []):
+        bundle_id = str(getattr(bundle, "bundle_id", "") or getattr(bundle, "parent_id", "") or "")
+        if not bundle_id:
+            continue
+        page_id = str(getattr(bundle, "page_id", "") or "")
+        renderer_audit_id = str(getattr(bundle, "renderer_audit_id", "") or "")
+        if not renderer_audit_id:
+            renderer_audit_id = f"raudit_{_renderer_safe_id(page_id)}_{_renderer_safe_id(bundle_id)}"
+            try:
+                setattr(bundle, "renderer_audit_id", renderer_audit_id)
+            except Exception:
+                pass
+        parent_id = str(getattr(bundle, "parent_id", "") or bundle_id)
+        root_id = str(getattr(bundle, "root_id", "") or "")
+        fields = {
+            "renderer_audit_id": renderer_audit_id,
+            "renderer_input_authority": "parent_execution_bundle",
+            "parent_execution_bundle_id": bundle_id,
+            "parent_logical_text_unit_id": parent_id,
+            "text_block_root_id": root_id,
+            "parent_execution_bundle_render_index": index,
+        }
+        execution_region = getattr(bundle, "execution_region", None)
+        if isinstance(execution_region, dict):
+            execution_region.update(fields)
+            render = execution_region.setdefault("render", {})
+            if isinstance(render, dict):
+                render.update(fields)
+        _renderer_perf_mark_region(debug_context, perf_telemetry_context, bundle_id, **fields)
+
+
+def _renderer_safe_id(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "unknown"
+    return re.sub(r"[^0-9A-Za-z_.-]+", "_", text).strip("_") or "unknown"
 
 
 def render_translations(

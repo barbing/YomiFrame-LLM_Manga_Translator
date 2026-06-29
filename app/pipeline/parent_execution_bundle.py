@@ -228,6 +228,11 @@ class ParentExecutionBundle:
                 "parent_logical_text_unit_render_allowed_area": list(render_allowed),
                 "source_region_ids": list(self.source_region_ids),
                 "represented_child_ids": list(self.represented_child_ids),
+                "source_glyph_mask_ids": list(self.source_glyph_mask_ids),
+                "cleanup_job_ids": list(self.cleanup_job_ids),
+                "cleanup_mask_ids": list(self.cleanup_mask_ids),
+                "render_decision_id": self.render_decision_id,
+                "renderer_audit_id": self.renderer_audit_id,
                 "parent_source_coherence_action": self.source_quality_action,
                 "logical_text_source_quality_action": self.source_quality_action,
                 "wrap_mode": "vertical",
@@ -548,6 +553,11 @@ def _sync_execution_region_from_bundle(
     render["translated_text"] = bundle.translated_text
     render["source_region_ids"] = list(bundle.source_region_ids)
     render["represented_child_ids"] = list(bundle.represented_child_ids)
+    render["source_glyph_mask_ids"] = list(bundle.source_glyph_mask_ids)
+    render["cleanup_job_ids"] = list(bundle.cleanup_job_ids)
+    render["cleanup_mask_ids"] = list(bundle.cleanup_mask_ids)
+    render["render_decision_id"] = bundle.render_decision_id
+    render["renderer_audit_id"] = bundle.renderer_audit_id
     render["execution_region_authority"] = "parent_execution_bundle"
     render["execution_region_role"] = "parent_execution"
     render["legacy_region_execution_authority"] = False

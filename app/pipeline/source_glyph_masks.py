@@ -80,6 +80,7 @@ class SourceGlyphMask:
     source_glyph_erasure_expected_pixels: int | None = None
     text_block_root_id: str | None = None
     parent_logical_text_unit_id: str | None = None
+    parent_execution_bundle_id: str | None = None
     anchor_child_id: str | None = None
     child_segment_ids: list[str] = field(default_factory=list)
     failure_reason: str | None = None
@@ -154,6 +155,7 @@ class SourceGlyphMask:
             "cleanup_suitability_reason": self.cleanup_suitability_reason,
             "compatibility_source_fields": dict(self.compatibility_source_fields),
             "source_glyph_mask_anchor_block_id": self.logical_block_id,
+            "parent_execution_bundle_id": self.parent_execution_bundle_id,
             "source_glyph_mask_parent_logical_text_unit_id": self.parent_logical_text_unit_id,
             "source_glyph_mask_text_block_root_id": self.text_block_root_id,
             "source_glyph_mask_anchor_child_id": self.anchor_child_id,
@@ -231,6 +233,7 @@ class SourceGlyphMask:
             "cleanup_suitability_reason": self.cleanup_suitability_reason,
             "compatibility_source_fields": dict(self.compatibility_source_fields),
             "source_glyph_mask_anchor_block_id": self.logical_block_id,
+            "parent_execution_bundle_id": self.parent_execution_bundle_id,
             "source_glyph_mask_parent_logical_text_unit_id": self.parent_logical_text_unit_id,
             "source_glyph_mask_text_block_root_id": self.text_block_root_id,
             "source_glyph_mask_anchor_child_id": self.anchor_child_id,
@@ -851,6 +854,12 @@ def generate_source_glyph_masks(
                 generation_method=method,
                 text_block_root_id=str(_canonical_region_render_value(region, render, "text_block_root_id") or "") or None,
                 parent_logical_text_unit_id=str(_canonical_region_render_value(region, render, "parent_logical_text_unit_id") or "") or None,
+                parent_execution_bundle_id=str(
+                    region.get("parent_execution_bundle_id")
+                    or render.get("parent_execution_bundle_id")
+                    or region_id
+                    or ""
+                ) or None,
                 anchor_child_id=str(
                     _canonical_region_render_value(region, render, "parent_logical_text_unit_anchor_child_id")
                     or _canonical_region_render_value(region, render, "child_recognized_text_segment_id")
@@ -1509,6 +1518,20 @@ def _base_coverage_record(page_id: str, region: dict, render: dict, cleanup_mode
     record = {
         "page_id": page_id,
         "region_id": region_id,
+        "parent_execution_bundle_id": str(
+            region.get("parent_execution_bundle_id")
+            or render.get("parent_execution_bundle_id")
+            or region_id
+            or ""
+        ),
+        "parent_logical_text_unit_id": str(
+            _canonical_region_render_value(region, render, "parent_logical_text_unit_id")
+            or ""
+        ),
+        "text_block_root_id": str(
+            _canonical_region_render_value(region, render, "text_block_root_id")
+            or ""
+        ),
         "semantic_class": region_type,
         "cleanup_mode": cleanup_mode,
         "cleanup_source_tracking_required": tracking_required,

@@ -616,6 +616,20 @@ def build_cleanup_masks(
             cleanup_mask = CleanupMask(
                 cleanup_mask_id=f"cmask_{_safe_id(page_id)}_{_safe_id(job.cleanup_job_id)}",
                 cleanup_job_id=str(job.cleanup_job_id),
+                parent_execution_bundle_id=str(
+                    getattr(job, "parent_execution_bundle_id", "")
+                    or getattr(job, "parent_logical_text_unit_id", "")
+                    or ""
+                ),
+                parent_logical_text_unit_id=str(getattr(job, "parent_logical_text_unit_id", "") or ""),
+                text_block_root_id=str(getattr(job, "text_block_root_id", "") or ""),
+                text_area_container_id=str(getattr(job, "text_area_container_id", "") or ""),
+                target_region_ids=list(getattr(job, "target_region_ids", []) or []),
+                represented_region_ids=list(
+                    getattr(job, "cleanup_unit_child_region_ids", None)
+                    or getattr(job, "target_region_ids", [])
+                    or []
+                ),
                 foreground_mask_source_id=consumed_source_ids[0] if consumed_source_ids else None,
                 foreground_mask_source_ids=consumed_source_ids,
                 consumed_source_glyph_mask_ids=consumed_source_ids,
@@ -3364,6 +3378,13 @@ def _base_job_record(page_id: str, job: CleanupJob) -> dict[str, Any]:
     return {
         "page_id": page_id,
         "cleanup_job_id": str(getattr(job, "cleanup_job_id", "") or ""),
+        "parent_execution_bundle_id": str(
+            getattr(job, "parent_execution_bundle_id", "")
+            or getattr(job, "parent_logical_text_unit_id", "")
+            or ""
+        ),
+        "parent_logical_text_unit_id": str(getattr(job, "parent_logical_text_unit_id", "") or ""),
+        "text_block_root_id": str(getattr(job, "text_block_root_id", "") or ""),
         "target_region_ids": list(getattr(job, "target_region_ids", []) or []),
         "cleanup_class": _enum_value(getattr(job, "cleanup_class", "")),
         "route_intent": str(getattr(job, "route_intent", "") or ""),

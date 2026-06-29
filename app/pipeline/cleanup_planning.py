@@ -443,6 +443,7 @@ def build_cleanup_plans(
                 source_error=source_error,
             )
             cleanup_class = job.cleanup_class
+            identity = _cleanup_identity_fields(job, cleanup_mask, fallback_region_id=cleanup_mask_id)
             plan = _runtime_speech_flat_plan(
                 page_id=page_id,
                 job=job,
@@ -455,11 +456,14 @@ def build_cleanup_plans(
                 {
                     "text_block_root_id": str(
                         getattr(job, "text_block_root_id", "")
+                        or identity.get("text_block_root_id")
                         or getattr(job, "parent_logical_text_unit_id", "")
                         or getattr(job, "cleanup_unit_id", "")
                         or getattr(job, "cleanup_job_id", "")
                         or ""
                     ),
+                    "parent_execution_bundle_id": str(identity.get("parent_execution_bundle_id") or ""),
+                    "parent_logical_text_unit_id": str(identity.get("parent_logical_text_unit_id") or ""),
                     "cleanup_obligation_id": str(cleanup_mask.cleanup_mask_id),
                     "mask_space": "page",
                     "bbox_format": "xyxy_exclusive",
@@ -508,6 +512,15 @@ def build_cleanup_plans(
                 cleanup_class=cleanup_class,
                 selected_backend=plan.selected_backend,
                 cleanup_method=plan.cleanup_method,
+                parent_execution_bundle_id=str(identity.get("parent_execution_bundle_id") or ""),
+                parent_logical_text_unit_id=str(identity.get("parent_logical_text_unit_id") or ""),
+                text_block_root_id=str(
+                    getattr(job, "text_block_root_id", "")
+                    or identity.get("text_block_root_id")
+                    or getattr(job, "parent_logical_text_unit_id", "")
+                    or ""
+                ),
+                target_region_ids=list(identity.get("target_region_ids") or []),
                 backend_parameters=params,
                 inpaint_mode=plan.inpaint_mode,
                 crop_context_bbox=list(cleanup_mask.erase_mask_bbox or cleanup_mask.allowed_area or []),
@@ -2241,11 +2254,24 @@ def _upstream_commit_entry_for_result(
     excluded_region_ids: set[str],
 ) -> dict[str, Any]:
     result_id = str(cleanup_result.cleanup_result_id)
-    region_id = str(cleanup_result.region_id or status.get("region_id") or "")
     result_backend_parameters = (
         cleanup_result.backend_parameters
         if isinstance(getattr(cleanup_result, "backend_parameters", None), Mapping)
         else {}
+    )
+    identity = _cleanup_identity_fields(
+        cleanup_result,
+        proof,
+        status,
+        result_backend_parameters,
+        fallback_region_id=str(cleanup_result.region_id or status.get("region_id") or ""),
+    )
+    region_id = str(
+        identity.get("parent_execution_bundle_id")
+        or identity.get("parent_logical_text_unit_id")
+        or cleanup_result.region_id
+        or status.get("region_id")
+        or ""
     )
     owned_segmentation_pixels = _int_or_none(result_backend_parameters.get("owned_segmentation_pixels"))
     executable_foreground_pixels = _int_or_none(result_backend_parameters.get("executable_foreground_pixels"))
@@ -2266,6 +2292,9 @@ def _upstream_commit_entry_for_result(
     base = {
         "page_id": page_id,
         "region_id": region_id,
+        "parent_execution_bundle_id": str(identity.get("parent_execution_bundle_id") or ""),
+        "parent_logical_text_unit_id": str(identity.get("parent_logical_text_unit_id") or ""),
+        "target_region_ids": list(identity.get("target_region_ids") or []),
         "text_block_root_id": text_block_root_id,
         "cleanup_obligation_id": cleanup_obligation_id,
         "mask_space": str(result_backend_parameters.get("mask_space") or status.get("mask_space") or "page"),
@@ -2335,6 +2364,16 @@ def _upstream_commit_entry_for_status(
     status: Mapping[str, Any],
 ) -> dict[str, Any]:
     cleanup_mask_id = str(status.get("cleanup_mask_id") or "")
+    identity = _cleanup_identity_fields(
+        status,
+        fallback_region_id=str(status.get("region_id") or ""),
+    )
+    region_id = str(
+        identity.get("parent_execution_bundle_id")
+        or identity.get("parent_logical_text_unit_id")
+        or status.get("region_id")
+        or ""
+    )
     cleanup_obligation_id = str(
         status.get("cleanup_obligation_id")
         or status.get("parent_cleanup_mask_id")
@@ -2356,7 +2395,10 @@ def _upstream_commit_entry_for_status(
     )
     base = {
         "page_id": page_id,
-        "region_id": str(status.get("region_id") or ""),
+        "region_id": region_id,
+        "parent_execution_bundle_id": str(identity.get("parent_execution_bundle_id") or ""),
+        "parent_logical_text_unit_id": str(identity.get("parent_logical_text_unit_id") or ""),
+        "target_region_ids": list(identity.get("target_region_ids") or []),
         "text_block_root_id": text_block_root_id,
         "cleanup_obligation_id": cleanup_obligation_id,
         "mask_space": str(status.get("mask_space") or "page"),
@@ -2708,6 +2750,8 @@ def execute_cleanup_runtime_plan(
 
     started = time.time()
     params = cleanup_plan.backend_parameters or {}
+    identity = _cleanup_identity_fields(cleanup_plan, cleanup_mask, params, fallback_region_id=region_id)
+    canonical_region_id = _canonical_parent_region_id(cleanup_plan, cleanup_mask, params, fallback_region_id=region_id)
     debug_info: dict[str, Any] = {}
     mode = str(params.get("inpaint_mode") or cleanup_plan.inpaint_mode or "fast")
     cleanup_tag = str(params.get("cleanup_tag") or "speech_strong")
@@ -2771,7 +2815,7 @@ def execute_cleanup_runtime_plan(
         "cleanup_execute_runtime_plan",
         "start",
         page_id=page_id,
-        region_id=region_id,
+        region_id=canonical_region_id,
         cleanup_plan_id=str(cleanup_plan.cleanup_plan_id),
         cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
         cleanup_tag=cleanup_tag,
@@ -2830,7 +2874,7 @@ def execute_cleanup_runtime_plan(
     refs = _write_runtime_artifacts(
         artifact_dir=artifact_dir,
         page_id=page_id,
-        region_id=region_id,
+        region_id=canonical_region_id,
         cleanup_plan=cleanup_plan,
         cleanup_mask=cleanup_mask,
         before=image,
@@ -2843,7 +2887,7 @@ def execute_cleanup_runtime_plan(
         "cleanup_execute_runtime_plan",
         "end",
         page_id=page_id,
-        region_id=region_id,
+        region_id=canonical_region_id,
         cleanup_plan_id=str(cleanup_plan.cleanup_plan_id),
         cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
         backend=backend,
@@ -2863,7 +2907,11 @@ def execute_cleanup_runtime_plan(
         cleanup_mask_id=str(cleanup_plan.cleanup_mask_id),
         operation_bbox=_valid_bbox(execution.crop_bbox) or _valid_bbox(cleanup_mask.erase_mask_bbox),
         page=page_id,
-        region_id=region_id,
+        region_id=canonical_region_id,
+        parent_execution_bundle_id=str(identity.get("parent_execution_bundle_id") or ""),
+        parent_logical_text_unit_id=str(identity.get("parent_logical_text_unit_id") or ""),
+        text_block_root_id=str(identity.get("text_block_root_id") or ""),
+        target_region_ids=list(identity.get("target_region_ids") or []),
         cleanup_class=cleanup_plan.cleanup_class,
         pixel_changed=pixel_changed,
         changed_pixel_count=changed_pixels,
@@ -3001,6 +3049,22 @@ def _proof(
         cleanup_job_id=cleanup_result.cleanup_job_id,
         cleanup_plan_id=cleanup_plan.cleanup_plan_id,
         proof_status=status,
+        parent_execution_bundle_id=str(
+            cleanup_result.parent_execution_bundle_id
+            or cleanup_plan.parent_execution_bundle_id
+            or ""
+        ),
+        parent_logical_text_unit_id=str(
+            cleanup_result.parent_logical_text_unit_id
+            or cleanup_plan.parent_logical_text_unit_id
+            or ""
+        ),
+        text_block_root_id=str(
+            cleanup_result.text_block_root_id
+            or cleanup_plan.text_block_root_id
+            or ""
+        ),
+        target_region_ids=list(cleanup_result.target_region_ids or cleanup_plan.target_region_ids or []),
         source_glyph_removal_passed=status == ProofStatus.PASSED,
         source_residual_ratio=pass_residual_ratio,
         changed_outside_allowed_pixels=_int_or_none(metrics.get("changed_outside_allowed_pixels")),
@@ -3156,17 +3220,23 @@ def _runtime_base_record(
 ) -> dict[str, Any]:
     target_region_ids = [str(rid) for rid in job.target_region_ids or [] if str(rid)]
     cleanup_unit_id = str(getattr(job, "cleanup_unit_id", "") or job.cleanup_job_id)
+    identity = _cleanup_identity_fields(job, fallback_region_id=target_region_ids[0] if target_region_ids else "")
+    parent_execution_bundle_id = str(identity.get("parent_execution_bundle_id") or "")
+    parent_logical_text_unit_id = str(identity.get("parent_logical_text_unit_id") or "")
     text_block_root_id = str(
         getattr(job, "text_block_root_id", "")
-        or getattr(job, "parent_logical_text_unit_id", "")
+        or identity.get("text_block_root_id")
+        or parent_logical_text_unit_id
         or cleanup_unit_id
         or job.cleanup_job_id
         or ""
     )
     return {
         "page_id": page_id,
-        "region_id": target_region_ids[0] if target_region_ids else "",
-        "target_region_ids": target_region_ids,
+        "region_id": parent_execution_bundle_id or parent_logical_text_unit_id or (target_region_ids[0] if target_region_ids else ""),
+        "parent_execution_bundle_id": parent_execution_bundle_id,
+        "parent_logical_text_unit_id": parent_logical_text_unit_id,
+        "target_region_ids": list(identity.get("target_region_ids") or target_region_ids),
         "cleanup_job_id": str(job.cleanup_job_id),
         "text_block_root_id": text_block_root_id,
         "mask_space": "page",
@@ -3314,6 +3384,16 @@ def _truthy(value: Any) -> bool:
 
 def _effective_mask_kwargs(cleanup_mask: CleanupMask) -> dict[str, Any]:
     return {
+        "parent_execution_bundle_id": str(
+            getattr(cleanup_mask, "parent_execution_bundle_id", "")
+            or getattr(cleanup_mask, "parent_logical_text_unit_id", "")
+            or ""
+        ),
+        "parent_logical_text_unit_id": str(getattr(cleanup_mask, "parent_logical_text_unit_id", "") or ""),
+        "text_block_root_id": str(getattr(cleanup_mask, "text_block_root_id", "") or ""),
+        "text_area_container_id": str(getattr(cleanup_mask, "text_area_container_id", "") or ""),
+        "target_region_ids": list(getattr(cleanup_mask, "target_region_ids", []) or []),
+        "represented_region_ids": list(getattr(cleanup_mask, "represented_region_ids", []) or []),
         "effective_mask_status": str(getattr(cleanup_mask, "effective_mask_status", "") or ""),
         "effective_mask_failure_reason": str(getattr(cleanup_mask, "effective_mask_failure_reason", "") or ""),
         "seed_foreground_pixels": getattr(cleanup_mask, "seed_foreground_pixels", None),
@@ -4016,8 +4096,10 @@ def _runtime_speech_flat_plan(
     expected_bbox = _valid_bbox(job.source_glyph_erasure_expected_area_bbox)
     proof_scope_bbox = _union_valid_bboxes(source_bbox, expected_bbox)
     parent_cleanup_unit_id = str(getattr(job, "cleanup_unit_id", "") or job.cleanup_job_id or "")
+    identity = _cleanup_identity_fields(job, cleanup_mask, fallback_region_id=parent_cleanup_unit_id)
     text_block_root_id = str(
         getattr(job, "text_block_root_id", "")
+        or identity.get("text_block_root_id")
         or getattr(job, "parent_logical_text_unit_id", "")
         or parent_cleanup_unit_id
         or job.cleanup_job_id
@@ -4032,7 +4114,9 @@ def _runtime_speech_flat_plan(
         "foreground_mask_pixels": getattr(cleanup_mask, "foreground_mask_pixels", None),
         "erase_mask_pixels": getattr(cleanup_mask, "erase_mask_pixels", None),
         "cleanup_tag": cleanup_tag,
-        "target_region_ids": list(job.target_region_ids or []),
+        "parent_execution_bundle_id": identity.get("parent_execution_bundle_id", ""),
+        "parent_logical_text_unit_id": identity.get("parent_logical_text_unit_id", ""),
+        "target_region_ids": list(identity.get("target_region_ids") or job.target_region_ids or []),
         "allowed_area": list(cleanup_mask.allowed_area or []),
         "source_glyph_erasure_bbox": list(source_bbox or []),
         "source_glyph_erasure_expected_area_bbox": list(expected_bbox or []),
@@ -4060,6 +4144,10 @@ def _runtime_speech_flat_plan(
         cleanup_class=cleanup_class,
         selected_backend="app.pipeline.cleanup_execution.apply_local_text_removal",
         cleanup_method=f"{cleanup_class_value}_local_text_removal",
+        parent_execution_bundle_id=str(identity.get("parent_execution_bundle_id") or ""),
+        parent_logical_text_unit_id=str(identity.get("parent_logical_text_unit_id") or ""),
+        text_block_root_id=text_block_root_id,
+        target_region_ids=list(identity.get("target_region_ids") or []),
         backend_parameters=backend_parameters,
         inpaint_mode=str(inpaint_mode or "fast"),
         crop_context_bbox=list(cleanup_mask.erase_mask_bbox or cleanup_mask.allowed_area or []),
@@ -4132,6 +4220,30 @@ def _runtime_plan_from_formal_plan(
         cleanup_class=cleanup_class,
         selected_backend=runtime_plan.selected_backend,
         cleanup_method=f"{runtime_plan.cleanup_method}_formal_plan_authorized",
+        parent_execution_bundle_id=str(
+            formal_plan.parent_execution_bundle_id
+            or runtime_plan.parent_execution_bundle_id
+            or getattr(cleanup_mask, "parent_execution_bundle_id", "")
+            or ""
+        ),
+        parent_logical_text_unit_id=str(
+            formal_plan.parent_logical_text_unit_id
+            or runtime_plan.parent_logical_text_unit_id
+            or getattr(cleanup_mask, "parent_logical_text_unit_id", "")
+            or ""
+        ),
+        text_block_root_id=str(
+            formal_plan.text_block_root_id
+            or runtime_plan.text_block_root_id
+            or getattr(cleanup_mask, "text_block_root_id", "")
+            or ""
+        ),
+        target_region_ids=list(
+            formal_plan.target_region_ids
+            or runtime_plan.target_region_ids
+            or getattr(cleanup_mask, "target_region_ids", [])
+            or []
+        ),
         backend_parameters=params,
         inpaint_mode=str(inpaint_mode or formal_plan.inpaint_mode or runtime_plan.inpaint_mode or "fast"),
         crop_context_bbox=list(cleanup_mask.erase_mask_bbox or formal_plan.crop_context_bbox or []),
@@ -4372,6 +4484,7 @@ def _run_partitioned_cleanup_attempts(
     child_proof_count = 0
     partition_count = len(partition_masks)
     base_params = dict(formal_plan.backend_parameters or {})
+    region_id = _canonical_parent_region_id(formal_plan, parent_cleanup_mask, base_record, fallback_region_id=region_id) or region_id
     parent_cleanup_unit_id = str(
         base_params.get("parent_cleanup_unit_id")
         or getattr(job, "cleanup_unit_id", "")
@@ -4431,6 +4544,10 @@ def _run_partitioned_cleanup_attempts(
         cleanup_class=parent_full_plan.cleanup_class,
         selected_backend=parent_full_plan.selected_backend,
         cleanup_method=f"{parent_full_plan.cleanup_method}_partition_parent_full_mask_first",
+        parent_execution_bundle_id=parent_full_plan.parent_execution_bundle_id,
+        parent_logical_text_unit_id=parent_full_plan.parent_logical_text_unit_id,
+        text_block_root_id=parent_full_plan.text_block_root_id,
+        target_region_ids=list(parent_full_plan.target_region_ids or []),
         backend_parameters=parent_full_params,
         inpaint_mode=parent_full_plan.inpaint_mode,
         crop_context_bbox=list(parent_cleanup_mask.erase_mask_bbox or parent_full_plan.crop_context_bbox or []),
@@ -4572,6 +4689,10 @@ def _run_partitioned_cleanup_attempts(
             cleanup_class=plan.cleanup_class,
             selected_backend=plan.selected_backend,
             cleanup_method=f"{plan.cleanup_method}_partition_component",
+            parent_execution_bundle_id=plan.parent_execution_bundle_id,
+            parent_logical_text_unit_id=plan.parent_logical_text_unit_id,
+            text_block_root_id=plan.text_block_root_id,
+            target_region_ids=list(plan.target_region_ids or []),
             backend_parameters=params,
             inpaint_mode=plan.inpaint_mode,
             crop_context_bbox=list(partition_mask.erase_mask_bbox or plan.crop_context_bbox or []),
@@ -4744,6 +4865,10 @@ def _run_partitioned_cleanup_attempts(
         cleanup_class=parent_plan.cleanup_class,
         selected_backend=parent_plan.selected_backend,
         cleanup_method=f"{parent_plan.cleanup_method}_partition_parent_merged",
+        parent_execution_bundle_id=parent_plan.parent_execution_bundle_id,
+        parent_logical_text_unit_id=parent_plan.parent_logical_text_unit_id,
+        text_block_root_id=parent_plan.text_block_root_id,
+        target_region_ids=list(parent_plan.target_region_ids or []),
         backend_parameters=parent_params,
         inpaint_mode=parent_plan.inpaint_mode,
         crop_context_bbox=list(parent_cleanup_mask.erase_mask_bbox or parent_plan.crop_context_bbox or []),
@@ -4854,6 +4979,8 @@ def _partition_parent_cleanup_result(
     selected_child_records: Sequence[tuple[CleanupResult, CleanupProof, Mapping[str, Any]]],
     aggregate_record: Mapping[str, Any],
 ) -> tuple[CleanupResult, str]:
+    identity = _cleanup_identity_fields(parent_plan, parent_cleanup_mask, fallback_region_id=region_id)
+    canonical_region_id = _canonical_parent_region_id(parent_plan, parent_cleanup_mask, fallback_region_id=region_id)
     if np is None or Image is None:
         return (
             CleanupResult(
@@ -4863,7 +4990,11 @@ def _partition_parent_cleanup_result(
                 cleanup_mask_id=str(parent_cleanup_mask.cleanup_mask_id),
                 operation_bbox=_valid_bbox(parent_cleanup_mask.erase_mask_bbox),
                 page=page_id,
-                region_id=region_id,
+                region_id=canonical_region_id,
+                parent_execution_bundle_id=str(identity.get("parent_execution_bundle_id") or ""),
+                parent_logical_text_unit_id=str(identity.get("parent_logical_text_unit_id") or ""),
+                text_block_root_id=str(identity.get("text_block_root_id") or ""),
+                target_region_ids=list(identity.get("target_region_ids") or []),
                 cleanup_class=parent_plan.cleanup_class,
                 pixel_changed=False,
                 changed_pixel_count=0,
@@ -4887,7 +5018,11 @@ def _partition_parent_cleanup_result(
                 cleanup_mask_id=str(parent_cleanup_mask.cleanup_mask_id),
                 operation_bbox=_valid_bbox(parent_cleanup_mask.erase_mask_bbox),
                 page=page_id,
-                region_id=region_id,
+                region_id=canonical_region_id,
+                parent_execution_bundle_id=str(identity.get("parent_execution_bundle_id") or ""),
+                parent_logical_text_unit_id=str(identity.get("parent_logical_text_unit_id") or ""),
+                text_block_root_id=str(identity.get("text_block_root_id") or ""),
+                target_region_ids=list(identity.get("target_region_ids") or []),
                 cleanup_class=parent_plan.cleanup_class,
                 pixel_changed=False,
                 changed_pixel_count=0,
@@ -4936,7 +5071,11 @@ def _partition_parent_cleanup_result(
             cleanup_mask_id=str(parent_cleanup_mask.cleanup_mask_id),
             operation_bbox=_valid_bbox(parent_cleanup_mask.erase_mask_bbox),
             page=page_id,
-            region_id=region_id,
+            region_id=canonical_region_id,
+            parent_execution_bundle_id=str(identity.get("parent_execution_bundle_id") or ""),
+            parent_logical_text_unit_id=str(identity.get("parent_logical_text_unit_id") or ""),
+            text_block_root_id=str(identity.get("text_block_root_id") or ""),
+            target_region_ids=list(identity.get("target_region_ids") or []),
             cleanup_class=parent_plan.cleanup_class,
             pixel_changed=changed_total > 0,
             changed_pixel_count=changed_total,
@@ -5089,6 +5228,7 @@ def _run_adaptive_cleanup_attempts(
     artifact_dir: str | None,
 ) -> tuple[list[CleanupResult], list[CleanupProof], list[dict[str, Any]]]:
     adaptive_started = time.time()
+    region_id = _canonical_parent_region_id(cleanup_plan, cleanup_mask, fallback_region_id=region_id) or region_id
     results: list[CleanupResult] = []
     proofs: list[CleanupProof] = []
     attempts: list[dict[str, Any]] = []
@@ -5854,11 +5994,12 @@ def _execute_cleanup_attempt(
     retry_reason: str,
 ) -> tuple[CleanupResult, CleanupProof]:
     attempt_started = time.time()
+    canonical_region_id = _canonical_parent_region_id(cleanup_plan, cleanup_mask, fallback_region_id=region_id)
     _page014_timeout_checkpoint(
         "cleanup_attempt_execute",
         "start",
         page_id=page_id,
-        region_id=region_id,
+        region_id=canonical_region_id,
         cleanup_plan_id=str(cleanup_plan.cleanup_plan_id),
         cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
         attempt_index=attempt_index,
@@ -5871,7 +6012,7 @@ def _execute_cleanup_attempt(
         cleanup_mask=cleanup_mask,
         backend_context=backend_context,
         page_id=page_id,
-        region_id=region_id,
+        region_id=canonical_region_id,
         use_gpu=use_gpu,
         model_id=model_id,
         artifact_dir=artifact_dir,
@@ -5920,7 +6061,7 @@ def _execute_cleanup_attempt(
         "cleanup_attempt_proof",
         "start",
         page_id=page_id,
-        region_id=region_id,
+        region_id=canonical_region_id,
         cleanup_plan_id=str(cleanup_plan.cleanup_plan_id),
         cleanup_result_id=str(result.cleanup_result_id),
         attempt_index=attempt_index,
@@ -5937,7 +6078,7 @@ def _execute_cleanup_attempt(
         "cleanup_attempt_execute",
         "end",
         page_id=page_id,
-        region_id=region_id,
+        region_id=canonical_region_id,
         cleanup_plan_id=str(cleanup_plan.cleanup_plan_id),
         cleanup_result_id=str(result.cleanup_result_id),
         cleanup_proof_id=str(proof.cleanup_proof_id),
@@ -6007,6 +6148,8 @@ def _combined_residual_retry_result(
         }
     )
     backend_name = str(residual_result.backend_name or residual_result.execution_backend or "residual_retry")
+    identity = _cleanup_identity_fields(cleanup_plan, cleanup_mask, residual_result, fallback_region_id=region_id)
+    canonical_region_id = _canonical_parent_region_id(cleanup_plan, cleanup_mask, residual_result, fallback_region_id=region_id)
     return CleanupResult(
         cleanup_result_id=f"cres_{_safe_id(cleanup_plan.cleanup_plan_id)}",
         cleanup_plan_id=str(cleanup_plan.cleanup_plan_id),
@@ -6014,7 +6157,11 @@ def _combined_residual_retry_result(
         cleanup_mask_id=str(cleanup_mask.cleanup_mask_id),
         operation_bbox=_valid_bbox(cleanup_mask.erase_mask_bbox),
         page=page_id,
-        region_id=region_id,
+        region_id=canonical_region_id,
+        parent_execution_bundle_id=str(identity.get("parent_execution_bundle_id") or ""),
+        parent_logical_text_unit_id=str(identity.get("parent_logical_text_unit_id") or ""),
+        text_block_root_id=str(identity.get("text_block_root_id") or ""),
+        target_region_ids=list(identity.get("target_region_ids") or []),
         cleanup_class=cleanup_plan.cleanup_class,
         pixel_changed=changed_pixels > 0,
         changed_pixel_count=changed_pixels,
@@ -6067,6 +6214,10 @@ def _adaptive_plan_variant(
         cleanup_class=base_plan.cleanup_class,
         selected_backend=base_plan.selected_backend,
         cleanup_method=base_plan.cleanup_method,
+        parent_execution_bundle_id=base_plan.parent_execution_bundle_id,
+        parent_logical_text_unit_id=base_plan.parent_logical_text_unit_id,
+        text_block_root_id=base_plan.text_block_root_id,
+        target_region_ids=list(base_plan.target_region_ids or []),
         backend_parameters=params,
         inpaint_mode=base_plan.inpaint_mode,
         crop_context_bbox=list(base_plan.crop_context_bbox or []),
@@ -7370,16 +7521,95 @@ def _select_formal_cleanup_plan(plans: Sequence[CleanupPlan]) -> CleanupPlan | N
 
 
 def _job_base_record(page_id: str, job: CleanupJob) -> dict[str, Any]:
+    identity = _cleanup_identity_fields(job, fallback_region_id=str(job.cleanup_job_id or ""))
     return {
         "page_id": page_id,
         "cleanup_job_id": str(job.cleanup_job_id),
-        "target_region_ids": list(job.target_region_ids or []),
+        "parent_execution_bundle_id": str(identity.get("parent_execution_bundle_id") or ""),
+        "parent_logical_text_unit_id": str(identity.get("parent_logical_text_unit_id") or ""),
+        "text_block_root_id": str(identity.get("text_block_root_id") or getattr(job, "text_block_root_id", "") or ""),
+        "target_region_ids": list(identity.get("target_region_ids") or job.target_region_ids or []),
         "cleanup_class": _enum_value(job.cleanup_class),
         "route_intent": str(job.route_intent or ""),
         "semantic_class": str(job.semantic_class or ""),
         "cleanup_mode": str(job.cleanup_mode or ""),
         "classification_reason": str(job.classification_reason or ""),
     }
+
+
+def _cleanup_identity_fields(*sources: Any, fallback_region_id: str = "") -> dict[str, Any]:
+    parent_execution_bundle_id = _first_identity_value(
+        sources,
+        "parent_execution_bundle_id",
+        "parent_id",
+    )
+    parent_logical_text_unit_id = _first_identity_value(
+        sources,
+        "parent_logical_text_unit_id",
+        "parent_id",
+    )
+    if not parent_execution_bundle_id:
+        parent_execution_bundle_id = parent_logical_text_unit_id
+    if not parent_logical_text_unit_id:
+        parent_logical_text_unit_id = parent_execution_bundle_id
+    text_block_root_id = _first_identity_value(
+        sources,
+        "text_block_root_id",
+        "root_id",
+    )
+    target_region_ids = _first_identity_list(sources, "target_region_ids")
+    fallback = str(fallback_region_id or "").strip()
+    if not target_region_ids and fallback:
+        target_region_ids = [fallback]
+    parent = parent_execution_bundle_id or parent_logical_text_unit_id
+    if parent and parent not in target_region_ids:
+        target_region_ids = [parent] + target_region_ids
+    return {
+        "parent_execution_bundle_id": parent_execution_bundle_id,
+        "parent_logical_text_unit_id": parent_logical_text_unit_id,
+        "text_block_root_id": text_block_root_id,
+        "target_region_ids": target_region_ids,
+    }
+
+
+def _canonical_parent_region_id(*sources: Any, fallback_region_id: str = "") -> str:
+    identity = _cleanup_identity_fields(*sources, fallback_region_id=fallback_region_id)
+    return str(
+        identity.get("parent_execution_bundle_id")
+        or identity.get("parent_logical_text_unit_id")
+        or fallback_region_id
+        or ""
+    )
+
+
+def _first_identity_value(sources: Sequence[Any], *keys: str) -> str:
+    for source in sources:
+        if source is None:
+            continue
+        for key in keys:
+            value = source.get(key) if isinstance(source, Mapping) else getattr(source, key, None)
+            if value in (None, "", [], {}):
+                continue
+            text = str(value or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def _first_identity_list(sources: Sequence[Any], key: str) -> list[str]:
+    for source in sources:
+        if source is None:
+            continue
+        value = source.get(key) if isinstance(source, Mapping) else getattr(source, key, None)
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            items = []
+            for item in value:
+                text = str(item or "").strip()
+                if text and text not in items:
+                    items.append(text)
+            if items:
+                return items
+    return []
 
 
 def _render_eligibility_by_region_id(render_eligibility: Any | None) -> dict[str, Any]:

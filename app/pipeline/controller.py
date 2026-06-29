@@ -1295,6 +1295,8 @@ class PipelineWorker(QtCore.QThread):
                                 render_eligibility=render_eligibility_contract_result,
                                 perf_telemetry_context=debug_context if perf_telemetry_is_enabled else None,
                             )
+                        if parent_execution_bundles:
+                            execution_regions = parent_execution_region_records(parent_execution_bundles)
                         if debug_context is not None:
                             set_timing(debug_context, "rendering_time", time.time() - render_start)
                             if render_input_path != source_path:
@@ -1349,14 +1351,20 @@ class PipelineWorker(QtCore.QThread):
                     set_timing(debug_context, "total_page_time", page_elapsed)
                 if perf_telemetry_is_enabled and debug_context is not None:
                     try:
-                        write_perf_timing_artifact(debug_context, regions)
+                        write_perf_timing_artifact(
+                            debug_context,
+                            execution_regions if parent_execution_bundles else regions,
+                        )
                     except Exception as exc:
                         self.message.emit(f"Failed to write performance telemetry for {name}: {exc}")
                 if debug_artifacts_enabled and debug_context is not None:
                     try:
                         artifact_start = time.time()
                         _page014_timeout_checkpoint("debug_artifact_write", "start", page_id=page_id)
-                        write_page_artifacts(debug_context, regions)
+                        write_page_artifacts(
+                            debug_context,
+                            execution_regions if parent_execution_bundles else regions,
+                        )
                         _page014_timeout_checkpoint(
                             "debug_artifact_write",
                             "end",
@@ -9281,9 +9289,37 @@ def _sync_parent_execution_downstream_contracts(
         for region in execution_regions
         if isinstance(region, dict) and str(region.get("region_id") or "")
     }
+    cleanup_job_parent_by_id: dict[str, str] = {}
+
+    def _parent_bundle_id_from_record(record: Any, *, fallback_job_id: str = "") -> str:
+        parent_id = str(
+            getattr(record, "parent_execution_bundle_id", "")
+            or getattr(record, "parent_logical_text_unit_id", "")
+            or ""
+        )
+        if not parent_id and isinstance(record, dict):
+            parent_id = str(
+                record.get("parent_execution_bundle_id")
+                or record.get("parent_logical_text_unit_id")
+                or record.get("parent_id")
+                or ""
+            )
+        if not parent_id:
+            target_ids = getattr(record, "target_region_ids", None)
+            if target_ids is None and isinstance(record, dict):
+                target_ids = record.get("target_region_ids")
+            parent_id = str((target_ids or [""])[0] or "")
+        if not parent_id and fallback_job_id:
+            parent_id = cleanup_job_parent_by_id.get(fallback_job_id, "")
+        return parent_id
 
     for region_id, fields in _safe_region_audit_fields(source_glyph_masks).items():
-        bundle = bundle_by_id.get(region_id)
+        parent_id = str(
+            fields.get("parent_execution_bundle_id")
+            or fields.get("parent_logical_text_unit_id")
+            or region_id
+        )
+        bundle = bundle_by_id.get(parent_id)
         if not bundle:
             continue
         mask_ids = _unique_strings(
@@ -9294,33 +9330,26 @@ def _sync_parent_execution_downstream_contracts(
             ]
         )
         bundle.source_glyph_mask_ids = mask_ids
-        record = region_by_id.get(region_id)
+        record = region_by_id.get(parent_id)
         if record is not None:
             record["source_glyph_mask_ids"] = mask_ids
 
     for job in getattr(cleanup_jobs, "jobs", []) or []:
-        parent_id = str(getattr(job, "parent_logical_text_unit_id", "") or "")
-        if not parent_id:
-            target_ids = getattr(job, "target_region_ids", []) or []
-            parent_id = str(target_ids[0]) if target_ids else ""
+        parent_id = _parent_bundle_id_from_record(job)
+        job_id = str(getattr(job, "cleanup_job_id", "") or "")
+        if job_id and parent_id:
+            cleanup_job_parent_by_id[job_id] = parent_id
         bundle = bundle_by_id.get(parent_id)
         if not bundle:
             continue
-        job_id = str(getattr(job, "cleanup_job_id", "") or "")
         bundle.cleanup_job_ids = _unique_strings(bundle.cleanup_job_ids + [job_id])
         record = region_by_id.get(parent_id)
         if record is not None:
             record["cleanup_job_ids"] = list(bundle.cleanup_job_ids)
 
     for mask in getattr(cleanup_masks, "masks", []) or []:
-        parent_id = str(
-            getattr(mask, "parent_logical_text_unit_id", "")
-            or getattr(mask, "region_id", "")
-            or ""
-        )
-        if not parent_id:
-            target_ids = getattr(mask, "target_region_ids", []) or []
-            parent_id = str(target_ids[0]) if target_ids else ""
+        cleanup_job_id = str(getattr(mask, "cleanup_job_id", "") or "")
+        parent_id = _parent_bundle_id_from_record(mask, fallback_job_id=cleanup_job_id)
         bundle = bundle_by_id.get(parent_id)
         if not bundle:
             continue
@@ -9335,7 +9364,9 @@ def _sync_parent_execution_downstream_contracts(
             record["cleanup_mask_ids"] = list(bundle.cleanup_mask_ids)
 
     for decision in getattr(render_eligibility, "decisions", []) or []:
-        parent_id = str(getattr(decision, "region_id", "") or "")
+        parent_id = _parent_bundle_id_from_record(decision)
+        if not parent_id:
+            parent_id = str(getattr(decision, "region_id", "") or "")
         bundle = bundle_by_id.get(parent_id)
         if not bundle:
             continue

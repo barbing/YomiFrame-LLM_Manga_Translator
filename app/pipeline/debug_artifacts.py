@@ -2069,6 +2069,13 @@ def _maybe_add_model_fusion_assist(audit: dict[str, Any], page_dir: str) -> dict
         return enriched
 
 
+def _audit_value(meta: dict[str, Any], region: dict[str, Any], render: dict[str, Any], key: str, default: Any = None) -> Any:
+    for source in (meta, region, render):
+        if isinstance(source, dict) and key in source and source.get(key) is not None:
+            return source.get(key)
+    return default
+
+
 def _build_audit(context: dict[str, Any], regions: list[dict]) -> dict[str, Any]:
     region_meta = context.get("regions", {}) or {}
     audit_regions = []
@@ -2090,6 +2097,24 @@ def _build_audit(context: dict[str, Any], regions: list[dict]) -> dict[str, Any]
             {
                 "page_id": context.get("page_id"),
                 "region_id": rid,
+                "parent_execution_bundle_id": _audit_value(meta, region, render, "parent_execution_bundle_id"),
+                "parent_execution_bundle_version": _audit_value(meta, region, render, "parent_execution_bundle_version"),
+                "parent_execution_state": _audit_value(meta, region, render, "parent_execution_state"),
+                "parent_execution_authoritative": _audit_value(meta, region, render, "parent_execution_authoritative"),
+                "execution_region_authority": _audit_value(meta, region, render, "execution_region_authority"),
+                "execution_region_role": _audit_value(meta, region, render, "execution_region_role"),
+                "legacy_region_execution_authority": _audit_value(meta, region, render, "legacy_region_execution_authority"),
+                "source_region_evidence_only": _audit_value(meta, region, render, "source_region_evidence_only"),
+                "renderer_audit_id": _audit_value(meta, region, render, "renderer_audit_id"),
+                "renderer_input_authority": _audit_value(meta, region, render, "renderer_input_authority"),
+                "cleanup_job_ids": _json_safe(_audit_value(meta, region, render, "cleanup_job_ids", [])),
+                "cleanup_mask_ids": _json_safe(_audit_value(meta, region, render, "cleanup_mask_ids", [])),
+                "render_decision_id": _audit_value(meta, region, render, "render_decision_id"),
+                "source_glyph_mask_ids": _json_safe(_audit_value(meta, region, render, "source_glyph_mask_ids", [])),
+                "source_region_ids": _json_safe(_audit_value(meta, region, render, "source_region_ids", [])),
+                "represented_child_ids": _json_safe(_audit_value(meta, region, render, "represented_child_ids", [])),
+                "text_block_root_id": _audit_value(meta, region, render, "text_block_root_id"),
+                "parent_logical_text_unit_id": _audit_value(meta, region, render, "parent_logical_text_unit_id"),
                 "bbox": _json_safe(region.get("bbox")),
                 "polygon": _json_safe(region.get("polygon")),
                 "detection_confidence": _json_safe(confidence.get("det")),

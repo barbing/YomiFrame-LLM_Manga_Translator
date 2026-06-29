@@ -77,6 +77,9 @@ class RenderEligibilityDecision:
         return {
             "page_id": self.page_id,
             "region_id": self.region_id,
+            "parent_execution_bundle_id": str(self.evidence.get("parent_execution_bundle_id") or self.region_id or ""),
+            "parent_logical_text_unit_id": str(self.evidence.get("parent_logical_text_unit_id") or self.region_id or ""),
+            "text_block_root_id": str(self.evidence.get("text_block_root_id") or ""),
             "status": _enum_value(self.status),
             "reason": self.reason,
             "translated_text_present": self.translated_text_present,
@@ -339,8 +342,28 @@ def _decision_for_region(
         source_erasure_unproven=source_erasure_unproven,
         risky_caption_background_recovery=risky_caption_background_recovery,
     )
+    parent_execution_bundle_id = str(
+        _get(region, "parent_execution_bundle_id")
+        or _get(render, "parent_execution_bundle_id")
+        or rid
+        or ""
+    )
+    parent_logical_text_unit_id = str(
+        _get(region, "parent_logical_text_unit_id")
+        or _get(render, "parent_logical_text_unit_id")
+        or rid
+        or ""
+    )
+    text_block_root_id = str(
+        _get(region, "text_block_root_id")
+        or _get(render, "text_block_root_id")
+        or ""
+    )
 
     evidence = {
+        "parent_execution_bundle_id": parent_execution_bundle_id,
+        "parent_logical_text_unit_id": parent_logical_text_unit_id,
+        "text_block_root_id": text_block_root_id,
         "semantic_class": semantic_class,
         "cleanup_classes": cleanup_classes,
         "text_area_detection_source": _text_from(region, render, keys=("text_area_detection_source", "detection_source")),
@@ -511,7 +534,30 @@ def _unsafe_cleanup_decision_for_region(
     min_confidence = min(confidence_values) if confidence_values else None
     hard_contradictions = _unsafe_cleanup_contradictions(audit)
     protected_reason = _unsafe_cleanup_protected_reason(audit, region, semantic_class)
+    parent_execution_bundle_id = str(
+        _first_present(audit, "parent_execution_bundle_id", default=None)
+        or _first_present(region, "parent_execution_bundle_id", default=None)
+        or _first_present(render, "parent_execution_bundle_id", default=None)
+        or region_id
+        or ""
+    )
+    parent_logical_text_unit_id = str(
+        _first_present(audit, "parent_logical_text_unit_id", default=None)
+        or _first_present(region, "parent_logical_text_unit_id", default=None)
+        or _first_present(render, "parent_logical_text_unit_id", default=None)
+        or region_id
+        or ""
+    )
+    text_block_root_id = str(
+        _first_present(audit, "text_block_root_id", default=None)
+        or _first_present(region, "text_block_root_id", default=None)
+        or _first_present(render, "text_block_root_id", default=None)
+        or ""
+    )
     evidence = {
+        "parent_execution_bundle_id": parent_execution_bundle_id,
+        "parent_logical_text_unit_id": parent_logical_text_unit_id,
+        "text_block_root_id": text_block_root_id,
         "semantic_class": semantic_class,
         "pre_render_source_erasure_status": _text_from(
             audit,

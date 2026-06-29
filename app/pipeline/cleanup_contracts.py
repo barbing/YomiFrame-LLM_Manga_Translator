@@ -113,6 +113,7 @@ class CleanupJob:
     classification_reason: str = ""
     text_block_root_id: str | None = None
     parent_logical_text_unit_id: str | None = None
+    parent_execution_bundle_id: str | None = None
     text_area_container_id: str | None = None
     container_type: str = ""
     cleanup_mode: str = ""
@@ -161,6 +162,12 @@ class CleanupMask:
 
     cleanup_mask_id: str
     cleanup_job_id: str
+    parent_execution_bundle_id: str = ""
+    parent_logical_text_unit_id: str = ""
+    text_block_root_id: str = ""
+    text_area_container_id: str = ""
+    target_region_ids: list[str] = field(default_factory=list)
+    represented_region_ids: list[str] = field(default_factory=list)
     foreground_mask_source_id: str | None = None
     foreground_mask_source_ids: list[str] = field(default_factory=list)
     consumed_source_glyph_mask_ids: list[str] = field(default_factory=list)
@@ -294,6 +301,10 @@ class CleanupPlan:
     cleanup_class: CleanupClass
     selected_backend: str
     cleanup_method: str
+    parent_execution_bundle_id: str = ""
+    parent_logical_text_unit_id: str = ""
+    text_block_root_id: str = ""
+    target_region_ids: list[str] = field(default_factory=list)
     backend_parameters: dict[str, Any] = field(default_factory=dict)
     inpaint_mode: str = ""
     crop_context_bbox: list[int] | None = None
@@ -316,6 +327,10 @@ class CleanupResult:
     operation_bbox: list[int] | None
     page: str = ""
     region_id: str = ""
+    parent_execution_bundle_id: str = ""
+    parent_logical_text_unit_id: str = ""
+    text_block_root_id: str = ""
+    target_region_ids: list[str] = field(default_factory=list)
     cleanup_class: CleanupClass | str = ""
     pixel_changed: bool = False
     changed_pixel_count: int = 0
@@ -371,6 +386,10 @@ class CleanupProof:
     cleanup_job_id: str
     cleanup_plan_id: str
     proof_status: ProofStatus
+    parent_execution_bundle_id: str = ""
+    parent_logical_text_unit_id: str = ""
+    text_block_root_id: str = ""
+    target_region_ids: list[str] = field(default_factory=list)
     source_glyph_removal_passed: bool | None = None
     source_residual_ratio: float | None = None
     changed_outside_allowed_pixels: int | None = None
@@ -785,6 +804,29 @@ def build_cleanup_job_candidates(
         source_mask_ids = cleanup_unit.required_source_glyph_mask_ids or _source_mask_ids(source_records)
         first_record = _anchor_source_record(source_records, region_id) or (source_records[0] if source_records else {})
         cleanup_job_id = f"cjob_{_safe_id(page_id)}_{_safe_id(cleanup_unit.anchor_region_id or region_id)}"
+        parent_logical_text_unit_id = _optional_str(
+            _first_present(
+                region,
+                "parent_logical_text_unit_id",
+                default=cleanup_unit.parent_logical_text_unit_id or _first_present(first_record, "parent_logical_text_unit_id", default=None),
+            )
+        )
+        parent_execution_bundle_id = _optional_str(
+            _first_present(
+                region,
+                "parent_execution_bundle_id",
+                "parent_id",
+                default=(
+                    parent_logical_text_unit_id
+                    or cleanup_unit.parent_logical_text_unit_id
+                    or _first_present(first_record, "parent_execution_bundle_id", "parent_id", "parent_logical_text_unit_id", default=None)
+                ),
+            )
+        ) or parent_logical_text_unit_id or region_id
+        target_region_ids = _parent_first_target_region_ids(
+            parent_execution_bundle_id or parent_logical_text_unit_id or region_id,
+            cleanup_unit.child_region_ids or [region_id],
+        )
         if accepted_cleanup_obligation:
             obligation_records.append(
                 _obligation_record(
@@ -804,7 +846,7 @@ def build_cleanup_job_candidates(
             CleanupJob(
                 page_id=page_id,
                 cleanup_job_id=cleanup_job_id,
-                target_region_ids=cleanup_unit.child_region_ids or [region_id],
+                target_region_ids=target_region_ids,
                 logical_text_unit_ids=_list_strings(
                     _first_present(
                         region,
@@ -831,13 +873,8 @@ def build_cleanup_job_candidates(
                 text_block_root_id=_optional_str(
                     _first_present(region, "text_block_root_id", default=cleanup_unit.text_block_root_id or _first_present(first_record, "text_block_root_id", default=None))
                 ),
-                parent_logical_text_unit_id=_optional_str(
-                    _first_present(
-                        region,
-                        "parent_logical_text_unit_id",
-                        default=cleanup_unit.parent_logical_text_unit_id or _first_present(first_record, "parent_logical_text_unit_id", default=None),
-                    )
-                ),
+                parent_logical_text_unit_id=parent_logical_text_unit_id,
+                parent_execution_bundle_id=parent_execution_bundle_id,
                 text_area_container_id=_optional_str(
                     _first_present(
                         region,
@@ -1219,6 +1256,18 @@ def _cleanup_unit_for_region(
         text_area_container_id=container_id,
         ambiguous_reason=ambiguous_reason,
     )
+
+
+def _parent_first_target_region_ids(parent_id: str | None, region_ids: Sequence[Any]) -> list[str]:
+    output: list[str] = []
+    parent = str(parent_id or "").strip()
+    if parent:
+        output.append(parent)
+    for item in region_ids or []:
+        text = str(item or "").strip()
+        if text and text not in output:
+            output.append(text)
+    return output
 
 
 def _expand_cleanup_unit_source_records(
@@ -1615,6 +1664,7 @@ def _normalize_source_record(record: Any) -> dict[str, Any]:
         "text_block_root_id",
         "root_id",
         "source_glyph_mask_text_block_root_id",
+        "parent_execution_bundle_id",
         "parent_logical_text_unit_id",
         "parent_id",
         "logical_text_unit_id",
