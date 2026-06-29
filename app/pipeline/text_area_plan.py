@@ -2605,11 +2605,13 @@ def _component_auth_scope(
         for job_id in container_jobs.get(container_id, []) if container_id else []:
             if job_id not in job_ids:
                 job_ids.append(str(job_id))
-    evidence_job_ids = _component_auth_source_evidence_job_ids(
-        container_id=container_id,
-        bbox=bbox,
-        source_evidence_jobs=source_evidence_jobs,
-    )
+    evidence_job_ids: List[str] = []
+    if source_kind in {"parent_execution_bundle", "region_record"}:
+        evidence_job_ids = _component_auth_source_evidence_job_ids(
+            container_id=container_id,
+            bbox=bbox,
+            source_evidence_jobs=source_evidence_jobs,
+        )
     if evidence_job_ids:
         if not job_ids or (len(job_ids) != 1 and len(evidence_job_ids) == 1):
             job_ids = list(evidence_job_ids)
@@ -2625,7 +2627,7 @@ def _component_auth_scope(
         cleanup_job_areas=cleanup_job_areas,
     )
     cleanup_area_binding_used = False
-    if cleanup_area_job_ids and not job_ids:
+    if cleanup_area_job_ids and not job_ids and source_kind in {"parent_execution_bundle", "region_record"}:
         job_ids = list(cleanup_area_job_ids)
         cleanup_area_binding_used = True
     reason_codes = _component_auth_list(
@@ -3148,8 +3150,6 @@ def _component_auth_refined_component_job_ids(
     component_bbox: Sequence[int],
 ) -> Tuple[List[str], List[str]]:
     existing = [str(job_id) for job_id in scope.get("cleanup_job_ids") or [] if str(job_id)]
-    if len(existing) <= 1:
-        return existing, []
     container_id = str(scope.get("container_id") or "")
     reasons: List[str] = []
     refined = list(existing)
@@ -3160,11 +3160,15 @@ def _component_auth_refined_component_job_ids(
             bbox=component_bbox,
             source_evidence_jobs={container_id: evidence_records},
         )
-        refined_by_evidence = _component_auth_refine_existing_job_ids(refined, evidence_ids)
-        if refined_by_evidence != refined:
-            refined = refined_by_evidence
-            reasons.append("cleanup_job_binding_refined_by_component_source_glyph_evidence")
-    if len(refined) > 1:
+        if refined:
+            refined_by_evidence = _component_auth_refine_existing_job_ids(refined, evidence_ids)
+            if refined_by_evidence != refined:
+                refined = refined_by_evidence
+                reasons.append("cleanup_job_binding_refined_by_component_source_glyph_evidence")
+        elif evidence_ids:
+            refined = list(evidence_ids)
+            reasons.append("cleanup_job_binding_from_component_source_glyph_evidence")
+    if not refined or len(refined) > 1:
         area_records = scope.get("cleanup_job_area_records") or []
         if area_records:
             area_ids = _component_auth_cleanup_area_job_ids(
@@ -3174,11 +3178,16 @@ def _component_auth_refined_component_job_ids(
                 bbox=component_bbox,
                 cleanup_job_areas=area_records,
             )
-            refined_by_area = _component_auth_refine_existing_job_ids(refined, area_ids)
-            if refined_by_area != refined:
-                refined = refined_by_area
+            if not refined and area_ids:
+                refined = list(area_ids)
                 reasons.append("cleanup_job_binding_from_cleanup_obligation_area")
                 reasons.append("cleanup_job_binding_refined_by_component_cleanup_obligation_area")
+            elif refined:
+                refined_by_area = _component_auth_refine_existing_job_ids(refined, area_ids)
+                if refined_by_area != refined:
+                    refined = refined_by_area
+                    reasons.append("cleanup_job_binding_from_cleanup_obligation_area")
+                    reasons.append("cleanup_job_binding_refined_by_component_cleanup_obligation_area")
     return refined, reasons
 
 
@@ -4820,6 +4829,11 @@ def _component_auth_bind_cleanup_job_from_candidates(record: TextAreaComponentAu
         record.candidate_cleanup_job_ids = list(job_ids)
         record.job_binding_state = "bound_unique"
         record.job_binding_failure_reason = ""
+        record.reason_codes = [
+            reason
+            for reason in (record.reason_codes or [])
+            if reason not in {"cleanup_job_binding_contract_error", "missing_cleanup_job", "non_unique_cleanup_job"}
+        ]
         record.projection_quality_state = PROJECTION_READY
         record.projection_quality_reasons = [
             reason
@@ -5249,7 +5263,7 @@ def _component_auth_job_binding(
     if not jobs:
         return "missing_cleanup_job", "cleanup_job_binding_contract_error", "", []
     if len(jobs) > 1:
-        return "non_unique_cleanup_job", "cleanup_job_binding_contract_error", jobs[0], jobs
+        return "non_unique_cleanup_job", "cleanup_job_binding_contract_error", "", jobs
     return "bound_unique", "", jobs[0], jobs
 
 
