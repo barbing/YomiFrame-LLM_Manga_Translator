@@ -12,6 +12,8 @@ from enum import Enum
 from typing import Any, Mapping, Sequence
 import unicodedata
 
+from app.pipeline.parent_execution_bundle import parent_execution_region_records
+
 
 RENDER_ELIGIBILITY_CONTRACT_VERSION = "render_eligibility_source_grounding_v1"
 UNSAFE_CLEANUP_RENDER_CONTRACT_VERSION = "render_eligibility_unsafe_cleanup_render_v1"
@@ -265,6 +267,29 @@ def build_unsafe_cleanup_render_decisions(
         review_allowed_records=review_allowed_records,
         eligible_records=eligible_records,
         errors=errors,
+    )
+
+
+def build_render_eligibility_decisions_for_parent_bundles(
+    *,
+    page_id: str,
+    parent_execution_bundles: Sequence[Any],
+    source_glyph_masks: Any = None,
+    cleanup_job_contracts: Any = None,
+    cleanup_mask_contracts: Any = None,
+    source_image_path: str | None = None,
+    image_size: tuple[int, int] | None = None,
+) -> RenderEligibilityResult:
+    """Build render eligibility decisions from finalized parent bundles."""
+
+    return build_render_eligibility_decisions(
+        page_id=page_id,
+        regions=parent_execution_region_records(parent_execution_bundles),
+        source_glyph_masks=source_glyph_masks,
+        cleanup_job_contracts=cleanup_job_contracts,
+        cleanup_mask_contracts=cleanup_mask_contracts,
+        source_image_path=source_image_path,
+        image_size=image_size,
     )
 
 

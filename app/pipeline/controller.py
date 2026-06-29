@@ -21,6 +21,12 @@ from app.pipeline.text_block_root_graph import (
     parent_candidate_contract,
     visual_parent_group_analysis,
 )
+from app.pipeline.parent_execution_bundle import (
+    ParentExecutionBundle,
+    build_parent_execution_bundles,
+    parent_execution_region_records,
+    sync_bundles_from_region_records,
+)
 from app.pipeline.steps import build_output_path, build_page_record
 from app.models.ollama import list_models
 from app.translate.prompts import build_translation_prompt, build_batch_translation_prompt, build_entity_extraction_prompt
@@ -48,6 +54,14 @@ class TranslationAssignment:
     source_text: str
     cache_key: str
     region_ids: list[str]
+
+
+@dataclass
+class PageProcessingResult:
+    regions: list[dict[str, Any]]
+    execution_regions: list[dict[str, Any]]
+    parent_execution_bundles: list[ParentExecutionBundle]
+    page_class: str
 
 
 def _page014_timeout_diag_enabled() -> bool:
@@ -406,15 +420,15 @@ class PipelineWorker(QtCore.QThread):
         from app.ocr.manga_ocr_engine import MangaOcrEngine, ensure_torch_runtime_ready
         from app.translate.ollama_client import DeepSeekClient, OllamaClient
         from app.render.renderer import render_translations
-        from app.pipeline.cleanup_contracts import build_cleanup_job_candidates
+        from app.pipeline.cleanup_contracts import build_cleanup_job_candidates_for_parent_bundles
         from app.pipeline.cleanup_masks import build_cleanup_masks
         from app.pipeline.cleanup_planning import (
             build_cleanup_plans,
             commit_cleanup_runtime_results_to_working_image,
             run_cleanup_runtime_contract,
         )
-        from app.pipeline.render_eligibility import build_render_eligibility_decisions
-        from app.pipeline.source_glyph_masks import generate_source_glyph_masks
+        from app.pipeline.render_eligibility import build_render_eligibility_decisions_for_parent_bundles
+        from app.pipeline.source_glyph_masks import generate_source_glyph_masks_for_parent_bundles
         from app.pipeline.text_area_plan import build_text_area_component_authorization_map
         from app.pipeline.debug_artifacts import (
             debug_enabled,
@@ -674,7 +688,7 @@ class PipelineWorker(QtCore.QThread):
                         output_path=output_path,
                     )
                     process_page_start = time.time()
-                    regions, page_class = _process_page(
+                    page_result = _process_page(
                         source_path,
                         detector,
                         ocr_engine,
@@ -699,11 +713,17 @@ class PipelineWorker(QtCore.QThread):
                         settings=self._settings,
                         debug_context=debug_context,
                     )
+                    regions = page_result.regions
+                    execution_regions = page_result.execution_regions
+                    parent_execution_bundles = page_result.parent_execution_bundles
+                    page_class = page_result.page_class
                     _page014_timeout_checkpoint(
                         "controller_process_page",
                         "end",
                         page_name=name,
                         region_count=len(regions) if regions is not None else 0,
+                        execution_region_count=len(execution_regions) if execution_regions is not None else 0,
+                        parent_execution_bundle_count=len(parent_execution_bundles),
                         page_class=page_class,
                         elapsed_ms=round((time.time() - process_page_start) * 1000.0, 3),
                     )
@@ -713,6 +733,7 @@ class PipelineWorker(QtCore.QThread):
                         page_name=name,
                         page_id=os.path.splitext(name)[0],
                         region_count=len(regions) if regions is not None else 0,
+                        execution_region_count=len(execution_regions) if execution_regions is not None else 0,
                         page_class=page_class,
                     )
                     if debug_context is not None:
@@ -738,10 +759,10 @@ class PipelineWorker(QtCore.QThread):
                 try:
                     source_glyph_start = time.time()
                     _page014_timeout_checkpoint("sourceglyph_generation", "start", page_id=page_id)
-                    source_glyph_mask_result = generate_source_glyph_masks(
+                    source_glyph_mask_result = generate_source_glyph_masks_for_parent_bundles(
                         page_id=page_id,
                         image_path=source_path,
-                        regions=regions,
+                        parent_execution_bundles=parent_execution_bundles,
                     )
                     _page014_timeout_checkpoint(
                         "sourceglyph_generation",
@@ -792,11 +813,11 @@ class PipelineWorker(QtCore.QThread):
                         "cleanup_job_build",
                         "start",
                         page_id=page_id,
-                        region_count=len(regions) if regions is not None else 0,
+                        parent_execution_bundle_count=len(parent_execution_bundles),
                     )
-                    cleanup_job_contract_result = build_cleanup_job_candidates(
+                    cleanup_job_contract_result = build_cleanup_job_candidates_for_parent_bundles(
                         page_id=page_id,
-                        regions=regions,
+                        parent_execution_bundles=parent_execution_bundles,
                         source_glyph_masks=source_glyph_mask_result,
                     )
                     _page014_timeout_checkpoint(
@@ -834,7 +855,7 @@ class PipelineWorker(QtCore.QThread):
                         job_count=len(getattr(cleanup_job_contract_result, "jobs", []) or []),
                         source_glyph_record_count=len(getattr(source_glyph_mask_result, "masks_by_region", {}) or {}),
                     )
-                    cleanup_mask_region_records = _cleanup_mask_region_records_with_protection(regions, debug_context)
+                    cleanup_mask_region_records = _cleanup_mask_region_records_with_protection(execution_regions, debug_context)
                     component_authorization_map = build_text_area_component_authorization_map(
                         page_id=page_id,
                         text_foreground_segmentation=text_foreground_segmentation_mask,
@@ -870,9 +891,9 @@ class PipelineWorker(QtCore.QThread):
                     )
                     render_eligibility_start = time.time()
                     _page014_timeout_checkpoint("render_eligibility_build", "start", page_id=page_id)
-                    render_eligibility_contract_result = build_render_eligibility_decisions(
+                    render_eligibility_contract_result = build_render_eligibility_decisions_for_parent_bundles(
                         page_id=page_id,
-                        regions=regions,
+                        parent_execution_bundles=parent_execution_bundles,
                         source_glyph_masks=source_glyph_mask_result,
                         cleanup_job_contracts=cleanup_job_contract_result,
                         cleanup_mask_contracts=cleanup_mask_contract_result,
@@ -1203,8 +1224,17 @@ class PipelineWorker(QtCore.QThread):
                                 "eligible_count": 0,
                                 "error_count": 1,
                                 "renderer_consumed": False,
-                            },
-                        }
+                                },
+                            }
+
+                _sync_parent_execution_downstream_contracts(
+                    parent_execution_bundles,
+                    execution_regions,
+                    source_glyph_masks=source_glyph_mask_result,
+                    cleanup_jobs=cleanup_job_contract_result,
+                    cleanup_masks=cleanup_mask_contract_result,
+                    render_eligibility=render_eligibility_contract_result,
+                )
 
                 if getattr(self._settings, "private_cleanup_validation_stop_after_cleanup", False):
                     try:
@@ -1240,7 +1270,7 @@ class PipelineWorker(QtCore.QThread):
                         render_translations(
                             render_input_path,
                             output_path,
-                            regions,
+                            execution_regions,
                             self._settings.font_name,
                             inpaint_mode=self._settings.inpaint_mode,
                             use_gpu=self._settings.use_gpu,
@@ -1280,10 +1310,15 @@ class PipelineWorker(QtCore.QThread):
                 page_record = build_page_record(
                     source_path,
                     page_id,
-                    regions,
+                    execution_regions,
                     output_path,
                     page_class=page_class,
                 )
+                if parent_execution_bundles:
+                    page_record["source_regions"] = regions
+                    page_record["parent_execution_bundles"] = [
+                        bundle.to_audit_dict() for bundle in parent_execution_bundles
+                    ]
                 pages.append(page_record)
                 self.page_ready.emit(index - 1, page_record)
                 
@@ -7661,7 +7696,7 @@ def _process_page(
     discovery_model: str | None = None,
     settings: PipelineSettings | None = None,
     debug_context: dict | None = None,
-) -> tuple[list[dict], str]:
+) -> PageProcessingResult:
     from app.pipeline.debug_artifacts import add_count, add_timing, mark_render_region, mark_translation_plan, set_count
     from app.pipeline.bubble_detection import BubbleDetectionInput, run_bubble_detection
     from app.pipeline.logical_text_blocks import (
@@ -7686,7 +7721,7 @@ def _process_page(
     text_filter = TextFilter(settings)
 
     if not image_path or not os.path.exists(image_path):
-        return [], "normal"
+        return PageProcessingResult([], [], [], "normal")
     image_load_start = time.time()
     image_size = _get_image_size(image_path)
     page_image = _load_image_for_crop(image_path)
@@ -8602,15 +8637,32 @@ def _process_page(
         set_count(debug_context, "text_block_hierarchy_parent_units", len(text_block_hierarchy.parent_units))
         set_count(debug_context, "text_block_hierarchy_child_segments", len(text_block_hierarchy.child_segments))
         set_count(debug_context, "text_block_hierarchy_unresolved_children", len(text_block_hierarchy.unresolved_children))
+    parent_execution_bundle_result = build_parent_execution_bundles(
+        page_id=page_id,
+        hierarchy_result=text_block_hierarchy,
+        regions=regions,
+    )
+    parent_execution_bundles = parent_execution_bundle_result.executable_bundles()
+    execution_regions = (
+        parent_execution_region_records(parent_execution_bundles)
+        if parent_execution_bundles
+        else regions
+    )
+    if debug_context is not None:
+        debug_context["parent_execution_bundles"] = parent_execution_bundle_result.to_audit_dict()
+        set_count(debug_context, "parent_execution_bundle_count", len(parent_execution_bundles))
+        set_count(debug_context, "parent_execution_blocked_bundle_count", len(parent_execution_bundle_result.blocked_bundles))
+        set_count(debug_context, "parent_execution_bundle_error_count", len(parent_execution_bundle_result.errors))
     if (
-        logical_block_result.applied_count
+        parent_execution_bundles
+        or logical_block_result.applied_count
         or logical_block_result.render_eligibility_repairs
         or source_reconstruction_status.get("applied_count")
         or punctuation_recovery_status.get("applied_count")
         or root_reconstruction_status.get("applied_count")
         or text_block_hierarchy.generated
     ):
-        pending_texts, glossary_texts = _rebuild_translation_inputs_from_regions(regions)
+        pending_texts, glossary_texts = _rebuild_translation_inputs_from_regions(execution_regions)
 
     active_style_guide = style_guide
     use_context_lines = bool(
@@ -8660,7 +8712,7 @@ def _process_page(
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write("  -> SKIPPED: glossary_texts is EMPTY\n")
     add_timing(debug_context, "glossary_time", time.time() - glossary_start)
-    for region in regions:
+    for region in execution_regions:
         ocr_text = str(region.get("ocr_text", "") or "")
         terms = _matched_glossary_terms(ocr_text, active_style_guide)
         if terms:
@@ -8669,15 +8721,17 @@ def _process_page(
                 str(region.get("region_id", "") or ""),
                 glossary_terms_available=_debug_glossary_terms(terms),
             )
-    mark_translation_plan(debug_context, regions, pending_texts)
-    post_plan_logical_repairs = enforce_logical_text_render_eligibility(regions)
-    if post_plan_logical_repairs.get("logical_text_render_eligibility_repair_count"):
-        pending_texts, glossary_texts = _rebuild_translation_inputs_from_regions(regions)
-        mark_translation_plan(debug_context, regions, pending_texts)
-    duplicate_caption_repairs = _suppress_duplicate_caption_background_regions(regions, debug_context)
-    if duplicate_caption_repairs.get("duplicate_caption_background_suppressed_count"):
-        pending_texts, glossary_texts = _rebuild_translation_inputs_from_regions(regions)
-        mark_translation_plan(debug_context, regions, pending_texts)
+    mark_translation_plan(debug_context, execution_regions, pending_texts)
+    post_plan_logical_repairs = {}
+    if not parent_execution_bundles:
+        post_plan_logical_repairs = enforce_logical_text_render_eligibility(execution_regions)
+        if post_plan_logical_repairs.get("logical_text_render_eligibility_repair_count"):
+            pending_texts, glossary_texts = _rebuild_translation_inputs_from_regions(execution_regions)
+            mark_translation_plan(debug_context, execution_regions, pending_texts)
+        duplicate_caption_repairs = _suppress_duplicate_caption_background_regions(execution_regions, debug_context)
+        if duplicate_caption_repairs.get("duplicate_caption_background_suppressed_count"):
+            pending_texts, glossary_texts = _rebuild_translation_inputs_from_regions(execution_regions)
+            mark_translation_plan(debug_context, execution_regions, pending_texts)
     if debug_context is not None:
         result_payload = debug_context.get("pipeline_logical_text_block_result")
         if isinstance(result_payload, dict):
@@ -8700,13 +8754,13 @@ def _process_page(
                 int(post_plan_logical_repairs.get("logical_text_render_eligibility_repair_count") or 0),
             )
     translation_start = time.time()
-    translation_assignments = _translation_assignments_from_regions(regions, pending_texts)
+    translation_assignments = _translation_assignments_from_regions(execution_regions, pending_texts)
     translation_touched = bool(translation_assignments)
     if translation_assignments:
         translation_perf_records = _translation_perf_records_for_page(
             debug_context,
             pending_texts,
-            regions,
+            execution_regions,
             source_lang=source_lang,
             target_lang=target_lang,
             settings=settings,
@@ -8740,7 +8794,7 @@ def _process_page(
                     glossary_terms_ignored=_debug_glossary_terms(ignored_terms),
                     prompt_glossary_section_included=prompt_has_glossary,
                 )
-            if _should_single_translate_text(text, region_ids, regions):
+            if _should_single_translate_text(text, region_ids, execution_regions):
                 single_assignment_ids.append(assignment_id)
                 continue
             item_id = f"t{idx:03d}"
@@ -8798,7 +8852,7 @@ def _process_page(
                 continue
             text = assignment.source_text
             region_ids = assignment.region_ids
-            text_context_lines = context_lines if _should_use_context_for_text(text, region_ids, regions) else []
+            text_context_lines = context_lines if _should_use_context_for_text(text, region_ids, execution_regions) else []
             unit_record = translation_perf_records.get(text)
             raw_trans = _translate_single(
                 ollama,
@@ -8851,7 +8905,7 @@ def _process_page(
             text = assignment.source_text
             region_ids = assignment.region_ids
             is_bubble = False
-            for region in regions:
+            for region in execution_regions:
                 if region["region_id"] in region_ids and region.get("type") == "speech_bubble":
                     is_bubble = True
                     break
@@ -8900,7 +8954,7 @@ def _process_page(
                 unit_record = translation_perf_records.get(text)
                 _translation_perf_set_final(unit_record, translation=translation)
                 bubble_local_ids = []
-                for candidate in regions:
+                for candidate in execution_regions:
                     if candidate.get("region_id") not in region_ids:
                         continue
                     render = candidate.get("render", {}) or {}
@@ -8946,7 +9000,7 @@ def _process_page(
                 ignored_terms=ignored_terms,
                 warnings=warnings,
             )
-            for region in regions:
+            for region in execution_regions:
                 if region["region_id"] in region_ids:
                     mark_render_region(
                         debug_context,
@@ -8985,7 +9039,7 @@ def _process_page(
     
     # Update context window
     # Collect confident translations to add to context
-    for region in regions:
+    for region in execution_regions:
         if region.get("flags", {}).get("ignore"):
             region["translation"] = ""
             continue
@@ -9005,7 +9059,7 @@ def _process_page(
         if trans:
             _apply_default_render_tuning(region, trans)
 
-    for region in regions:
+    for region in execution_regions:
         region_type = str(region.get("type", "") or "").strip().lower()
         recover_candidate = _looks_like_recoverable_speech_region(region, page_class)
         recover_as_speech = region_type == "speech_bubble" or recover_candidate
@@ -9029,7 +9083,7 @@ def _process_page(
             retry_perf_record = _translation_perf_records_for_page(
                 debug_context,
                 {ocr_text: [str(region.get("region_id") or "")]},
-                regions,
+                execution_regions,
                 source_lang=source_lang,
                 target_lang=target_lang,
                 settings=settings,
@@ -9042,7 +9096,7 @@ def _process_page(
         retry_prompt_style_guide = _build_page_style_guide(active_style_guide, [ocr_text])
         retry_context_lines = (
             context_lines
-            if use_context_lines and _should_use_context_for_text(ocr_text, [region.get("region_id")], regions)
+            if use_context_lines and _should_use_context_for_text(ocr_text, [region.get("region_id")], execution_regions)
             else []
         )
         retry_translation = _translate_single(
@@ -9119,10 +9173,12 @@ def _process_page(
         else:
             region["flags"]["needs_review"] = True
             region["flags"]["hard_fail"] = True
-    final_logical_repairs = enforce_logical_text_render_eligibility(regions)
-    duplicate_caption_repairs = _suppress_duplicate_caption_background_regions(regions, debug_context)
-    if duplicate_caption_repairs.get("duplicate_caption_background_suppressed_count"):
-        pending_texts, glossary_texts = _rebuild_translation_inputs_from_regions(regions)
+    final_logical_repairs = {}
+    if not parent_execution_bundles:
+        final_logical_repairs = enforce_logical_text_render_eligibility(execution_regions)
+        duplicate_caption_repairs = _suppress_duplicate_caption_background_regions(execution_regions, debug_context)
+        if duplicate_caption_repairs.get("duplicate_caption_background_suppressed_count"):
+            pending_texts, glossary_texts = _rebuild_translation_inputs_from_regions(execution_regions)
     if debug_context is not None:
         result_payload = debug_context.get("pipeline_logical_text_block_result")
         if isinstance(result_payload, dict):
@@ -9147,8 +9203,12 @@ def _process_page(
     if translation_touched:
         add_timing(debug_context, "translation_time", time.time() - translation_start)
 
+    sync_bundles_from_region_records(parent_execution_bundles, execution_regions)
+    if debug_context is not None and parent_execution_bundles:
+        debug_context["parent_execution_bundles"] = parent_execution_bundle_result.to_audit_dict()
+
     page_context = []
-    for region in regions:
+    for region in execution_regions:
         if not _region_can_feed_context(region, page_class):
             continue
         trans = region.get("translation", "").strip()
@@ -9161,7 +9221,7 @@ def _process_page(
         while len(context_window) > 4:
             context_window.pop(0)
             
-    return regions, page_class
+    return PageProcessingResult(regions, execution_regions, parent_execution_bundles, page_class)
 
 
 def _logical_text_region_blocks_independent_render(region: dict) -> bool:
@@ -9178,6 +9238,112 @@ def _logical_text_region_blocks_independent_render(region: dict) -> bool:
     if str(region.get("skip_reason") or "") == "ignored_by_pipeline":
         return True
     return False
+
+
+def _sync_parent_execution_downstream_contracts(
+    bundles: list[ParentExecutionBundle],
+    execution_regions: list[dict[str, Any]],
+    *,
+    source_glyph_masks: Any = None,
+    cleanup_jobs: Any = None,
+    cleanup_masks: Any = None,
+    render_eligibility: Any = None,
+) -> None:
+    if not bundles:
+        return
+    bundle_by_id = {bundle.bundle_id: bundle for bundle in bundles}
+    region_by_id = {
+        str(region.get("region_id") or ""): region
+        for region in execution_regions
+        if isinstance(region, dict) and str(region.get("region_id") or "")
+    }
+
+    for region_id, fields in _safe_region_audit_fields(source_glyph_masks).items():
+        bundle = bundle_by_id.get(region_id)
+        if not bundle:
+            continue
+        mask_ids = _unique_strings(
+            bundle.source_glyph_mask_ids
+            + [
+                fields.get("source_glyph_mask_id"),
+                fields.get("mask_ref"),
+            ]
+        )
+        bundle.source_glyph_mask_ids = mask_ids
+        record = region_by_id.get(region_id)
+        if record is not None:
+            record["source_glyph_mask_ids"] = mask_ids
+
+    for job in getattr(cleanup_jobs, "jobs", []) or []:
+        parent_id = str(getattr(job, "parent_logical_text_unit_id", "") or "")
+        if not parent_id:
+            target_ids = getattr(job, "target_region_ids", []) or []
+            parent_id = str(target_ids[0]) if target_ids else ""
+        bundle = bundle_by_id.get(parent_id)
+        if not bundle:
+            continue
+        job_id = str(getattr(job, "cleanup_job_id", "") or "")
+        bundle.cleanup_job_ids = _unique_strings(bundle.cleanup_job_ids + [job_id])
+        record = region_by_id.get(parent_id)
+        if record is not None:
+            record["cleanup_job_ids"] = list(bundle.cleanup_job_ids)
+
+    for mask in getattr(cleanup_masks, "masks", []) or []:
+        parent_id = str(
+            getattr(mask, "parent_logical_text_unit_id", "")
+            or getattr(mask, "region_id", "")
+            or ""
+        )
+        if not parent_id:
+            target_ids = getattr(mask, "target_region_ids", []) or []
+            parent_id = str(target_ids[0]) if target_ids else ""
+        bundle = bundle_by_id.get(parent_id)
+        if not bundle:
+            continue
+        mask_id = str(
+            getattr(mask, "cleanup_mask_id", "")
+            or getattr(mask, "mask_id", "")
+            or ""
+        )
+        bundle.cleanup_mask_ids = _unique_strings(bundle.cleanup_mask_ids + [mask_id])
+        record = region_by_id.get(parent_id)
+        if record is not None:
+            record["cleanup_mask_ids"] = list(bundle.cleanup_mask_ids)
+
+    for decision in getattr(render_eligibility, "decisions", []) or []:
+        parent_id = str(getattr(decision, "region_id", "") or "")
+        bundle = bundle_by_id.get(parent_id)
+        if not bundle:
+            continue
+        bundle.render_decision_id = parent_id
+        record = region_by_id.get(parent_id)
+        if record is not None:
+            record["render_decision_id"] = parent_id
+
+
+def _safe_region_audit_fields(source_glyph_masks: Any) -> dict[str, dict[str, Any]]:
+    if source_glyph_masks is None:
+        return {}
+    try:
+        fields = source_glyph_masks.region_audit_fields()
+    except Exception:
+        return {}
+    if not isinstance(fields, dict):
+        return {}
+    return {
+        str(region_id): dict(value)
+        for region_id, value in fields.items()
+        if str(region_id) and isinstance(value, dict)
+    }
+
+
+def _unique_strings(values: list[Any]) -> list[str]:
+    output: list[str] = []
+    for value in values:
+        text = str(value or "")
+        if text and text not in output:
+            output.append(text)
+    return output
 
 
 def _logical_text_region_failed_closed(region: dict) -> bool:

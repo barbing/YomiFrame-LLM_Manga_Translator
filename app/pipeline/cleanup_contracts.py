@@ -13,6 +13,8 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
+from app.pipeline.parent_execution_bundle import parent_execution_region_records
+
 
 CLEANUP_CONTRACT_VERSION = "cleanup_contracts_phase0"
 
@@ -909,6 +911,21 @@ def build_cleanup_job_candidates(
         elapsed_ms=round((time.time() - started) * 1000.0, 3),
     )
     return result
+
+
+def build_cleanup_job_candidates_for_parent_bundles(
+    *,
+    page_id: str,
+    parent_execution_bundles: Sequence[Any],
+    source_glyph_masks: Any,
+) -> CleanupJobBuildResult:
+    """Build cleanup jobs from finalized parent execution bundles."""
+
+    return build_cleanup_job_candidates(
+        page_id=page_id,
+        regions=parent_execution_region_records(parent_execution_bundles),
+        source_glyph_masks=source_glyph_masks,
+    )
 
 
 def _dataclass_audit_dict(obj: Any, *, omit: set[str] | None = None) -> dict[str, Any]:

@@ -47,6 +47,9 @@ Scripts/
 # Local validation workflow
 validation/
 
+# Local test data
+tests/
+
 # Documentation
 *.md
 !README.md

@@ -12,6 +12,8 @@ import os
 import time
 from typing import Any
 
+from app.pipeline.parent_execution_bundle import parent_execution_region_records
+
 try:
     from PIL import Image
 except Exception:  # pragma: no cover - optional runtime dependency
@@ -983,6 +985,21 @@ def generate_source_glyph_masks(
         masks_by_region=masks_by_region,
         coverage_records=coverage_records,
         errors=errors,
+    )
+
+
+def generate_source_glyph_masks_for_parent_bundles(
+    *,
+    page_id: str,
+    image_path: str,
+    parent_execution_bundles: list[Any],
+) -> SourceGlyphMaskResult:
+    """Generate SourceGlyph masks from finalized parent execution bundles."""
+
+    return generate_source_glyph_masks(
+        page_id=page_id,
+        image_path=image_path,
+        regions=parent_execution_region_records(parent_execution_bundles),
     )
 
 

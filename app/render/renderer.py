@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Tuple
 from app.pipeline.debug_artifacts import add_count, add_timing, debug_artifact_level, mark_render_region, mask_stats
 from app.pipeline import cleanup_execution
 from app.pipeline import source_glyph_masks as source_glyph_mask_stage
+from app.pipeline.parent_execution_bundle import parent_execution_region_records
 
 _TOP_ROW_CAPTION_REASONS = {
     "top_row_background_caption_candidate",
@@ -1005,6 +1006,36 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     cv2 = None
     np = None
+
+
+def render_parent_execution_bundles(
+    image_path: str,
+    output_path: str,
+    parent_execution_bundles: list[Any],
+    font_name: str,
+    inpaint_mode: str = "fast",
+    use_gpu: bool = True,
+    model_id: str = cleanup_execution.FIXED_CLEANUP_INPAINT_MODEL_ID,
+    debug_context: dict | None = None,
+    source_glyph_masks: object | None = None,
+    render_eligibility: object | None = None,
+    perf_telemetry_context: dict | None = None,
+) -> None:
+    """Render translated text from finalized parent execution bundles."""
+
+    render_translations(
+        image_path,
+        output_path,
+        parent_execution_region_records(parent_execution_bundles),
+        font_name,
+        inpaint_mode=inpaint_mode,
+        use_gpu=use_gpu,
+        model_id=model_id,
+        debug_context=debug_context,
+        source_glyph_masks=source_glyph_masks,
+        render_eligibility=render_eligibility,
+        perf_telemetry_context=perf_telemetry_context,
+    )
 
 
 def render_translations(
