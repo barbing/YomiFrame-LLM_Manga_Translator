@@ -2451,6 +2451,16 @@ def _component_auth_scopes(
             )
 
     scopes: List[Dict[str, Any]] = []
+    parent_execution_region_records = [
+        region
+        for region in page_region_records or []
+        if isinstance(region, Mapping) and _component_auth_is_parent_execution_region(region)
+    ]
+    legacy_region_records = [
+        region
+        for region in page_region_records or []
+        if isinstance(region, Mapping) and not _component_auth_is_parent_execution_region(region)
+    ]
     semantic_unit_records = list(plan.get("semantic_units") or [])
     for index, semantic_unit in enumerate(semantic_unit_records):
         if isinstance(semantic_unit, Mapping):
@@ -2467,6 +2477,20 @@ def _component_auth_scopes(
             )
             if scope:
                 scopes.append(scope)
+    for index, region in enumerate(parent_execution_region_records):
+        scope = _component_auth_scope(
+            source=region,
+            source_kind="parent_execution_bundle",
+            fallback_id=f"parent_execution_region_{index:04d}",
+            bbox_mode="xywh",
+            mask_shape=mask_shape,
+            region_jobs=region_jobs,
+            container_jobs=container_jobs,
+            source_evidence_jobs=source_evidence_jobs,
+            cleanup_job_areas=cleanup_job_areas,
+        )
+        if scope:
+            scopes.append(scope)
     if semantic_unit_records:
         return scopes
     for index, container in enumerate(plan.get("containers") or []):
@@ -2499,22 +2523,28 @@ def _component_auth_scopes(
             )
             if scope:
                 scopes.append(scope)
-    for index, region in enumerate(page_region_records or []):
-        if isinstance(region, Mapping):
-            scope = _component_auth_scope(
-                source=region,
-                source_kind="region_record",
-                fallback_id=f"region_{index:04d}",
-                bbox_mode="region",
-                mask_shape=mask_shape,
-                region_jobs=region_jobs,
-                container_jobs=container_jobs,
-                source_evidence_jobs=source_evidence_jobs,
-                cleanup_job_areas=cleanup_job_areas,
-            )
-            if scope:
-                scopes.append(scope)
+    for index, region in enumerate(legacy_region_records):
+        scope = _component_auth_scope(
+            source=region,
+            source_kind="region_record",
+            fallback_id=f"region_{index:04d}",
+            bbox_mode="region",
+            mask_shape=mask_shape,
+            region_jobs=region_jobs,
+            container_jobs=container_jobs,
+            source_evidence_jobs=source_evidence_jobs,
+            cleanup_job_areas=cleanup_job_areas,
+        )
+        if scope:
+            scopes.append(scope)
     return scopes
+
+
+def _component_auth_is_parent_execution_region(region: Mapping[str, Any]) -> bool:
+    return bool(
+        region.get("parent_execution_bundle_id")
+        or region.get("parent_execution_bundle_version")
+    )
 
 
 def _component_auth_scope(
@@ -2571,7 +2601,7 @@ def _component_auth_scope(
         if job_id not in job_ids:
             job_ids.append(str(job_id))
             direct_region_job_ids.append(str(job_id))
-    if not (source_kind == "region_record" and direct_region_job_ids):
+    if not (source_kind in {"region_record", "parent_execution_bundle"} and direct_region_job_ids):
         for job_id in container_jobs.get(container_id, []) if container_id else []:
             if job_id not in job_ids:
                 job_ids.append(str(job_id))
@@ -2774,9 +2804,9 @@ def _component_auth_cleanup_job_area_records(job: Any, mask_shape: tuple[int, in
         return []
     area_bbox: List[int] | None = None
     for attr in (
+        "allowed_cleanup_area",
         "source_glyph_erasure_expected_area_bbox",
         "source_glyph_erasure_bbox",
-        "allowed_cleanup_area",
     ):
         bbox = _component_auth_valid_or_xywh_bbox(getattr(job, attr, None), mask_shape)
         if bbox:
@@ -3180,6 +3210,8 @@ def _component_auth_projection_candidate_eligible(
 
 
 def _component_auth_source_priority(source_kind: str) -> int:
+    if source_kind == "parent_execution_bundle":
+        return 5
     if source_kind == "text_area_semantic_unit":
         return 4
     if source_kind == "region_record":

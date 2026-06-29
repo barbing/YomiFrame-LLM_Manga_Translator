@@ -1868,6 +1868,9 @@ def _component_projection_for_job(
     component_projection: _ComponentOwnershipProjection,
 ) -> dict[str, Any]:
     job_id = str(getattr(job, "cleanup_job_id", "") or "")
+    def intersects_allowed(item: Mapping[str, Any]) -> bool:
+        return _component_pixels_in_allowed(item, allowed) > 0
+
     owned = [
         item
         for item in component_projection.components
@@ -1875,22 +1878,28 @@ def _component_projection_for_job(
         and str(item.get("projection_quality_state") or "") == PROJECTION_READY_STATE
         and str(item.get("mask_readiness_state") or "") == MASK_READY_STATE
         and _component_authorized_for_job(item, job_id)
+        and intersects_allowed(item)
     ]
     protected = [
         item
         for item in component_projection.components
         if str(item.get("ownership_state") or "").startswith("protected")
+        and intersects_allowed(item)
     ]
     ambiguous = [
         item
         for item in component_projection.components
-        if item.get("ownership_state") in {"ambiguous_multi_owner", AUTH_AMBIGUOUS_COMPONENT_STATE}
-        or (item.get("ownership_state") == "projection_not_ready" and _component_authorized_for_job(item, job_id))
+        if intersects_allowed(item)
+        and (
+            item.get("ownership_state") in {"ambiguous_multi_owner", AUTH_AMBIGUOUS_COMPONENT_STATE}
+            or (item.get("ownership_state") == "projection_not_ready" and _component_authorized_for_job(item, job_id))
+        )
     ]
     unowned = [
         item
         for item in component_projection.components
         if item.get("ownership_state") in {"unowned_visible_text", "review_unknown_not_cleanup", "outside_cleanup_scope"}
+        and intersects_allowed(item)
     ]
     cleanup_authorizations = sorted(
         {

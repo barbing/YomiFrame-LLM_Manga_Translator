@@ -102,11 +102,34 @@ class ParentExecutionBundle:
         render_allowed = _best_bbox(self.render_allowed_area, bbox)
         cleanup_target = _best_bbox(self.cleanup_target_bbox, bbox)
         root_bbox = _best_bbox(self.root_bbox, render_allowed)
+        semantic_class = self.semantic_class or _semantic_class_for_role(self.role)
+        route_intent = self.route_intent or _route_intent_for_role(self.role)
+        cleanup_mode = self.cleanup_mode or _cleanup_mode_for_role(self.role)
+        container_type = self.text_area_container_type or _container_type_for_role(self.role)
+        semantic_kind = _semantic_kind_for_role(self.role)
+        cleanup_authorization = _cleanup_authorization_for_role(self.role)
         record = {
             "region_id": self.bundle_id,
             "page_id": self.page_id,
-            "type": self.semantic_class or _semantic_class_for_role(self.role),
-            "semantic_class": self.semantic_class or _semantic_class_for_role(self.role),
+            "type": semantic_class,
+            "semantic_class": semantic_class,
+            "semantic_kind": semantic_kind,
+            "cleanup_authorization": cleanup_authorization,
+            "text_area_cleanup_authorization": cleanup_authorization,
+            "semantic_authorization_state": cleanup_authorization,
+            "text_area_semantic_authorization_state": cleanup_authorization,
+            "authorization_explicit": True,
+            "text_area_authorization_explicit": True,
+            "authorization_field_origin": "parent_execution_bundle",
+            "text_area_authorization_field_origin": "parent_execution_bundle",
+            "authorization_basis": "finalized_parent_execution_bundle",
+            "source_stage": "parent_execution_bundle",
+            "text_area_authorization_source_stage": "parent_execution_bundle",
+            "route_intent": route_intent,
+            "text_area_route_intent": route_intent,
+            "container_type": container_type,
+            "text_area_container_type": container_type,
+            "cleanup_mode": cleanup_mode,
             "ocr_text": self.source_text,
             "source_text": self.source_text,
             "translation": self.translated_text,
@@ -159,12 +182,24 @@ class ParentExecutionBundle:
                 "translation": self.translated_text,
                 "translated_text": self.translated_text,
                 "child_final_state": "parent_anchor",
-                "cleanup_mode": self.cleanup_mode or _cleanup_mode_for_role(self.role),
-                "semantic_class": self.semantic_class or _semantic_class_for_role(self.role),
-                "text_area_route_intent": self.route_intent or _route_intent_for_role(self.role),
-                "route_intent": self.route_intent or _route_intent_for_role(self.role),
-                "container_type": self.text_area_container_type or _container_type_for_role(self.role),
-                "text_area_container_type": self.text_area_container_type or _container_type_for_role(self.role),
+                "cleanup_mode": cleanup_mode,
+                "semantic_class": semantic_class,
+                "semantic_kind": semantic_kind,
+                "cleanup_authorization": cleanup_authorization,
+                "text_area_cleanup_authorization": cleanup_authorization,
+                "semantic_authorization_state": cleanup_authorization,
+                "text_area_semantic_authorization_state": cleanup_authorization,
+                "authorization_explicit": True,
+                "text_area_authorization_explicit": True,
+                "authorization_field_origin": "parent_execution_bundle",
+                "text_area_authorization_field_origin": "parent_execution_bundle",
+                "authorization_basis": "finalized_parent_execution_bundle",
+                "source_stage": "parent_execution_bundle",
+                "text_area_authorization_source_stage": "parent_execution_bundle",
+                "text_area_route_intent": route_intent,
+                "route_intent": route_intent,
+                "container_type": container_type,
+                "text_area_container_type": container_type,
                 "text_area_container_id": self.text_area_container_id,
                 "text_area_container_bbox": list(root_bbox),
                 "cleanup_allowed_area": list(render_allowed),
@@ -446,6 +481,30 @@ def _cleanup_mode_for_role(role: str) -> str:
     if lowered in {"caption", "background", "caption_background", "background_narration"}:
         return "background_box"
     return "bubble"
+
+
+def _cleanup_authorization_for_role(role: str) -> str:
+    lowered = str(role or "").strip().lower()
+    if lowered == "speech":
+        return "cleanup_translate_speech"
+    if lowered in {"caption", "caption_background"}:
+        return "cleanup_translate_caption"
+    if lowered in {"background", "background_narration"}:
+        return "cleanup_translate_background"
+    return "cleanup_translate_speech"
+
+
+def _semantic_kind_for_role(role: str) -> str:
+    lowered = str(role or "").strip().lower()
+    if lowered == "speech":
+        return "speech"
+    if lowered in {"caption", "caption_background"}:
+        return "caption"
+    if lowered in {"background", "background_narration"}:
+        return "background_narration"
+    if lowered == "review":
+        return "unknown"
+    return lowered or "speech"
 
 
 def _container_type_for_role(role: str) -> str:
