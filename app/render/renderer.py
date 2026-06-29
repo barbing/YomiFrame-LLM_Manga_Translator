@@ -1213,6 +1213,13 @@ def render_translations(
             source_size_hint = max(0, int(render.get("source_size_hint", render.get("font_size", 0)) or 0))
             source_size_min = max(0, int(render.get("source_size_min", 0) or 0))
             source_size_max = max(0, int(render.get("source_size_max", 0) or 0))
+            parent_execution_layout_box, parent_execution_layout_source = _parent_execution_hard_layout_box(
+                region,
+                render,
+                img_w,
+                img_h,
+            )
+            parent_execution_layout_authoritative = parent_execution_layout_box is not None
             cleanup_mode = str(render.get("cleanup_mode", "bubble" if not is_background else "background_box") or "").strip().lower()
             top_row_caption = _is_top_row_nonbubble_caption(
                 region,
@@ -1788,6 +1795,8 @@ def render_translations(
                 if region_type != "speech_bubble":
                     shrink = max(2, int(min(w, h) * 0.03))
                     render_box = _shrink_box(render_box, shrink)
+            if parent_execution_layout_authoritative:
+                render_box = parent_execution_layout_box
             region_font = render.get("font") or font_name
             font_style = str(render.get("font_style", "") or "dialogue")
             if _has_cjk(text) and _is_cjk_unsupported_font(region_font):
@@ -1804,6 +1813,7 @@ def render_translations(
             if (
                 font_size_override <= 0
                 and source_size_hint <= 0
+                and not parent_execution_layout_authoritative
                 and region_type == "speech_bubble"
                 and h > w * 1.6
                 and w <= 90
@@ -1846,7 +1856,7 @@ def render_translations(
                 img_w,
                 img_h,
             )
-            if region_type == "speech_bubble":
+            if region_type == "speech_bubble" and not parent_execution_layout_authoritative:
                 render_box, obstacle_ids = _avoid_preserved_text_obstacles(
                     render_box,
                     base_box,
@@ -1860,7 +1870,7 @@ def render_translations(
                         "obstacle_region_ids": obstacle_ids,
                     }
             render_constraint_adjustment = None
-            if region_type == "speech_bubble":
+            if region_type == "speech_bubble" and not parent_execution_layout_authoritative:
                 micro_start = _renderer_micro_start()
                 render_box, render_constraint_adjustment = _apply_render_constraint_assist(
                     render_box,
@@ -1917,6 +1927,9 @@ def render_translations(
                     )
                 except Exception:
                     pass
+            if parent_execution_layout_authoritative and allowed_area_box is not None:
+                hard_box = tuple(int(v) for v in allowed_area_box[:4])
+                render_box = _intersect_box(render_box, hard_box) or hard_box
             micro_start = _renderer_micro_start()
             render_quality_debug = _render_cleanup_constraint_debug(
                 render_box,
@@ -1951,6 +1964,9 @@ def render_translations(
                     source_size_max,
                     render_constraint_adjustment,
                     render_fit_adjustment,
+                    parent_execution_layout_authoritative,
+                    parent_execution_layout_box,
+                    parent_execution_layout_source,
                 )
             )
             render_debug = {
@@ -1972,6 +1988,15 @@ def render_translations(
                 if value not in (None, ""):
                     render_debug[key] = value
             render_debug.update(render_quality_debug)
+            if parent_execution_layout_authoritative:
+                render_debug.update(
+                    {
+                        "parent_execution_renderer_layout_authority": "hard_execution_region",
+                        "parent_execution_renderer_hard_bbox": list(parent_execution_layout_box),
+                        "parent_execution_renderer_hard_bbox_source": parent_execution_layout_source,
+                        "parent_execution_renderer_legacy_expansion_suppressed": True,
+                    }
+                )
             if obstacle_adjustment:
                 render_debug["render_box_adjustment"] = obstacle_adjustment
             if text_area_constraint_adjustment:
@@ -2404,6 +2429,9 @@ def render_translations(
             source_size_max,
             render_constraint_adjustment,
             render_fit_adjustment,
+            parent_execution_layout_authoritative,
+            parent_execution_layout_box,
+            parent_execution_layout_source,
         ) in render_regions:
             x0, y0, x1, y1 = box
             w = max(1, x1 - x0)
@@ -2424,7 +2452,12 @@ def render_translations(
                 local_preferred = source_size_hint
                 local_min = source_size_min if source_size_min > 0 else None
                 local_max = source_size_max if source_size_max > 0 else None
-            elif preferred_size and h >= preferred_size * 2 and not narrow_vertical:
+            elif (
+                preferred_size
+                and not parent_execution_layout_authoritative
+                and h >= preferred_size * 2
+                and not narrow_vertical
+            ):
                 local_preferred = min(preferred_size, max(12, int(h * 0.7)))
             fill_color = forced_color or _resolve_text_color(working, box)
             if vertical_layout:
@@ -2443,6 +2476,15 @@ def render_translations(
                     compact_layout=bool((render_fit_adjustment or {}).get("render_fit_compact_layout")),
                 )
                 if isinstance(vertical_diag, dict):
+                    if parent_execution_layout_authoritative:
+                        vertical_diag.update(
+                            {
+                                "parent_execution_renderer_layout_authority": "hard_execution_region",
+                                "parent_execution_renderer_hard_bbox": list(parent_execution_layout_box or box),
+                                "parent_execution_renderer_hard_bbox_source": parent_execution_layout_source,
+                                "parent_execution_renderer_font_policy": "fit_complete_text_to_parent_box",
+                            }
+                        )
                     vertical_diag["text_completeness_passed"] = _wrapped_text_contains_translated_text(
                         text,
                         [str(line) for line in (vertical_diag.get("wrapped_lines") or [])],
@@ -2506,6 +2548,16 @@ def render_translations(
                 fit_ratio=max(
                     max((_text_width(best_font, line) for line in best_lines), default=0) / max(1, w),
                     best_height / max(1, h),
+                ),
+                **(
+                    {
+                        "parent_execution_renderer_layout_authority": "hard_execution_region",
+                        "parent_execution_renderer_hard_bbox": list(parent_execution_layout_box or box),
+                        "parent_execution_renderer_hard_bbox_source": parent_execution_layout_source,
+                        "parent_execution_renderer_font_policy": "fit_complete_text_to_parent_box",
+                    }
+                    if parent_execution_layout_authoritative
+                    else {}
                 ),
                 **(
                     _model_fusion_mutation_proof_after_fields(text, best_lines)
@@ -6782,6 +6834,9 @@ def _text_area_speech_container_limit_box(region: dict, render: dict, img_w: int
         return None, ""
     if not isinstance(render, dict):
         render = {}
+    parent_box, parent_source = _parent_execution_hard_layout_box(region, render, img_w, img_h)
+    if parent_box is not None:
+        return parent_box, parent_source
     source_recovered = _is_recovered_logical_speech_anchor(region, render)
     container_type = str(_canonical_region_render_value(region, render, "text_area_container_type") or "").strip()
     route_intent = str(_canonical_region_render_value(region, render, "text_area_route_intent") or "").strip()
@@ -6828,6 +6883,54 @@ def _text_area_speech_container_limit_box(region: dict, render: dict, img_w: int
             continue
         area = _xyxy_area(xyxy)
         if area <= 0 or area > int(max(1, img_w * img_h) * 0.22):
+            continue
+        return xyxy, source
+    return None, ""
+
+
+def _is_parent_execution_bundle_region(region: dict, render: dict) -> bool:
+    if not isinstance(region, dict):
+        return False
+    if not isinstance(render, dict):
+        render = {}
+    markers = (
+        _canonical_region_render_value(region, render, "parent_execution_bundle_id"),
+        _canonical_region_render_value(region, render, "parent_execution_bundle_version"),
+        _canonical_region_render_value(region, render, "parent_execution_authoritative"),
+        _canonical_region_render_value(region, render, "execution_region_authority"),
+        _canonical_region_render_value(region, render, "execution_region_role"),
+        _canonical_region_render_value(region, render, "logical_text_ownership_status"),
+    )
+    for marker in markers:
+        text = str(marker or "").strip()
+        if text in {
+            "parent_execution_bundle",
+            "parent_execution_bundle_v1",
+            "parent_execution",
+        }:
+            return True
+        if text.lower() == "true":
+            return True
+    return False
+
+
+def _parent_execution_hard_layout_box(region: dict, render: dict, img_w: int, img_h: int):
+    if not _is_parent_execution_bundle_region(region, render):
+        return None, ""
+    for source in (
+        "render_allowed_area",
+        "parent_logical_text_unit_render_allowed_area",
+        "logical_text_block_allowed_bbox",
+        "bbox",
+    ):
+        xyxy = _xywh_value_to_xyxy(
+            _canonical_region_render_value(region, render, source),
+            img_w,
+            img_h,
+        )
+        if xyxy is None:
+            continue
+        if _xyxy_area(xyxy) <= 0:
             continue
         return xyxy, source
     return None, ""
@@ -6880,6 +6983,9 @@ def _render_allowed_area_box_for_audit(
     img_w: int,
     img_h: int,
 ):
+    parent_box, parent_source = _parent_execution_hard_layout_box(region, render, img_w, img_h)
+    if parent_box is not None:
+        return parent_box, parent_source
     if region_type == "speech_bubble":
         return _text_area_speech_container_limit_box(region, render, img_w, img_h)
     container_type = str(_canonical_region_render_value(region, render, "text_area_container_type") or "").strip()
