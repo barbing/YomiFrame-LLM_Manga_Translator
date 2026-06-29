@@ -5,7 +5,8 @@ import os
 from typing import Any, Dict
 from PySide6 import QtCore, QtGui, QtWidgets
 from app.io.project import default_project_dict, load_project, save_project
-from app.render.renderer import render_translations
+from app.pipeline.parent_execution_bundle import parent_execution_bundles_from_audit_records
+from app.render.renderer import render_parent_execution_bundles, render_translations
 
 
 class ResizableLabel(QtWidgets.QLabel):
@@ -174,14 +175,27 @@ class PageReviewDialog(QtWidgets.QDialog):
         output_path = self._page.get("output_path") or _default_output_path(image_path, self._output_suffix)
         if not image_path or not output_path:
             return
-        render_translations(
-            image_path,
-            output_path,
-            self._page.get("regions", []),
-            self._font_name,
-            inpaint_mode=self._inpaint_mode,
-            use_gpu=self._use_gpu,
+        parent_execution_bundles = parent_execution_bundles_from_audit_records(
+            self._page.get("parent_execution_bundles") or []
         )
+        if parent_execution_bundles:
+            render_parent_execution_bundles(
+                image_path,
+                output_path,
+                parent_execution_bundles,
+                self._font_name,
+                inpaint_mode=self._inpaint_mode,
+                use_gpu=self._use_gpu,
+            )
+        else:
+            render_translations(
+                image_path,
+                output_path,
+                self._page.get("regions", []),
+                self._font_name,
+                inpaint_mode=self._inpaint_mode,
+                use_gpu=self._use_gpu,
+            )
         if os.path.isfile(output_path):
             pixmap = QtGui.QPixmap(output_path)
             self.translated_view.setPixmap(pixmap)

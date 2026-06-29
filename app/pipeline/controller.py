@@ -419,7 +419,7 @@ class PipelineWorker(QtCore.QThread):
         start_time = time.time()
         from app.ocr.manga_ocr_engine import MangaOcrEngine, ensure_torch_runtime_ready
         from app.translate.ollama_client import DeepSeekClient, OllamaClient
-        from app.render.renderer import render_translations
+        from app.render.renderer import render_parent_execution_bundles, render_translations
         from app.pipeline.cleanup_contracts import build_cleanup_job_candidates_for_parent_bundles
         from app.pipeline.cleanup_masks import build_cleanup_masks
         from app.pipeline.cleanup_planning import (
@@ -1267,19 +1267,34 @@ class PipelineWorker(QtCore.QThread):
                     try:
                         render_start = time.time()
                         _page014_timeout_checkpoint("renderer_entry", "start", page_id=page_id, render_input_path=render_input_path)
-                        render_translations(
-                            render_input_path,
-                            output_path,
-                            execution_regions,
-                            self._settings.font_name,
-                            inpaint_mode=self._settings.inpaint_mode,
-                            use_gpu=self._settings.use_gpu,
-                            model_id=self._settings.inpaint_model_id,
-                            debug_context=debug_context if debug_artifacts_enabled else None,
-                            source_glyph_masks=source_glyph_mask_result,
-                            render_eligibility=render_eligibility_contract_result,
-                            perf_telemetry_context=debug_context if perf_telemetry_is_enabled else None,
-                        )
+                        if parent_execution_bundles:
+                            render_parent_execution_bundles(
+                                render_input_path,
+                                output_path,
+                                parent_execution_bundles,
+                                self._settings.font_name,
+                                inpaint_mode=self._settings.inpaint_mode,
+                                use_gpu=self._settings.use_gpu,
+                                model_id=self._settings.inpaint_model_id,
+                                debug_context=debug_context if debug_artifacts_enabled else None,
+                                source_glyph_masks=source_glyph_mask_result,
+                                render_eligibility=render_eligibility_contract_result,
+                                perf_telemetry_context=debug_context if perf_telemetry_is_enabled else None,
+                            )
+                        else:
+                            render_translations(
+                                render_input_path,
+                                output_path,
+                                execution_regions,
+                                self._settings.font_name,
+                                inpaint_mode=self._settings.inpaint_mode,
+                                use_gpu=self._settings.use_gpu,
+                                model_id=self._settings.inpaint_model_id,
+                                debug_context=debug_context if debug_artifacts_enabled else None,
+                                source_glyph_masks=source_glyph_mask_result,
+                                render_eligibility=render_eligibility_contract_result,
+                                perf_telemetry_context=debug_context if perf_telemetry_is_enabled else None,
+                            )
                         if debug_context is not None:
                             set_timing(debug_context, "rendering_time", time.time() - render_start)
                             if render_input_path != source_path:
@@ -8662,7 +8677,10 @@ def _process_page(
         or root_reconstruction_status.get("applied_count")
         or text_block_hierarchy.generated
     ):
-        pending_texts, glossary_texts = _rebuild_translation_inputs_from_regions(execution_regions)
+        if parent_execution_bundles:
+            pending_texts, glossary_texts = _rebuild_translation_inputs_from_parent_execution_bundles(parent_execution_bundles)
+        else:
+            pending_texts, glossary_texts = _rebuild_translation_inputs_from_regions(execution_regions)
 
     active_style_guide = style_guide
     use_context_lines = bool(
@@ -8754,7 +8772,11 @@ def _process_page(
                 int(post_plan_logical_repairs.get("logical_text_render_eligibility_repair_count") or 0),
             )
     translation_start = time.time()
-    translation_assignments = _translation_assignments_from_regions(execution_regions, pending_texts)
+    translation_assignments = (
+        _translation_assignments_from_parent_execution_bundles(parent_execution_bundles)
+        if parent_execution_bundles
+        else _translation_assignments_from_regions(execution_regions, pending_texts)
+    )
     translation_touched = bool(translation_assignments)
     if translation_assignments:
         translation_perf_records = _translation_perf_records_for_page(
@@ -9060,6 +9082,8 @@ def _process_page(
             _apply_default_render_tuning(region, trans)
 
     for region in execution_regions:
+        if parent_execution_bundles:
+            continue
         region_type = str(region.get("type", "") or "").strip().lower()
         recover_candidate = _looks_like_recoverable_speech_region(region, page_class)
         recover_as_speech = region_type == "speech_bubble" or recover_candidate
@@ -9319,6 +9343,8 @@ def _sync_parent_execution_downstream_contracts(
         record = region_by_id.get(parent_id)
         if record is not None:
             record["render_decision_id"] = parent_id
+
+    sync_bundles_from_region_records(bundles, execution_regions)
 
 
 def _safe_region_audit_fields(source_glyph_masks: Any) -> dict[str, dict[str, Any]]:
@@ -10217,6 +10243,56 @@ def _is_better_top_row_caption_ocr(
     confidence_gain = rescued_conf >= float(original_conf or 0.0) + 0.025
     content_preserved = new_len >= max(2, orig_len - 1) and new_jp >= max(0.65, orig_jp - 0.05)
     return confidence_gain and content_preserved
+
+
+def _rebuild_translation_inputs_from_parent_execution_bundles(
+    bundles: list[ParentExecutionBundle],
+) -> tuple[dict[str, list[str]], list[str]]:
+    pending: dict[str, list[str]] = {}
+    glossary: list[str] = []
+    for bundle in bundles or []:
+        parent_id = str(bundle.parent_id or bundle.bundle_id or "").strip()
+        text = str(bundle.source_text or "").strip()
+        if not parent_id or not text:
+            continue
+        if str(bundle.source_quality_action or "") in _PARENT_SOURCE_BLOCKING_ACTIONS:
+            continue
+        if not _parent_execution_bundle_is_translatable(bundle):
+            continue
+        glossary.append(text)
+        if not str(bundle.translated_text or "").strip():
+            pending.setdefault(text, []).append(parent_id)
+    return pending, glossary
+
+
+def _translation_assignments_from_parent_execution_bundles(
+    bundles: list[ParentExecutionBundle],
+) -> dict[str, TranslationAssignment]:
+    assignments: dict[str, TranslationAssignment] = {}
+    for bundle in bundles or []:
+        parent_id = str(bundle.parent_id or bundle.bundle_id or "").strip()
+        text = str(bundle.source_text or "").strip()
+        if not parent_id or not text:
+            continue
+        if str(bundle.source_quality_action or "") in _PARENT_SOURCE_BLOCKING_ACTIONS:
+            continue
+        if not _parent_execution_bundle_is_translatable(bundle):
+            continue
+        if str(bundle.translated_text or "").strip():
+            continue
+        assignments[parent_id] = TranslationAssignment(
+            assignment_id=parent_id,
+            parent_id=parent_id,
+            source_text=text,
+            cache_key=text,
+            region_ids=[str(bundle.bundle_id or parent_id)],
+        )
+    return assignments
+
+
+def _parent_execution_bundle_is_translatable(bundle: ParentExecutionBundle) -> bool:
+    state = str(bundle.state or "").strip()
+    return bool(bundle.translation_required) or state == "punctuation_identity_parent"
 
 
 def _rebuild_translation_inputs_from_regions(regions: list[dict]) -> tuple[dict[str, list[str]], list[str]]:

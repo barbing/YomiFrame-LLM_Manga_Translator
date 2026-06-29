@@ -50,6 +50,7 @@ class ParentExecutionBundle:
     cleanup_mask_ids: list[str] = field(default_factory=list)
     render_decision_id: str = ""
     renderer_audit_id: str = ""
+    execution_region: dict[str, Any] = field(default_factory=dict)
 
     def to_audit_dict(self) -> dict[str, Any]:
         return {
@@ -88,15 +89,22 @@ class ParentExecutionBundle:
             "cleanup_mask_ids": list(self.cleanup_mask_ids),
             "render_decision_id": self.render_decision_id,
             "renderer_audit_id": self.renderer_audit_id,
+            "execution_region": _copy_region_record(self.execution_region) if self.execution_region else self.to_region_record(),
         }
 
     def to_region_record(self) -> dict[str, Any]:
-        """Return a region-shaped parent record for legacy consumers.
+        """Return this bundle's parent-owned execution region.
 
         The record identity is the finalized parent id. Represented child/source
         regions remain evidence only and must not become separate execution
         units after this handoff.
         """
+
+        if self.execution_region:
+            record = _copy_region_record(self.execution_region)
+            _sync_execution_region_from_bundle(self, record)
+            self.execution_region = _copy_region_record(record)
+            return _copy_region_record(record)
 
         bbox = _best_bbox(self.parent_bbox, self.render_allowed_area, self.cleanup_target_bbox, self.root_bbox)
         render_allowed = _best_bbox(self.render_allowed_area, bbox)
@@ -124,6 +132,10 @@ class ParentExecutionBundle:
             "text_area_authorization_field_origin": "parent_execution_bundle",
             "authorization_basis": "finalized_parent_execution_bundle",
             "source_stage": "parent_execution_bundle",
+            "execution_region_authority": "parent_execution_bundle",
+            "execution_region_role": "parent_execution",
+            "legacy_region_execution_authority": False,
+            "source_region_evidence_only": True,
             "text_area_authorization_source_stage": "parent_execution_bundle",
             "route_intent": route_intent,
             "text_area_route_intent": route_intent,
@@ -145,6 +157,7 @@ class ParentExecutionBundle:
             "parent_execution_bundle_id": self.bundle_id,
             "parent_execution_bundle_version": PARENT_EXECUTION_BUNDLE_VERSION,
             "parent_execution_state": self.state,
+            "parent_execution_authoritative": True,
             "text_block_root_id": self.root_id,
             "parent_logical_text_unit_id": self.parent_id,
             "active_translation_unit_id": self.parent_id if self.translation_required else "",
@@ -195,6 +208,11 @@ class ParentExecutionBundle:
                 "text_area_authorization_field_origin": "parent_execution_bundle",
                 "authorization_basis": "finalized_parent_execution_bundle",
                 "source_stage": "parent_execution_bundle",
+                "execution_region_authority": "parent_execution_bundle",
+                "execution_region_role": "parent_execution",
+                "legacy_region_execution_authority": False,
+                "source_region_evidence_only": True,
+                "parent_execution_authoritative": True,
                 "text_area_authorization_source_stage": "parent_execution_bundle",
                 "text_area_route_intent": route_intent,
                 "route_intent": route_intent,
@@ -215,7 +233,9 @@ class ParentExecutionBundle:
                 "wrap_mode": "vertical",
             },
         }
-        return record
+        _sync_execution_region_from_bundle(self, record)
+        self.execution_region = _copy_region_record(record)
+        return _copy_region_record(record)
 
 
 @dataclass
@@ -332,12 +352,70 @@ def sync_bundles_from_region_records(
         record = records_by_id.get(bundle.bundle_id)
         if not record:
             continue
+        bundle.execution_region = _copy_region_record(record)
         bundle.translated_text = str(record.get("translation") or record.get("translated_text") or "")
         bundle.source_glyph_mask_ids = _list_strings(record.get("source_glyph_mask_ids"))
         bundle.cleanup_job_ids = _list_strings(record.get("cleanup_job_ids"))
         bundle.cleanup_mask_ids = _list_strings(record.get("cleanup_mask_ids"))
         bundle.render_decision_id = str(record.get("render_decision_id") or "")
         bundle.renderer_audit_id = str(record.get("renderer_audit_id") or "")
+        bundle.to_region_record()
+
+
+def parent_execution_bundles_from_audit_records(
+    records: Sequence[Mapping[str, Any]],
+) -> list[ParentExecutionBundle]:
+    """Rehydrate saved parent execution bundle audit records for UI consumers."""
+
+    bundles: list[ParentExecutionBundle] = []
+    for record in records or []:
+        if not isinstance(record, Mapping):
+            continue
+        bundle = ParentExecutionBundle(
+            page_id=str(record.get("page_id") or ""),
+            bundle_id=str(record.get("bundle_id") or record.get("parent_id") or ""),
+            root_id=str(record.get("root_id") or ""),
+            parent_id=str(record.get("parent_id") or record.get("bundle_id") or ""),
+            graph_parent_id=str(record.get("graph_parent_id") or record.get("parent_id") or ""),
+            state=str(record.get("state") or ""),
+            role=str(record.get("role") or ""),
+            source_text=str(record.get("source_text") or ""),
+            source_quality_state=str(record.get("source_quality_state") or "accepted_for_translation"),
+            source_quality_action=str(record.get("source_quality_action") or "translate"),
+            translation_required=bool(record.get("translation_required")),
+            cleanup_required=bool(record.get("cleanup_required")),
+            render_required=bool(record.get("render_required")),
+            parent_bbox=_bbox(record.get("parent_bbox")),
+            cleanup_target_bbox=_bbox(record.get("cleanup_target_bbox")),
+            render_allowed_area=_bbox(record.get("render_allowed_area")),
+            root_bbox=_bbox(record.get("root_bbox")),
+            source_region_ids=_list_strings(record.get("source_region_ids")),
+            represented_child_ids=_list_strings(record.get("represented_child_ids")),
+            source_candidates=[
+                dict(item)
+                for item in (record.get("source_candidates") or [])
+                if isinstance(item, Mapping)
+            ],
+            semantic_class=str(record.get("semantic_class") or ""),
+            route_intent=str(record.get("route_intent") or ""),
+            cleanup_mode=str(record.get("cleanup_mode") or ""),
+            text_area_container_id=str(record.get("text_area_container_id") or ""),
+            text_area_container_type=str(record.get("text_area_container_type") or ""),
+            confidence=_float_or_none(record.get("confidence")),
+            reason_codes=_list_strings(record.get("reason_codes")),
+            unresolved_reason=record.get("unresolved_reason"),
+            translated_text=str(record.get("translated_text") or ""),
+            source_glyph_mask_ids=_list_strings(record.get("source_glyph_mask_ids")),
+            cleanup_job_ids=_list_strings(record.get("cleanup_job_ids")),
+            cleanup_mask_ids=_list_strings(record.get("cleanup_mask_ids")),
+            render_decision_id=str(record.get("render_decision_id") or ""),
+            renderer_audit_id=str(record.get("renderer_audit_id") or ""),
+            execution_region=_copy_region_record(record.get("execution_region") or {}),
+        )
+        if not bundle.execution_region:
+            bundle.to_region_record()
+        bundles.append(bundle)
+    return bundles
 
 
 def _bundle_from_finalized_parent(
@@ -421,6 +499,59 @@ def _bundle_from_finalized_parent(
         reason_codes=_list_strings(getattr(parent, "reason_codes", [])),
         unresolved_reason=getattr(parent, "unresolved_reason", None),
     )
+
+
+def _sync_execution_region_from_bundle(
+    bundle: ParentExecutionBundle,
+    record: dict[str, Any],
+) -> None:
+    render = record.setdefault("render", {})
+    if not isinstance(render, dict):
+        render = {}
+        record["render"] = render
+    record["region_id"] = bundle.bundle_id
+    record["parent_execution_bundle_id"] = bundle.bundle_id
+    record["parent_execution_bundle_version"] = PARENT_EXECUTION_BUNDLE_VERSION
+    record["parent_execution_state"] = bundle.state
+    record["parent_execution_authoritative"] = True
+    record["text_block_root_id"] = bundle.root_id
+    record["parent_logical_text_unit_id"] = bundle.parent_id
+    record["active_translation_unit_id"] = bundle.parent_id if bundle.translation_required else ""
+    record["logical_text_block_id"] = bundle.parent_id
+    record["ocr_text"] = bundle.source_text
+    record["source_text"] = bundle.source_text
+    record["logical_text_block_source_text"] = bundle.source_text
+    record["parent_logical_text_unit_source_text"] = bundle.source_text
+    record["translation"] = bundle.translated_text
+    record["translated_text"] = bundle.translated_text
+    record["source_region_ids"] = list(bundle.source_region_ids)
+    record["represented_child_ids"] = list(bundle.represented_child_ids)
+    record["source_glyph_mask_ids"] = list(bundle.source_glyph_mask_ids)
+    record["cleanup_job_ids"] = list(bundle.cleanup_job_ids)
+    record["cleanup_mask_ids"] = list(bundle.cleanup_mask_ids)
+    record["render_decision_id"] = bundle.render_decision_id
+    record["renderer_audit_id"] = bundle.renderer_audit_id
+    record["execution_region_authority"] = "parent_execution_bundle"
+    record["execution_region_role"] = "parent_execution"
+    record["legacy_region_execution_authority"] = False
+    record["source_region_evidence_only"] = True
+    render["parent_execution_bundle_id"] = bundle.bundle_id
+    render["parent_execution_bundle_version"] = PARENT_EXECUTION_BUNDLE_VERSION
+    render["parent_execution_authoritative"] = True
+    render["text_block_root_id"] = bundle.root_id
+    render["parent_logical_text_unit_id"] = bundle.parent_id
+    render["active_translation_unit_id"] = bundle.parent_id if bundle.translation_required else ""
+    render["logical_text_block_source_text"] = bundle.source_text
+    render["parent_logical_text_unit_source_text"] = bundle.source_text
+    render["source_text"] = bundle.source_text
+    render["translation"] = bundle.translated_text
+    render["translated_text"] = bundle.translated_text
+    render["source_region_ids"] = list(bundle.source_region_ids)
+    render["represented_child_ids"] = list(bundle.represented_child_ids)
+    render["execution_region_authority"] = "parent_execution_bundle"
+    render["execution_region_role"] = "parent_execution"
+    render["legacy_region_execution_authority"] = False
+    render["source_region_evidence_only"] = True
 
 
 def _validate_bundle_result(result: ParentExecutionBundleResult) -> None:
@@ -556,6 +687,19 @@ def _union_region_bboxes(regions: Sequence[Mapping[str, Any]]) -> list[int]:
     x2 = max(box[0] + box[2] for box in boxes)
     y2 = max(box[1] + box[3] for box in boxes)
     return [x1, y1, max(1, x2 - x1), max(1, y2 - y1)]
+
+
+def _copy_region_record(record: Any) -> dict[str, Any]:
+    if not isinstance(record, Mapping):
+        return {}
+    copied = dict(record)
+    render = copied.get("render")
+    if isinstance(render, Mapping):
+        copied["render"] = dict(render)
+    flags = copied.get("flags")
+    if isinstance(flags, Mapping):
+        copied["flags"] = dict(flags)
+    return copied
 
 
 def _list_strings(value: Any) -> list[str]:
