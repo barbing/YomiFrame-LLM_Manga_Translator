@@ -26,6 +26,9 @@ class ParentExecutionBundle:
     source_text: str = ""
     source_quality_state: str = "accepted_for_translation"
     source_quality_action: str = "translate"
+    source_contract_owner: str = ""
+    source_contract_region_id: str = ""
+    source_quality_reason_codes: list[str] = field(default_factory=list)
     translation_required: bool = False
     cleanup_required: bool = False
     render_required: bool = False
@@ -65,6 +68,9 @@ class ParentExecutionBundle:
             "source_text": self.source_text,
             "source_quality_state": self.source_quality_state,
             "source_quality_action": self.source_quality_action,
+            "source_contract_owner": self.source_contract_owner,
+            "source_contract_region_id": self.source_contract_region_id,
+            "source_quality_reason_codes": list(self.source_quality_reason_codes),
             "translation_required": self.translation_required,
             "cleanup_required": self.cleanup_required,
             "render_required": self.render_required,
@@ -178,6 +184,9 @@ class ParentExecutionBundle:
             "parent_source_coherence_action": self.source_quality_action,
             "logical_text_source_quality_action": self.source_quality_action,
             "source_conservation_status": self.source_quality_state,
+            "source_contract_owner": self.source_contract_owner,
+            "source_contract_region_id": self.source_contract_region_id,
+            "source_quality_reason_codes": list(self.source_quality_reason_codes),
             "source_glyph_mask_ids": list(self.source_glyph_mask_ids),
             "cleanup_job_ids": list(self.cleanup_job_ids),
             "cleanup_mask_ids": list(self.cleanup_mask_ids),
@@ -235,6 +244,9 @@ class ParentExecutionBundle:
                 "renderer_audit_id": self.renderer_audit_id,
                 "parent_source_coherence_action": self.source_quality_action,
                 "logical_text_source_quality_action": self.source_quality_action,
+                "source_contract_owner": self.source_contract_owner,
+                "source_contract_region_id": self.source_contract_region_id,
+                "source_quality_reason_codes": list(self.source_quality_reason_codes),
                 "wrap_mode": "vertical",
             },
         }
@@ -364,6 +376,10 @@ def sync_bundles_from_region_records(
         bundle.cleanup_mask_ids = _list_strings(record.get("cleanup_mask_ids"))
         bundle.render_decision_id = str(record.get("render_decision_id") or "")
         bundle.renderer_audit_id = str(record.get("renderer_audit_id") or "")
+        bundle.source_contract_owner = str(record.get("source_contract_owner") or bundle.source_contract_owner or "")
+        bundle.source_contract_region_id = str(record.get("source_contract_region_id") or bundle.source_contract_region_id or "")
+        if record.get("source_quality_reason_codes"):
+            bundle.source_quality_reason_codes = _list_strings(record.get("source_quality_reason_codes"))
         bundle.to_region_record()
 
 
@@ -387,6 +403,9 @@ def parent_execution_bundles_from_audit_records(
             source_text=str(record.get("source_text") or ""),
             source_quality_state=str(record.get("source_quality_state") or "accepted_for_translation"),
             source_quality_action=str(record.get("source_quality_action") or "translate"),
+            source_contract_owner=str(record.get("source_contract_owner") or ""),
+            source_contract_region_id=str(record.get("source_contract_region_id") or ""),
+            source_quality_reason_codes=_list_strings(record.get("source_quality_reason_codes")),
             translation_required=bool(record.get("translation_required")),
             cleanup_required=bool(record.get("cleanup_required")),
             render_required=bool(record.get("render_required")),
@@ -462,10 +481,34 @@ def _bundle_from_finalized_parent(
         or "translate"
     )
     source_state = str(
-        getattr(parent_unit, "source_conservation_status", "")
+        getattr(parent_unit, "source_contract_quality_state", "")
+        or getattr(parent_unit, "source_conservation_status", "")
         or primary_region.get("source_conservation_status")
         or "accepted_for_translation"
     )
+    source_contract_owner = str(
+        getattr(parent_unit, "source_contract_owner", "")
+        or primary_region.get("source_contract_owner")
+        or primary_render.get("source_contract_owner")
+        or ""
+    )
+    source_contract_region_id = str(
+        getattr(parent_unit, "source_contract_region_id", "")
+        or primary_region.get("source_contract_region_id")
+        or primary_render.get("source_contract_region_id")
+        or ""
+    )
+    if not source_contract_region_id and source_contract_owner and (
+        primary_region.get("parent_boundary_ocr_source_contract")
+        or primary_render.get("parent_boundary_ocr_source_contract")
+    ):
+        source_contract_region_id = str(primary_region.get("region_id") or "")
+    source_reason_codes = _list_strings(getattr(parent_unit, "source_quality_warning_reason_codes", []))
+    if not source_reason_codes:
+        source_reason_codes = _list_strings(
+            primary_region.get("parent_ocr_source_quality_reason_codes")
+            or primary_render.get("parent_ocr_source_quality_reason_codes")
+        )
     return ParentExecutionBundle(
         page_id=page_id,
         bundle_id=parent_id,
@@ -477,6 +520,9 @@ def _bundle_from_finalized_parent(
         source_text=str(getattr(parent, "source_text", "") or ""),
         source_quality_state=source_state,
         source_quality_action=source_action,
+        source_contract_owner=source_contract_owner,
+        source_contract_region_id=source_contract_region_id,
+        source_quality_reason_codes=source_reason_codes,
         translation_required=bool(getattr(parent, "translation_required", False)),
         cleanup_required=bool(getattr(parent, "cleanup_required", False)),
         render_required=bool(getattr(parent, "render_required", False)),
@@ -527,6 +573,9 @@ def _sync_execution_region_from_bundle(
     record["source_text"] = bundle.source_text
     record["logical_text_block_source_text"] = bundle.source_text
     record["parent_logical_text_unit_source_text"] = bundle.source_text
+    record["source_contract_owner"] = bundle.source_contract_owner
+    record["source_contract_region_id"] = bundle.source_contract_region_id
+    record["source_quality_reason_codes"] = list(bundle.source_quality_reason_codes)
     record["translation"] = bundle.translated_text
     record["translated_text"] = bundle.translated_text
     record["source_region_ids"] = list(bundle.source_region_ids)
@@ -549,6 +598,9 @@ def _sync_execution_region_from_bundle(
     render["logical_text_block_source_text"] = bundle.source_text
     render["parent_logical_text_unit_source_text"] = bundle.source_text
     render["source_text"] = bundle.source_text
+    render["source_contract_owner"] = bundle.source_contract_owner
+    render["source_contract_region_id"] = bundle.source_contract_region_id
+    render["source_quality_reason_codes"] = list(bundle.source_quality_reason_codes)
     render["translation"] = bundle.translated_text
     render["translated_text"] = bundle.translated_text
     render["source_region_ids"] = list(bundle.source_region_ids)
@@ -592,6 +644,25 @@ def _source_candidate_from_region(region: Mapping[str, Any], region_id: str) -> 
         "child_id": str(region.get("child_recognized_text_segment_id") or render.get("child_recognized_text_segment_id") or ""),
         "confidence": region.get("confidence"),
         "detection_source": str(region.get("detection_source") or render.get("detection_source") or ""),
+        "parent_boundary_ocr_source_contract": bool(
+            region.get("parent_boundary_ocr_source_contract")
+            or render.get("parent_boundary_ocr_source_contract")
+        ),
+        "source_contract_owner": str(region.get("source_contract_owner") or render.get("source_contract_owner") or ""),
+        "parent_ocr_source_quality_state": str(
+            region.get("parent_ocr_source_quality_state")
+            or render.get("parent_ocr_source_quality_state")
+            or ""
+        ),
+        "parent_ocr_source_quality_action": str(
+            region.get("parent_ocr_source_quality_action")
+            or render.get("parent_ocr_source_quality_action")
+            or ""
+        ),
+        "parent_ocr_source_quality_reason_codes": _list_strings(
+            region.get("parent_ocr_source_quality_reason_codes")
+            or render.get("parent_ocr_source_quality_reason_codes")
+        ),
     }
 
 

@@ -203,6 +203,11 @@ class ParentLogicalTextUnit:
     unresolved_reason: str | None = None
     reason_codes: list[str] = field(default_factory=list)
     confidence: float | None = None
+    source_contract_owner: str = ""
+    source_contract_region_id: str = ""
+    source_contract_quality_state: str = ""
+    source_contract_quality_action: str = ""
+    source_quality_warning_reason_codes: list[str] = field(default_factory=list)
     source_coherence_status: str = "not_evaluated"
     source_coherence_reason_codes: list[str] = field(default_factory=list)
     source_coherence_action: str = "translate"
@@ -854,6 +859,18 @@ def _evaluate_root_source_coherence(
 
     for parent in parents:
         status, reasons, action = _parent_source_coherence(parent.source_text, role=parent.role)
+        if _parent_owned_ocr_source_should_translate_with_review(parent, action):
+            status = "weak"
+            action = "translate_with_review"
+            reasons = sorted(
+                set(
+                    list(reasons or [])
+                    + list(parent.source_quality_warning_reason_codes or [])
+                    + ["parent_owned_ocr_source_usable_with_warning"]
+                )
+            )
+            parent.source_contract_quality_state = parent.source_contract_quality_state or "usable_source_with_warning"
+            parent.source_contract_quality_action = "translate_with_review"
         parent.source_coherence_status = status
         parent.source_coherence_reason_codes = reasons
         parent.source_coherence_action = action
@@ -1156,6 +1173,28 @@ def _parent_is_active_translation_unit(parent: ParentLogicalTextUnit) -> bool:
     return bool(_source_body(parent.source_text) or _valid_short_reaction_or_laugh(parent.source_text))
 
 
+def _parent_owned_ocr_source_should_translate_with_review(parent: ParentLogicalTextUnit, action: str) -> bool:
+    if str(parent.source_contract_owner or "") != "parent_logical_text_unit_ocr_source_contract":
+        return False
+    quality_action = str(parent.source_contract_quality_action or "")
+    if quality_action != "translate_with_review" and str(action or "") not in {
+        "repair_required",
+        "block_review_only",
+        "unresolved_review",
+        "block_auto_translation",
+        "source_quality_blocked",
+    }:
+        return False
+    text = _clean_source_text(parent.source_text)
+    body = _source_body(text)
+    if not body:
+        return False
+    has_japanese = any("\u3040" <= ch <= "\u30ff" or "\u4e00" <= ch <= "\u9fff" for ch in body)
+    if not has_japanese:
+        return False
+    return str(parent.role or "") in {ROLE_SPEECH, ROLE_CAPTION, ROLE_BACKGROUND}
+
+
 def _parent_is_punctuation_identity(parent: ParentLogicalTextUnit) -> bool:
     text = str(parent.source_text or "").strip()
     if not text:
@@ -1195,7 +1234,11 @@ def _finalized_parent_record(
         cleanup_required=cleanup_required,
         render_required=render_required,
         represented_child_ids=[child.child_id for child in children],
-        source_region_ids=[child.source_region_id for child in children if child.source_region_id],
+        source_region_ids=[
+            child.source_region_id
+            for child in children
+            if child.source_region_id and child.final_state in {STATE_PARENT_ANCHOR, STATE_PARENT_CHILD}
+        ],
         cleanup_target_bbox=list(parent.cleanup_target_bbox),
         render_allowed_area=list(parent.render_allowed_area),
         reason_codes=list(parent.reason_codes),
@@ -3045,6 +3088,7 @@ def _materialize_graph_plan_parents(
         )
         parent.source_text = source_text
         parent.source_text_before_reconstruction = source_text
+        _attach_graph_parent_source_contract(parent, attached_regions, source_region_ids)
         _attach_graph_parent_source_reconstruction(parent, attached_regions, source_region_ids)
         parent.anchor_child_id = _child_id(page_id, source_region_ids[0]) if source_region_ids else None
         parent.source_conservation_status = "complete" if source_text else "unresolved"
@@ -3141,6 +3185,33 @@ def _attach_graph_parent_source_reconstruction(
         return
 
 
+def _attach_graph_parent_source_contract(
+    parent: ParentLogicalTextUnit,
+    regions: list[dict[str, Any]],
+    source_region_ids: list[str],
+) -> None:
+    source_id_set = {str(rid) for rid in source_region_ids if str(rid)}
+    if not source_id_set:
+        return
+    for region in regions:
+        rid = str(region.get("region_id") or "")
+        if not rid or rid not in source_id_set:
+            continue
+        if not bool(region.get("parent_boundary_ocr_source_contract")):
+            continue
+        parent.source_contract_owner = str(
+            region.get("source_contract_owner")
+            or region.get("parent_ocr_source_contract_owner")
+            or "parent_logical_text_unit_ocr_source_contract"
+        )
+        parent.source_contract_region_id = rid
+        parent.source_contract_quality_state = str(region.get("parent_ocr_source_quality_state") or "")
+        parent.source_contract_quality_action = str(region.get("parent_ocr_source_quality_action") or "")
+        parent.source_quality_warning_reason_codes = _string_list(region.get("parent_ocr_source_quality_reason_codes"))
+        _append_unique(parent.reason_codes, "parent_boundary_ocr_source_contract_owner")
+        return
+
+
 def _regions_for_graph_parent(
     parent_node: dict[str, Any],
     regions: list[dict[str, Any]],
@@ -3226,6 +3297,12 @@ def _graph_parent_source_from_regions(
     parent_node: dict[str, Any] | None = None,
     sibling_parent_nodes: list[dict[str, Any]] | None = None,
 ) -> tuple[str, list[str], set[str]]:
+    parent_owned = _graph_parent_owned_ocr_source_from_regions(
+        regions,
+        parent_node=parent_node,
+    )
+    if parent_owned is not None:
+        return parent_owned
     reconstructed = _graph_parent_reconstructed_source_from_regions(
         regions,
         parent_node=parent_node,
@@ -3271,6 +3348,50 @@ def _graph_parent_source_from_regions(
     source_region_ids = [str(item["region"].get("region_id") or "") for item in selected]
     source_text = "".join(str(item["text"]) for item in selected)
     return source_text, source_region_ids, duplicate_region_ids
+
+
+def _graph_parent_owned_ocr_source_from_regions(
+    regions: list[dict[str, Any]],
+    *,
+    parent_node: dict[str, Any] | None,
+) -> tuple[str, list[str], set[str]] | None:
+    if not parent_node:
+        return None
+    parent_id = str(parent_node.get("parent_node_id") or "")
+    parent_box = _bbox(parent_node.get("bbox"))
+    if not parent_id or not parent_box:
+        return None
+    candidates: list[tuple[int, tuple[Any, ...], dict[str, Any], str]] = []
+    for region in regions:
+        if not isinstance(region, dict):
+            continue
+        if not bool(region.get("parent_boundary_ocr_source_contract")):
+            continue
+        owner_parent_id = str(region.get("parent_ocr_source_parent_id") or "")
+        if owner_parent_id and owner_parent_id != parent_id:
+            continue
+        rid = str(region.get("region_id") or "")
+        text = _clean_source_text(region.get("ocr_text"))
+        if not rid or not text:
+            continue
+        region_box = _bbox(region.get("bbox"))
+        if not _graph_region_covers_parent_boundary(region_box, parent_box):
+            continue
+        candidates.append((len(_source_body(text) or text), _graph_region_reading_key(region), region, text))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    _length, _key, dominant_region, source_text = candidates[0]
+    dominant_region_id = str(dominant_region.get("region_id") or "")
+    dominant_box = _bbox(dominant_region.get("bbox"))
+    duplicate_region_ids: set[str] = set()
+    for region in regions:
+        rid = str(region.get("region_id") or "")
+        if not rid or rid == dominant_region_id:
+            continue
+        if _graph_region_is_structurally_represented_by_box(region, dominant_box):
+            duplicate_region_ids.add(rid)
+    return source_text, [dominant_region_id], duplicate_region_ids
 
 
 def _graph_parent_dominant_boundary_source(
