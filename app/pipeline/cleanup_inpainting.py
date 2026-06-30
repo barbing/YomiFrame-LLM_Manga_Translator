@@ -12,7 +12,7 @@ import os
 import time
 from functools import lru_cache
 
-from app.config.defaults import IOPAINT_ANIME_MANGA_BIG_LAMA
+from app.config.defaults import CLEANUP_INPAINT_MODEL_FILE, IOPAINT_ANIME_MANGA_BIG_LAMA
 
 try:
     from PIL import Image
@@ -26,7 +26,7 @@ FIXED_CLEANUP_INPAINT_MODEL_RELATIVE_PATH = (
     "models",
     "inpaint",
     "iopaint",
-    "anime-manga-big-lama.pt",
+    CLEANUP_INPAINT_MODEL_FILE,
 )
 FIXED_CLEANUP_INPAINT_SELECTION_POLICY = "fixed_cleanup_iopaint_model"
 

@@ -116,19 +116,21 @@ The current conceptual pipeline is:
 ```text
 Page import
   -> optional prescan and glossary memory
-  -> bubble and text-area planning
-  -> scoped text detection
-  -> OCR
-  -> text-block ownership and grouping
+  -> BubbleDetection and TextAreaPlan semantic planning
+  -> scoped text detection and foreground segmentation
+  -> OCR source capture
+  -> root / parent / child text-block hierarchy
+  -> ParentExecutionBundle handoff
   -> semantic routing
-  -> glossary-aware translation
-  -> source-text cleanup and inpainting
-  -> font selection and text fitting
-  -> final page rendering
+  -> parent-keyed glossary-aware translation
+  -> parent-keyed source-glyph, cleanup, and render-eligibility contracts
+  -> source-text cleanup and inpainting on the pre-render image
+  -> parent-bounded font selection and text fitting
+  -> final page rendering from parent execution units
   -> project/output persistence
 ```
 
-Each stage has a distinct responsibility. The text-area planning stage decides what kind of visible text is present. The text detector and segmentation stages supply text geometry and pixels. OCR reads text. Translation consumes approved OCR text. Cleanup removes only authorized source text. Rendering places the translated text into the final page.
+Each stage has a distinct responsibility. BubbleDetection and TextAreaPlan decide what kind of visible text is present. The text detector and segmentation stages supply text geometry and pixels. OCR reads source text from approved parent-owned areas. The hierarchy stage separates physical root containers, parent translation obligations, and child source evidence. `ParentExecutionBundle` then becomes the parent-keyed execution contract consumed by translation, cleanup, render eligibility, and rendering.
 
 This separation is important because manga pages contain many things that look like text but should not all be translated or erased. SFX, decorative lettering, artwork, and uncertain regions must not be treated the same way as normal dialogue or narration.
 
@@ -153,13 +155,15 @@ YomiFrame uses local model assets and local caches where possible. Startup check
 The main asset families are:
 
 - bubble/text-area detection models
+- root/parent semantic bubble evidence models
 - text detection and segmentation models
-- OCR models
+- OCR models, including both PaddleOCR-VL and MangaOCR
 - the fixed cleanup inpainting model
-- optional NLP resources
+- NLP resources used by name extraction
 - user-selected local translation models
 
 Translation models are treated separately from fixed runtime assets. For example, a GGUF translation model or an Ollama model is a user-selected translation backend, while OCR and detection models are pipeline assets.
+Pre-download coverage means the asset is available for offline or selectable use; it does not by itself make that model part of the recommended default workflow.
 
 ### Prescan and Name Memory
 
@@ -180,17 +184,21 @@ The planner is responsible for separating:
 - art or non-text that must not be erased
 - uncertain material that should remain review-only
 
-This is the central difference between the current architecture and the older monolithic pipeline. Downstream modules should consume the planner’s decision rather than inventing their own semantic classification.
+This is a central difference between the current architecture and the older monolithic pipeline. Downstream modules should consume the planner's decision and the finalized parent execution contract rather than inventing their own semantic classification.
 
 ### Scoped Text Detection and OCR
 
-After text-area planning, text detection runs inside approved or review-eligible scopes. This keeps the detector focused on areas where text is expected and helps avoid routing decorative or non-text regions through normal translation.
+After text-area planning, text detection and foreground segmentation run inside approved or review-eligible scopes. This keeps the detector focused on areas where text is expected and helps avoid routing decorative or non-text regions through normal translation.
 
-OCR then reads the source text from accepted text instances. OCR quality remains a major upstream dependency: if OCR misses, fragments, or corrupts text, translation and rendering quality will suffer.
+OCR reads source text for parent-owned regions. The selectable OCR engines are PaddleOCR-VL and MangaOCR; PaddleOCR-VL is the default and MangaOCR is retained for explicit user choice. OCR engines are not supposed to silently switch during a run. OCR quality remains a major upstream dependency: if OCR misses, fragments, or corrupts text, translation and rendering quality will suffer.
 
-### Text Ownership and Grouping
+### Root / Parent / Child Ownership
 
-Manga text is often split into multiple detector fragments even when it visually belongs to one utterance. YomiFrame groups related text fragments into logical text blocks so one visual text area can be translated and rendered coherently.
+Manga text is often split into multiple detector fragments even when it visually belongs to one utterance. YomiFrame uses an explicit root / parent / child hierarchy to keep these relationships stable:
+
+- root nodes represent physical text containers, such as a speech bubble, narration area, or background text area
+- parent nodes represent the actual text obligations that should be translated, cleaned, and rendered as coherent units
+- child nodes represent implementation-derived source evidence, such as detector fragments and OCR segments
 
 This helps prevent:
 
@@ -200,15 +208,17 @@ This helps prevent:
 - separate renderings inside one bubble
 - mistranslation caused by losing surrounding context
 
+After the hierarchy is finalized, `ParentExecutionBundle` records carry the parent id, root id, source text, execution region, cleanup target, render allowed area, represented children, source-glyph ids, cleanup ids, render ids, OCR provenance, and style hints. Source regions remain evidence; the parent execution bundle is the normal downstream execution unit.
+
 ### Translation
 
 YomiFrame is built around local translation. The current recommended path is a local GGUF backend, with Ollama available as an alternate local backend.
 
 Translation uses:
 
-- OCR text
+- parent-owned OCR source text
 - source and target language settings
-- region context
+- parent/root context and reading order
 - glossary/name-memory context
 - semantic eligibility from the planning stage
 
@@ -220,6 +230,7 @@ Cleanup removes source text only where the pipeline has authorized that source t
 
 The cleanup subsystem uses:
 
+- parent execution bundles
 - source-glyph evidence
 - text-pixel segmentation
 - cleanup-job records
@@ -228,13 +239,13 @@ The cleanup subsystem uses:
 - inpainting or fill backends
 - proof/audit evidence
 
-The cleanup module is a consumer of upstream decisions. It should not decide on its own whether a region is dialogue, narration, SFX, decorative text, or art.
+The cleanup module is a consumer of upstream decisions. It should not decide on its own whether a region is dialogue, narration, SFX, decorative text, or art. It creates and runs cleanup contracts keyed back to the parent execution bundle, then commits successful cleanup to the pre-render image.
 
 ### Rendering
 
-Rendering places translated text back into the cleaned page. It handles font selection, wrapping, fitting, layout orientation, and final composition.
+Rendering places translated text back into the cleaned page. The current production path renders parent execution bundles, using each bundle's execution region and render style contract as the layout input. It handles font selection, wrapping, fitting, layout orientation, and final composition.
 
-The renderer must preserve the complete translated text. If text cannot fit cleanly, that should be visible as a review or layout issue rather than silently dropping content.
+The renderer must preserve the complete translated text. If text cannot fit cleanly, that should be visible as a review or layout issue rather than silently dropping content. The renderer is not the cleanup owner; it consumes cleanup results and render-eligibility decisions.
 
 ## Recommended Local Workflow
 
@@ -272,7 +283,7 @@ A typical run writes:
 - glossary/style-guide state when enabled
 - debug or validation artifacts when the selected workflow produces them
 
-Project state is important because it records page regions, OCR text, translations, render metadata, and review information. It is the bridge between translation, review, rerendering, and diagnostics.
+Project state is important because it records page regions, parent execution bundles, root/parent/child hierarchy metadata, OCR text, translations, cleanup and render metadata, and review information. It is the bridge between translation, review, rerendering, and diagnostics.
 
 ## Validation Philosophy
 

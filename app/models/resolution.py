@@ -6,7 +6,11 @@ import os
 from typing import Iterable, Optional
 
 from app.config.defaults import (
+    CLEANUP_INPAINT_MODEL_FILE,
     MANGA_OCR_FILES,
+    KITSUMED_SPEECH_BUBBLE_MODEL_FILE,
+    OGKALU_TEXT_BUBBLE_CONFIG_FILE,
+    OGKALU_TEXT_BUBBLE_MODEL_FILE,
     PADDLE_OCR_VL_MMPROJ_FILE,
     PADDLE_OCR_VL_MODEL_FILE,
     PADDLE_OCR_VL_REPO_ID,
@@ -61,6 +65,55 @@ def resolve_manga_ocr_local_dir(base_dir: Optional[str] = None) -> Optional[str]
     if _first_dir_with_files([target], MANGA_OCR_FILES):
         return target
     return None
+
+
+def resolve_kitsumed_speech_bubble_model(base_dir: Optional[str] = None) -> Optional[str]:
+    path = os.path.join(
+        base_dir or models_root(),
+        "yolov8m_seg-speech-bubble",
+        KITSUMED_SPEECH_BUBBLE_MODEL_FILE,
+    )
+    return path if os.path.isfile(path) else None
+
+
+def resolve_ogkalu_text_bubble_model(base_dir: Optional[str] = None) -> Optional[str]:
+    path = os.path.join(
+        base_dir or models_root(),
+        "comic-text-and-bubble-detector",
+        OGKALU_TEXT_BUBBLE_MODEL_FILE,
+    )
+    return path if os.path.isfile(path) else None
+
+
+def resolve_ogkalu_text_bubble_config(base_dir: Optional[str] = None) -> Optional[str]:
+    path = os.path.join(
+        base_dir or models_root(),
+        "comic-text-and-bubble-detector",
+        OGKALU_TEXT_BUBBLE_CONFIG_FILE,
+    )
+    return path if os.path.isfile(path) else None
+
+
+def has_bubble_detection_runtime(base_dir: Optional[str] = None) -> bool:
+    return bool(
+        resolve_kitsumed_speech_bubble_model(base_dir)
+        and resolve_ogkalu_text_bubble_model(base_dir)
+        and resolve_ogkalu_text_bubble_config(base_dir)
+    )
+
+
+def resolve_cleanup_inpaint_model_file(base_dir: Optional[str] = None) -> Optional[str]:
+    path = os.path.join(
+        base_dir or models_root(),
+        "inpaint",
+        "iopaint",
+        CLEANUP_INPAINT_MODEL_FILE,
+    )
+    return path if os.path.isfile(path) else None
+
+
+def has_cleanup_inpaint_model(base_dir: Optional[str] = None) -> bool:
+    return bool(resolve_cleanup_inpaint_model_file(base_dir))
 
 
 def _paddle_ocr_vl_local_dir(base_dir: Optional[str] = None) -> str:

@@ -115,10 +115,14 @@ class MainWindow(QtWidgets.QMainWindow):
         missing = []
         if not downloader.check_comic_text_detector(models_dir):
             missing.append("comic_text_detector")
+        if not downloader.check_bubble_detection(models_dir):
+            missing.append("bubble_detection")
         if not downloader.check_paddle_ocr_vl(models_dir):
             missing.append("paddle_ocr_vl")
+        if not downloader.check_manga_ocr(models_dir):
+            missing.append("manga_ocr")
         if self._ai_inpaint_runtime_available() and not downloader.check_big_lama(models_dir):
-            missing.append("big_lama")
+            missing.append("cleanup_inpaint")
         if not downloader.check_ner(models_dir):
             missing.append("ner")
             
@@ -165,11 +169,13 @@ class MainWindow(QtWidgets.QMainWindow):
         
         if "comic_text_detector" in model_keys:
              downloader.prepare_comic_text_detector(models_dir)
+        if "bubble_detection" in model_keys:
+             downloader.prepare_bubble_detection(models_dir)
         if "manga_ocr" in model_keys:
              downloader.prepare_manga_ocr(models_dir)
         if "paddle_ocr_vl" in model_keys:
              downloader.prepare_paddle_ocr_vl(models_dir)
-        if "big_lama" in model_keys:
+        if "cleanup_inpaint" in model_keys or "big_lama" in model_keys:
              downloader.prepare_big_lama(models_dir)
         if "sakura" in model_keys:
              downloader.prepare_sakura(models_dir)

@@ -4,16 +4,22 @@ import os
 import requests
 from PySide6 import QtCore
 from app.config.defaults import (
+    CLEANUP_INPAINT_MODEL_FILE,
+    CLEANUP_INPAINT_REPO_ID,
     COMIC_TEXT_DETECTOR_GPU, 
     COMIC_TEXT_DETECTOR_CPU, 
-    SAKURA_GGUF,
-    QWEN_GGUF,
-    BIG_LAMA,
+    KITSUMED_SPEECH_BUBBLE_MODEL_FILE,
+    KITSUMED_SPEECH_BUBBLE_REPO_ID,
     MANGA_OCR_BASE_URL,
     MANGA_OCR_FILES,
+    OGKALU_TEXT_BUBBLE_CONFIG_FILE,
+    OGKALU_TEXT_BUBBLE_MODEL_FILE,
+    OGKALU_TEXT_BUBBLE_REPO_ID,
     PADDLE_OCR_VL_MMPROJ_FILE,
     PADDLE_OCR_VL_MODEL_FILE,
     PADDLE_OCR_VL_REPO_ID,
+    QWEN_GGUF,
+    SAKURA_GGUF,
 )
 
 import hashlib
@@ -24,6 +30,8 @@ from urllib3.util.retry import Retry
 import tarfile
 import zipfile
 from app.models.resolution import (
+    has_bubble_detection_runtime,
+    has_cleanup_inpaint_model,
     has_paddle_ocr_vl_runtime,
     resolve_manga_ocr_local_dir,
     resolve_manga_ocr_system_ref,
@@ -117,26 +125,13 @@ class ModelDownloader(QtCore.QObject):
         """Check if MangaOCR models exist (System Priority > Portable)."""
         return bool(resolve_manga_ocr_system_ref() or resolve_manga_ocr_local_dir(models_dir))
 
-    def check_big_lama(self, models_dir: str) -> bool:
-        """Check if BigLama model exists (System Priority > Portable)."""
-        # 1. System/Torch Cache (Priority)
-        # Check TORCH_HOME or default ~/.cache/torch/hub/checkpoints
-        try:
-            torch_home = os.environ.get("TORCH_HOME")
-            if not torch_home:
-                torch_home = os.path.join(os.path.expanduser("~"), ".cache", "torch")
-            
-            cache_path = os.path.join(torch_home, "hub", "checkpoints", "big-lama.pt")
-            if os.path.exists(cache_path):
-                return True
-        except Exception:
-            pass
+    def check_bubble_detection(self, models_dir: str) -> bool:
+        """Check if Phase 4 bubble/text-area semantic evidence models exist."""
+        return has_bubble_detection_runtime(models_dir)
 
-        # 2. Local check
-        if os.path.exists(os.path.join(models_dir, "lama", "big-lama.pt")):
-            return True
-            
-        return False
+    def check_big_lama(self, models_dir: str) -> bool:
+        """Check if the fixed cleanup-owned iopaint model exists."""
+        return has_cleanup_inpaint_model(models_dir)
 
     def download_targets(self, targets: List[DownloadTarget]):
         """Generic downloader for a list of targets."""
@@ -149,10 +144,16 @@ class ModelDownloader(QtCore.QObject):
                 if target.sha256:
                     self.status_changed.emit(f"Verifying {os.path.basename(target.save_path)}...")
                     if self._verify_checksum(target.save_path, target.sha256):
+                        if target.save_path.endswith((".tar", ".zip")):
+                            if not self._extract_archive(target.save_path):
+                                return
                         continue # File is good
                     else:
                         os.remove(target.save_path) # Corrupt, re-download
                 else:
+                    if target.save_path.endswith((".tar", ".zip")):
+                        if not self._extract_archive(target.save_path):
+                            return
                     continue # Assume good if no checksum
 
             os.makedirs(os.path.dirname(target.save_path), exist_ok=True)
@@ -201,6 +202,31 @@ class ModelDownloader(QtCore.QObject):
                 url="https://github.com/ggml-org/llama.cpp/releases/download/b9842/cudart-llama-bin-win-cuda-12.4-x64.zip",
                 save_path=os.path.join(llama_dir, "cudart-llama-bin-win-cuda-12.4-x64.zip"),
                 label="Downloading llama.cpp CUDA support DLLs...",
+            ),
+        ]
+        self.queue_targets(targets)
+
+    def prepare_bubble_detection(self, models_dir: str):
+        """Queue root/parent semantic bubble and text-area evidence models."""
+        kitsumed_dir = os.path.join(models_dir, "yolov8m_seg-speech-bubble")
+        ogkalu_dir = os.path.join(models_dir, "comic-text-and-bubble-detector")
+        kitsumed_url = f"https://huggingface.co/{KITSUMED_SPEECH_BUBBLE_REPO_ID}/resolve/main"
+        ogkalu_url = f"https://huggingface.co/{OGKALU_TEXT_BUBBLE_REPO_ID}/resolve/main"
+        targets = [
+            DownloadTarget(
+                url=f"{kitsumed_url}/{KITSUMED_SPEECH_BUBBLE_MODEL_FILE}",
+                save_path=os.path.join(kitsumed_dir, KITSUMED_SPEECH_BUBBLE_MODEL_FILE),
+                label="Downloading speech-bubble segmentation model...",
+            ),
+            DownloadTarget(
+                url=f"{ogkalu_url}/{OGKALU_TEXT_BUBBLE_MODEL_FILE}",
+                save_path=os.path.join(ogkalu_dir, OGKALU_TEXT_BUBBLE_MODEL_FILE),
+                label="Downloading text/bubble detector model...",
+            ),
+            DownloadTarget(
+                url=f"{ogkalu_url}/{OGKALU_TEXT_BUBBLE_CONFIG_FILE}",
+                save_path=os.path.join(ogkalu_dir, OGKALU_TEXT_BUBBLE_CONFIG_FILE),
+                label="Downloading text/bubble detector config...",
             ),
         ]
         self.queue_targets(targets)
@@ -303,13 +329,14 @@ class ModelDownloader(QtCore.QObject):
         self.queue_targets(targets)
 
     def prepare_big_lama(self, models_dir: str):
-        """Queue LaMa model."""
-        target_dir = os.path.join(models_dir, "lama")
+        """Queue fixed cleanup-owned iopaint LaMa model."""
+        target_dir = os.path.join(models_dir, "inpaint", "iopaint")
+        repo_url = f"https://huggingface.co/{CLEANUP_INPAINT_REPO_ID}/resolve/main"
         targets = [
             DownloadTarget(
-                BIG_LAMA,
-                os.path.join(target_dir, "big-lama.pt"),
-                "Downloading Inpainting Model (BigLama)..."
+                f"{repo_url}/{CLEANUP_INPAINT_MODEL_FILE}",
+                os.path.join(target_dir, CLEANUP_INPAINT_MODEL_FILE),
+                "Downloading fixed cleanup inpainting model..."
             )
         ]
         self.queue_targets(targets)
