@@ -138,9 +138,6 @@ def prescan_for_glossary(
     if message_callback:
         message_callback(f"Pre-scanning {len(images)} pages for character names...")
     
-    # Initialize components
-    from app.detect.paddle_detector import PaddleTextDetector
-    
     # Track if we created them locally (to unload them later)
     _local_detector = False
     _local_ocr = False
@@ -148,30 +145,20 @@ def prescan_for_glossary(
     # Use detector based on settings
     if detector is None:
         _local_detector = True
-        if settings.detector_engine == "ComicTextDetector":
-            try:
-                from app.detect.comic_text_detector import ComicTextDetector
-                detector = ComicTextDetector(settings.use_gpu)
-            except Exception as e:
-                if message_callback:
-                    message_callback(f"ComicTextDetector unavailable: {e}. Using PaddleOCR.")
-        
-        if detector is None:
-            detector = PaddleTextDetector(settings.use_gpu)
+        try:
+            from app.detect.comic_text_detector import ComicTextDetector
+            detector = ComicTextDetector(settings.use_gpu)
+        except Exception as e:
+            if message_callback:
+                message_callback(f"ComicTextDetector unavailable: {e}. Pre-scan skipped.")
+            return style_guide
     
     # Initialize OCR
     if ocr_engine is None:
         _local_ocr = True
-        if settings.ocr_engine == "MangaOCR":
-            try:
-                from app.ocr.manga_ocr_engine import MangaOcrEngine
-                ocr_engine = MangaOcrEngine(settings.use_gpu)
-            except Exception:
-                pass
-        
-        if ocr_engine is None:
-            from app.ocr.paddle_ocr_recognizer import PaddleOcrRecognizer
-            ocr_engine = PaddleOcrRecognizer(settings.use_gpu)
+        from app.pipeline.controller import _create_selected_ocr_engine
+
+        ocr_engine = _create_selected_ocr_engine(settings, message_callback)
     
     # Initialize NLP components
     from app.nlp.character_graph import CharacterGraph

@@ -9,6 +9,9 @@ SAKURA_GGUF = "https://huggingface.co/SakuraLLM/Sakura-14B-Qwen3-v1.5-GGUF/resol
 QWEN_GGUF = "https://huggingface.co/Qwen/Qwen3-14B-GGUF/resolve/main/Qwen3-14B-Q6_K.gguf"
 BIG_LAMA = "https://github.com/enesmsahin/simple-lama-inpainting/releases/download/v0.1.0/big-lama.pt"
 IOPAINT_ANIME_MANGA_BIG_LAMA = "iopaint/anime-manga-big-lama"
+PADDLE_OCR_VL_REPO_ID = "PaddlePaddle/PaddleOCR-VL-1.6-GGUF"
+PADDLE_OCR_VL_MODEL_FILE = "PaddleOCR-VL-1.6-GGUF.gguf"
+PADDLE_OCR_VL_MMPROJ_FILE = "PaddleOCR-VL-1.6-GGUF-mmproj.gguf"
 MANGA_OCR_BASE_URL = "https://huggingface.co/kha-white/manga-ocr-base/resolve/main/"
 MANGA_OCR_FILES = [
     "config.json",
@@ -33,7 +36,7 @@ class AppDefaults:
     font_detection: str = "heuristic"
     detector_input_size: int = 1024
     detector_engine: str = "ComicTextDetector"
-    ocr_engine: str = "MangaOCR"
+    ocr_engine: str = "PaddleOCR-VL"
     filter_strength: str = "normal"
     inpaint_mode: str = "ai"
     # Cleanup inpainting uses one fixed local model. The UI value is preserved

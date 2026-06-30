@@ -10,7 +10,10 @@ from app.config.defaults import (
     QWEN_GGUF,
     BIG_LAMA,
     MANGA_OCR_BASE_URL,
-    MANGA_OCR_FILES
+    MANGA_OCR_FILES,
+    PADDLE_OCR_VL_MMPROJ_FILE,
+    PADDLE_OCR_VL_MODEL_FILE,
+    PADDLE_OCR_VL_REPO_ID,
 )
 
 import hashlib
@@ -20,9 +23,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import tarfile
 import zipfile
-import shutil
 from app.models.resolution import (
-    has_paddle_runtime_models,
+    has_paddle_ocr_vl_runtime,
     resolve_manga_ocr_local_dir,
     resolve_manga_ocr_system_ref,
     resolve_ner_local_dir,
@@ -165,47 +167,42 @@ class ModelDownloader(QtCore.QObject):
         """Check if NER model exists (System Priority > Portable)."""
         return bool(resolve_ner_system_snapshot() or resolve_ner_local_dir(os.path.join(models_dir, "ner")))
 
-    def check_paddle_ocr(self, models_dir: str = "models") -> bool:
-        """Check if PaddleOCR runtime models are installed."""
-        return has_paddle_runtime_models(base_dir=models_dir)
-
-    def _check_paddle_system_cache(self) -> bool:
-        """Check ~/.paddleocr for existing models."""
-        try:
-            home = os.path.expanduser("~")
-            base = os.path.join(home, ".paddleocr", "whl")
-            if os.path.exists(base) and any(os.scandir(base)):
-                return True
-        except Exception:
-            pass
-        return False
+    def check_paddle_ocr_vl(self, models_dir: str = "models") -> bool:
+        """Check if PaddleOCR-VL GGUF model and native runtime are installed."""
+        return has_paddle_ocr_vl_runtime(base_dir=models_dir)
 
     def prepare_ner(self, models_dir: str):
         """Queue NER model download."""
         self._ner_target_dir = os.path.join(models_dir, "ner")
         self._download_ner = True
 
-    def prepare_paddle(self, models_dir: str):
-        """Queue PaddleOCR manual model download."""
-        target_dir = os.path.join(models_dir, "paddleocr")
-        
-        # Define the 3 models
-        # Define the 3 models (Configured for Chinese PP-OCRv4)
-        urls = [
-             ("https://paddleocr.bj.bcebos.com/PP-OCRv4/chinese/ch_PP-OCRv4_det_infer.tar", "Detection Model (v4)"),
-             ("https://paddleocr.bj.bcebos.com/PP-OCRv4/chinese/ch_PP-OCRv4_rec_infer.tar", "Recognition Model (v4)"),
-             ("https://paddleocr.bj.bcebos.com/dygraph_v2.0/ch/ch_ppocr_mobile_v2.0_cls_infer.tar", "Classifier Model")
+    def prepare_paddle_ocr_vl(self, models_dir: str):
+        """Queue PaddleOCR-VL GGUF model and native llama.cpp runtime assets."""
+        model_dir = os.path.join(models_dir, "paddleocr-vl-1.6-gguf")
+        llama_dir = os.path.join(models_dir, "llama.cpp")
+        repo_url = f"https://huggingface.co/{PADDLE_OCR_VL_REPO_ID}/resolve/main"
+        targets = [
+            DownloadTarget(
+                url=f"{repo_url}/{PADDLE_OCR_VL_MODEL_FILE}",
+                save_path=os.path.join(model_dir, PADDLE_OCR_VL_MODEL_FILE),
+                label="Downloading PaddleOCR-VL GGUF model...",
+            ),
+            DownloadTarget(
+                url=f"{repo_url}/{PADDLE_OCR_VL_MMPROJ_FILE}",
+                save_path=os.path.join(model_dir, PADDLE_OCR_VL_MMPROJ_FILE),
+                label="Downloading PaddleOCR-VL multimodal projector...",
+            ),
+            DownloadTarget(
+                url="https://github.com/ggml-org/llama.cpp/releases/download/b9842/llama-b9842-bin-win-cuda-12.4-x64.zip",
+                save_path=os.path.join(llama_dir, "llama-b9842-bin-win-cuda-12.4-x64.zip"),
+                label="Downloading llama.cpp Windows CUDA runtime...",
+            ),
+            DownloadTarget(
+                url="https://github.com/ggml-org/llama.cpp/releases/download/b9842/cudart-llama-bin-win-cuda-12.4-x64.zip",
+                save_path=os.path.join(llama_dir, "cudart-llama-bin-win-cuda-12.4-x64.zip"),
+                label="Downloading llama.cpp CUDA support DLLs...",
+            ),
         ]
-        
-        targets = []
-        for url, label in urls:
-            filename = url.split("/")[-1]
-            targets.append(DownloadTarget(
-                url=url,
-                save_path=os.path.join(target_dir, filename), 
-                label=f"Downloading PaddleOCR {label}..."
-            ))
-            
         self.queue_targets(targets)
 
     def _perform_ner_download(self) -> bool:

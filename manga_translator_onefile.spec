@@ -8,7 +8,6 @@ hiddenimports = []
 # Collect packages that might be missed
 packages = [
     'manga_ocr', 
-    'paddleocr', 
     'simple_lama_inpainting',
     'imghdr', 
     'requests',

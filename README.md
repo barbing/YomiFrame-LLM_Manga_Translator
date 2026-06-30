@@ -46,9 +46,9 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-The default dependency set is CPU-safe where possible. GPU users may need to install CUDA-enabled builds of PyTorch, PaddlePaddle, and llama-cpp-python that match their local CUDA version.
+The default dependency set is CPU-safe where possible. GPU users may need to install CUDA-enabled builds of PyTorch and llama-cpp-python that match their local CUDA version. PaddleOCR-VL OCR uses the official GGUF model with a native `llama-server` runtime rather than the legacy PaddleOCR recognizer.
 
-If installation fails on Windows, first try the CPU defaults from `requirements.txt`. After the app runs, replace Torch, PaddlePaddle, or llama-cpp-python with GPU-specific builds that match the machine's CUDA toolkit and drivers.
+If installation fails on Windows, first try the CPU defaults from `requirements.txt`. After the app runs, replace Torch or llama-cpp-python with GPU-specific builds that match the machine's CUDA toolkit and drivers.
 
 ### Run The App
 

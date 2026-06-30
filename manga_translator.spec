@@ -8,7 +8,6 @@ hiddenimports = []
 # Collect packages that might be missed
 packages = [
     'manga_ocr', 
-    'paddleocr', 
     'simple_lama_inpainting',
     'imghdr', 
     'requests',
@@ -39,7 +38,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    # We do NOT exclude torch/paddle because we want a standalone (folder) distribution
+    # We do not exclude torch because we want a standalone (folder) distribution.
     excludes=[], 
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

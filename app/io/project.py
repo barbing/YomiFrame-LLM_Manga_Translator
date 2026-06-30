@@ -12,7 +12,7 @@ def default_project_dict() -> Dict[str, Any]:
             "name": "",
             "language": {"source": "ja", "target": "zh-Hans"},
             "created_at": "",
-            "model": {"detector": "PaddleOCR", "ocr": "MangaOCR", "translator": "ollama:auto"},
+            "model": {"detector": "ComicTextDetector", "ocr": "PaddleOCR-VL", "translator": "ollama:auto"},
             "style_guide": "",
         },
         "pages": [],

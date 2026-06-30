@@ -365,6 +365,59 @@ class PipelineSettings:
     private_cleanup_validation_stop_after_cleanup: bool = False
 
 
+OCR_ENGINE_PADDLE_VL = "PaddleOCR-VL"
+OCR_ENGINE_MANGA = "MangaOCR"
+OCR_ENGINE_CHOICES = (OCR_ENGINE_PADDLE_VL, OCR_ENGINE_MANGA)
+
+
+def _normalize_ocr_engine_name(value: str) -> str:
+    text = str(value or "").strip()
+    normalized = text.replace("_", "-").replace(" ", "").lower()
+    if normalized in {"paddleocr", "paddleocrvl", "paddleocr-vl", "paddleocr-v1.6", "paddleocrvl1.6"}:
+        return OCR_ENGINE_PADDLE_VL
+    if normalized in {"mangaocr", "manga-ocr"}:
+        return OCR_ENGINE_MANGA
+    return OCR_ENGINE_PADDLE_VL
+
+
+def _create_selected_ocr_engine(settings: PipelineSettings, message_callback=None):
+    selected = _normalize_ocr_engine_name(settings.ocr_engine)
+    if selected != settings.ocr_engine and message_callback:
+        message_callback(f"OCR Engine '{settings.ocr_engine}' is no longer available; using {selected}.")
+    if selected == OCR_ENGINE_PADDLE_VL:
+        from app.ocr.paddle_ocr_vl_engine import PaddleOcrVlEngine
+
+        if message_callback:
+            message_callback("OCR Engine: PaddleOCR-VL.")
+        return PaddleOcrVlEngine(use_gpu=settings.use_gpu)
+    if selected == OCR_ENGINE_MANGA:
+        from app.ocr.manga_ocr_engine import MangaOcrEngine, ensure_torch_runtime_ready
+
+        try:
+            ensure_torch_runtime_ready()
+        except Exception:
+            pass
+        force_worker = os.getenv("MT_FORCE_MANGA_OCR_WORKER") == "1"
+        try:
+            if force_worker:
+                raise RuntimeError("Forced MangaOCR worker mode.")
+            if message_callback:
+                message_callback("OCR Engine: MangaOCR.")
+            return MangaOcrEngine(settings.use_gpu)
+        except Exception as exc:
+            if _is_torch_missing(exc):
+                raise
+            try:
+                from app.ocr.manga_ocr_worker import MangaOcrWorker
+
+                if message_callback:
+                    message_callback("MangaOCR in-process failed; using MangaOCR worker process.")
+                return MangaOcrWorker(use_gpu=settings.use_gpu)
+            except Exception as worker_exc:
+                raise RuntimeError(f"MangaOCR failed to initialize: {worker_exc}") from worker_exc
+    raise RuntimeError(f"Unsupported OCR engine: {settings.ocr_engine}")
+
+
 class PipelineWorker(QtCore.QThread):
     progress_changed = QtCore.Signal(int)
     eta_changed = QtCore.Signal(str)
@@ -404,11 +457,11 @@ class PipelineWorker(QtCore.QThread):
             self.message.emit("No images found in import folder.")
             return
         if self._settings.fast_mode:
-            self._settings.detector_engine = "PaddleOCR"
+            self._settings.detector_engine = "ComicTextDetector"
             self._settings.inpaint_mode = "fast"
             self._settings.font_detection = "off"
             self._settings.filter_strength = "normal"
-            self.message.emit("Fast Mode: detector=PaddleOCR, inpaint=fast, font detection=off.")
+            self.message.emit("Fast Mode: detector=ComicTextDetector, inpaint=fast, font detection=off.")
         if not os.path.isdir(self._settings.export_dir):
             try:
                 os.makedirs(self._settings.export_dir, exist_ok=True)
@@ -417,7 +470,6 @@ class PipelineWorker(QtCore.QThread):
                 return
 
         start_time = time.time()
-        from app.ocr.manga_ocr_engine import MangaOcrEngine, ensure_torch_runtime_ready
         from app.translate.ollama_client import DeepSeekClient, OllamaClient
         from app.render.renderer import render_parent_execution_bundles, render_translations
         from app.pipeline.cleanup_contracts import build_cleanup_job_candidates_for_parent_bundles
@@ -460,54 +512,12 @@ class PipelineWorker(QtCore.QThread):
         if perf_telemetry_is_enabled:
             self.message.emit(f"Performance telemetry enabled: {perf_telemetry_output_root}")
         try:
-            if self._settings.ocr_engine == "MangaOCR":
-                try:
-                    ensure_torch_runtime_ready()
-                except Exception:
-                    pass
-                worker_error = None
-                force_worker = os.getenv("MT_FORCE_MANGA_OCR_WORKER") == "1"
-                try:
-                    if force_worker:
-                        raise RuntimeError("Forced MangaOCR worker mode.")
-                    ocr_engine = MangaOcrEngine(self._settings.use_gpu)
-                except Exception as exc:
-                    if _is_torch_missing(exc):
-                        worker_error = exc
-                        ocr_engine = None
-                    else:
-                        try:
-                            from app.ocr.manga_ocr_worker import MangaOcrWorker
-                            if force_worker:
-                                self.message.emit("MangaOCR worker mode forced for this run.")
-                            else:
-                                self.message.emit("MangaOCR in-process failed; using worker process.")
-                            ocr_engine = MangaOcrWorker(use_gpu=self._settings.use_gpu)
-                        except Exception as inner_exc:
-                            worker_error = inner_exc
-                            ocr_engine = None
-                    if ocr_engine is None:
-                        if _is_torch_missing(exc) or _is_torch_missing(worker_error):
-                            self.message.emit(
-                                "MangaOCR unavailable (PyTorch not installed). Falling back to PaddleOCR."
-                            )
-                        else:
-                            self.message.emit(_friendly_model_error(worker_error or exc))
-                            self.message.emit("MangaOCR failed; falling back to PaddleOCR.")
-                        try:
-                            from app.ocr.paddle_ocr_recognizer import PaddleOcrRecognizer
-                            ocr_engine = PaddleOcrRecognizer(self._settings.use_gpu)
-                            self._settings.ocr_engine = "PaddleOCR"
-                        except Exception as fallback_exc:
-                            self.message.emit(_friendly_model_error(fallback_exc))
-                            return
-            else:
-                try:
-                    from app.ocr.paddle_ocr_recognizer import PaddleOcrRecognizer
-                    ocr_engine = PaddleOcrRecognizer(self._settings.use_gpu)
-                except Exception as inner_exc:
-                    self.message.emit(_friendly_model_error(inner_exc))
-                    return
+            try:
+                ocr_engine = _create_selected_ocr_engine(self._settings, self.message.emit)
+                self._settings.ocr_engine = _normalize_ocr_engine_name(self._settings.ocr_engine)
+            except Exception as inner_exc:
+                self.message.emit(_friendly_model_error(inner_exc))
+                return
 
             if self._settings.font_detection != "off":
                 try:
@@ -518,26 +528,17 @@ class PipelineWorker(QtCore.QThread):
                     font_detector = None
 
             try:
-                if self._settings.detector_engine == "ComicTextDetector":
-                    from app.detect.comic_text_detector import ComicTextDetector
-                    detector = ComicTextDetector(self._settings.use_gpu)
-                else:
-                    from app.detect.paddle_detector import PaddleTextDetector
-                    detector = PaddleTextDetector(self._settings.use_gpu)
+                if self._settings.detector_engine != "ComicTextDetector":
+                    self.message.emit(
+                        f"Detector '{self._settings.detector_engine}' is no longer available; using ComicTextDetector."
+                    )
+                    self._settings.detector_engine = "ComicTextDetector"
+                from app.detect.comic_text_detector import ComicTextDetector
+                detector = ComicTextDetector(self._settings.use_gpu)
             except Exception as exc:
                 self.message.emit(_friendly_model_error(exc))
                 return
-            background_detector = None
-            if not self._settings.filter_background:
-                if self._settings.detector_engine == "PaddleOCR":
-                    background_detector = detector
-                else:
-                    try:
-                        from app.detect.paddle_detector import PaddleTextDetector
-                        background_detector = PaddleTextDetector(self._settings.use_gpu)
-                    except Exception as exc:
-                        self.message.emit(_friendly_model_error(exc))
-                        background_detector = None
+            background_detector = detector if not self._settings.filter_background else None
 
             try:
                 if self._settings.translator_backend == "GGUF":
@@ -1805,10 +1806,10 @@ def _lang_code(label: str) -> str:
 def _friendly_model_error(exc: Exception) -> str:
     text = str(exc)
     lowered = text.lower()
-    if "paddleocr" in lowered:
-        return "PaddleOCR is not installed. Install it with: pip install paddleocr"
-    if "export_model.py" in lowered or "jit.save" in lowered:
-        return "PaddleOCR export failed. Try unchecking 'Enable GPU when available' and retry."
+    if "paddleocr-vl" in lowered or "paddleocr_vl" in lowered or "paddle ocr-vl" in lowered:
+        return f"PaddleOCR-VL failed to initialize: {text}"
+    if "llama-server" in lowered:
+        return f"PaddleOCR-VL runtime failed: {text}"
     if "failed to load torch" in lowered:
         return (
             "Torch failed to load (DLL dependency error). Restart the app after installing conda PyTorch. "
@@ -1816,13 +1817,13 @@ def _friendly_model_error(exc: Exception) -> str:
         )
     if "no module named 'torch'" in lowered:
         return (
-            "PyTorch is not installed in the current environment. Install it or switch OCR Engine to PaddleOCR. "
+            "PyTorch is not installed in the current environment. Install it or switch OCR Engine to PaddleOCR-VL. "
             "Suggested: pip install -U torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121"
         )
     if "cve-2025-32434" in lowered or "upgrade torch to at least v2.6" in lowered:
         return (
             "MangaOCR hit the new torch.load safety restriction. YomiFrame will try a local safetensors "
-            "compatibility copy first; if that fails, upgrade torch to 2.6+ or switch OCR Engine to PaddleOCR."
+            "compatibility copy first; if that fails, upgrade torch to 2.6+ or switch OCR Engine to PaddleOCR-VL."
         )
     if "manga-ocr" in lowered or "manga_ocr" in lowered:
         return f"MangaOCR failed to load: {text}"
@@ -1848,7 +1849,7 @@ def _friendly_model_error(exc: Exception) -> str:
     if "numpy" in lowered and "abi" in lowered:
         return (
             "NumPy ABI mismatch. Reinstall numpy and the OCR deps. "
-            "Suggested: pip install -U numpy==1.26.4 paddleocr manga-ocr"
+            "Suggested: pip install -U numpy==1.26.4 manga-ocr"
         )
     if "shm.dll" in lowered or "winerror 127" in lowered:
         return (
@@ -2162,7 +2163,6 @@ def _load_style_guide(path: str, target_lang: str = ""):
     return default_style_guide()
 
 
-_paddle_fallback_instance = None
 _ocr_debug_counter = 0
 
 
@@ -2355,6 +2355,11 @@ def _begin_scoped_ocr_trace(
         "crop_save_error": crop_error,
         "ocr_text": "",
         "ocr_confidence": None,
+        "ocr_backend": "",
+        "ocr_model_path": "",
+        "ocr_mmproj_path": "",
+        "ocr_endpoint": "",
+        "ocr_prompt_version": "",
         "ocr_transaction_state": "",
         "ocr_transaction_reason": "",
         "ocr_outcome_class": "",
@@ -2431,22 +2436,19 @@ def _recognize_with_fallback(
     debug_context: dict | None = None,
     trace_context: dict | None = None,
 ) -> tuple[str, float]:
-    """
-    OCR recognition using MangaOCR.
-    For wide boxes (impact text), compares MangaOCR and PaddleOCR results
-    and picks the one with more valid Japanese characters.
-    """
-    global _paddle_fallback_instance, _ocr_debug_counter
+    """OCR recognition using the selected engine only."""
+    global _ocr_debug_counter
     text = ""
     conf = 1.0
     trace_record = _begin_scoped_ocr_trace(debug_context, crop, bbox, trace_context)
-    
-    # Detect wide boxes (likely impact/title text)
-    is_wide_box = False
-    if bbox and len(bbox) >= 4:
-        x, y, w, h = bbox[:4]
-        if h > 0 and w > h * 2.5:  # Width > 2.5x height (stricter threshold)
-            is_wide_box = True
+    if trace_record is not None:
+        if hasattr(ocr_engine, "backend_metadata"):
+            try:
+                trace_record.update(ocr_engine.backend_metadata())
+            except Exception:
+                trace_record["ocr_backend"] = ocr_engine.__class__.__name__
+        else:
+            trace_record["ocr_backend"] = ocr_engine.__class__.__name__
     
     # DEBUG: Save crop images
     if settings and getattr(settings, 'debug_ocr', False):
@@ -2462,73 +2464,15 @@ def _recognize_with_fallback(
         except Exception as e:
             print(f"[OCR DEBUG] Failed to save crop: {e}")
     
-    # Use MangaOCR (primary engine)
-    # Match original repo: No padding. Pass crop directly.
-    padded_main = crop
-
     if hasattr(ocr_engine, "recognize_with_confidence"):
-        text, conf = ocr_engine.recognize_with_confidence(padded_main)
+        text, conf = ocr_engine.recognize_with_confidence(crop)
     else:
-        text = ocr_engine.recognize(padded_main)
+        text = ocr_engine.recognize(crop)
         conf = 1.0
-    
-    # DEBUG: Log OCR result
-    if settings and getattr(settings, 'debug_ocr', False):
-        print(f"[OCR DEBUG] bbox={bbox} -> MangaOCR='{text}' conf={conf:.3f}")
-    
-    # For wide boxes (impact text), try PaddleOCR ONLY if MangaOCR fails or is weak
-    # "Extreme cases" fallback as requested
-    if is_wide_box and settings:
-        manga_score = _is_valid_japanese(text)
-        
-        # Only try fallback if MangaOCR result is poor
-        # Threshold: < 0.5 valid Japanese OR very short text (< 2 chars)
-        if manga_score < 0.5 or len(text.strip()) < 2:
-            if _paddle_fallback_instance is None:
-                try:
-                    from app.ocr.paddle_ocr_recognizer import PaddleOcrRecognizer
-                    _paddle_fallback_instance = PaddleOcrRecognizer(settings.use_gpu if settings else False)
-                except Exception as e:
-                    print(f"[OCR] Failed to load PaddleOCR: {e}")
-            
-            if _paddle_fallback_instance:
-                try:
-                    p_text = _paddle_fallback_instance.recognize(padded_main)
-                    p_text = p_text.replace(" ", "") if p_text else ""
-                    
-                    paddle_score = _is_valid_japanese(p_text)
-                    manga_stripped = text.replace(" ", "")
-                    
-                    if settings and getattr(settings, 'debug_ocr', False):
-                        print(f"[OCR DEBUG] Fallback Triggered | MangaOCR='{text}'({manga_score:.2f}) vs PaddleOCR='{p_text}'({paddle_score:.2f})")
-                    
-                    # Only switch if PaddleOCR is significantly better
-                    if paddle_score > manga_score and len(p_text) >= len(manga_stripped):
-                        if settings and getattr(settings, 'debug_ocr', False):
-                            print(f"[OCR DEBUG] Using PaddleOCR result (Rescue)")
-                        text = p_text
-                        conf = 0.9
-                except Exception:
-                    pass
-                finally:
-                    # CRITICAL: Unload PaddleOCR immediately to prevent VRAM leak/contention
-                    # This fallback is rare, so we prioritize memory over reload speed
-                    try:
-                        if hasattr(_paddle_fallback_instance, "unload"):
-                            _paddle_fallback_instance.unload()
-                        del _paddle_fallback_instance
-                        _paddle_fallback_instance = None
-                        import gc
-                        gc.collect()
-                    except Exception:
-                        pass
-                    _paddle_fallback_instance = None
-        else:
-             if settings and getattr(settings, 'debug_ocr', False):
-                 print(f"[OCR DEBUG] Skipping PaddleOCR fallback (MangaOCR Score {manga_score:.2f} >= 0.5)")
 
     if settings and getattr(settings, 'debug_ocr', False):
-         print(f"[OCR CRITICAL] Chosen Text: '{text}' (ValidScore: {_is_valid_japanese(text):.2f}) for bbox={bbox}")
+         backend = getattr(ocr_engine, "backend_name", ocr_engine.__class__.__name__)
+         print(f"[OCR DEBUG] bbox={bbox} backend={backend} text='{text}' conf={conf:.3f}")
 
     cleaned_text = _clean_ocr_text(text)
     _finish_scoped_ocr_trace(debug_context, trace_record, cleaned_text, conf)
@@ -3140,6 +3084,14 @@ def _append_parent_boundary_ocr_source_regions(
             },
         )
         add_timing(debug_context, "ocr_time", time.time() - ocr_start)
+        ocr_backend_meta = {}
+        if hasattr(ocr_engine, "backend_metadata"):
+            try:
+                ocr_backend_meta = dict(ocr_engine.backend_metadata())
+            except Exception:
+                ocr_backend_meta = {}
+        if not ocr_backend_meta:
+            ocr_backend_meta = {"ocr_backend": ocr_engine.__class__.__name__}
         ocr_text = _clean_ocr_text(str(ocr_text or ""))
         state, reason = _ocr_transaction_state_for_text_area_route(ocr_text, ocr_conf, route)
         assignment = _parent_boundary_ocr_assignment(
@@ -3186,6 +3138,9 @@ def _append_parent_boundary_ocr_source_regions(
             quality_action=quality_action,
             quality_reasons=quality_reasons,
         )
+        for meta_key, meta_value in ocr_backend_meta.items():
+            region[meta_key] = meta_value
+            region.setdefault("render", {})[meta_key] = meta_value
         if debug_context is not None:
             debug_context.setdefault("scoped_ocr_candidates", []).append(
                 build_scoped_ocr_candidate(
@@ -3206,6 +3161,7 @@ def _append_parent_boundary_ocr_source_regions(
                     "parent_ocr_source_quality_state": quality_state,
                     "parent_ocr_source_quality_action": quality_action,
                     "parent_ocr_source_quality_reason_codes": list(quality_reasons),
+                    **ocr_backend_meta,
                 }
             )
         regions.append(region)
@@ -3223,6 +3179,11 @@ def _append_parent_boundary_ocr_source_regions(
                 "source_quality_state": quality_state,
                 "source_quality_action": quality_action,
                 "source_quality_reason_codes": list(quality_reasons),
+                "ocr_backend": ocr_backend_meta.get("ocr_backend", ""),
+                "ocr_model_path": ocr_backend_meta.get("ocr_model_path", ""),
+                "ocr_mmproj_path": ocr_backend_meta.get("ocr_mmproj_path", ""),
+                "ocr_endpoint": ocr_backend_meta.get("ocr_endpoint", ""),
+                "ocr_prompt_version": ocr_backend_meta.get("ocr_prompt_version", ""),
             }
         )
     result = {"attempted": len(parent_nodes), "created": created, "skipped": skipped, "records": records}
@@ -18406,17 +18367,6 @@ def _detect_with_scale(detector, image_path: str, image_size: tuple[int, int], t
     return detections
 
 
-def _get_detector_fallback(detector, use_gpu: bool):
-    fallback = getattr(detector, "_runtime_fallback_detector", None)
-    if fallback is not None:
-        return fallback
-    from app.detect.paddle_detector import PaddleTextDetector
-
-    fallback = PaddleTextDetector(use_gpu)
-    setattr(detector, "_runtime_fallback_detector", fallback)
-    return fallback
-
-
 def _detect_regions(
     detector,
     image_path: str,
@@ -18425,9 +18375,6 @@ def _detect_regions(
     use_gpu: bool = False,
     message_callback=None,
 ):
-    if getattr(detector, "_runtime_fallback_active", False):
-        fallback = _get_detector_fallback(detector, use_gpu)
-        return _detect_with_scale(fallback, image_path, image_size, target_long=input_size)
     try:
         if hasattr(detector, "detect"):
             try:
@@ -18437,17 +18384,12 @@ def _detect_regions(
         return _detect_with_scale(detector, image_path, image_size, target_long=input_size)
     except Exception as exc:
         detector_name = detector.__class__.__name__
-        if detector_name != "ComicTextDetector":
-            raise
-        logger.warning("Detector failed on %s with %s. Falling back to PaddleTextDetector.", image_path, exc)
         if message_callback is not None:
             try:
-                message_callback(f"ComicTextDetector failed on {os.path.basename(image_path)}; using Paddle fallback.")
+                message_callback(f"{detector_name} failed on {os.path.basename(image_path)}: {exc}")
             except Exception:
                 pass
-        fallback = _get_detector_fallback(detector, use_gpu)
-        setattr(detector, "_runtime_fallback_active", True)
-        return _detect_with_scale(fallback, image_path, image_size, target_long=input_size)
+        raise
 
 
 def _classify_region(

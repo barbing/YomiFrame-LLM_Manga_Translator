@@ -5,7 +5,12 @@ from __future__ import annotations
 import os
 from typing import Iterable, Optional
 
-from app.config.defaults import MANGA_OCR_FILES
+from app.config.defaults import (
+    MANGA_OCR_FILES,
+    PADDLE_OCR_VL_MMPROJ_FILE,
+    PADDLE_OCR_VL_MODEL_FILE,
+    PADDLE_OCR_VL_REPO_ID,
+)
 
 
 def _app_root() -> str:
@@ -41,7 +46,6 @@ def _first_dir_with_files(dirs: Iterable[str], required_files: Iterable[str]) ->
             return directory
     return None
 
-
 def resolve_manga_ocr_system_ref() -> Optional[str]:
     snapshot = _first_dir_with_files(
         _hf_snapshot_dirs("kha-white", "manga-ocr-base"),
@@ -57,6 +61,67 @@ def resolve_manga_ocr_local_dir(base_dir: Optional[str] = None) -> Optional[str]
     if _first_dir_with_files([target], MANGA_OCR_FILES):
         return target
     return None
+
+
+def _paddle_ocr_vl_local_dir(base_dir: Optional[str] = None) -> str:
+    return os.path.join(base_dir or models_root(), "paddleocr-vl-1.6-gguf")
+
+
+def _paddle_ocr_vl_snapshot_dirs() -> list[str]:
+    user, repo = PADDLE_OCR_VL_REPO_ID.split("/", 1)
+    return _hf_snapshot_dirs(user, repo)
+
+
+def resolve_paddle_ocr_vl_model_file(base_dir: Optional[str] = None) -> Optional[str]:
+    override = os.environ.get("MT_PADDLEOCR_VL_MODEL")
+    if override and os.path.isfile(override):
+        return override
+    local_path = os.path.join(_paddle_ocr_vl_local_dir(base_dir), PADDLE_OCR_VL_MODEL_FILE)
+    if os.path.isfile(local_path):
+        return local_path
+    snapshot = _first_dir_with_files(_paddle_ocr_vl_snapshot_dirs(), [PADDLE_OCR_VL_MODEL_FILE])
+    if snapshot:
+        return os.path.join(snapshot, PADDLE_OCR_VL_MODEL_FILE)
+    return None
+
+
+def resolve_paddle_ocr_vl_mmproj_file(base_dir: Optional[str] = None) -> Optional[str]:
+    override = os.environ.get("MT_PADDLEOCR_VL_MMPROJ")
+    if override and os.path.isfile(override):
+        return override
+    local_path = os.path.join(_paddle_ocr_vl_local_dir(base_dir), PADDLE_OCR_VL_MMPROJ_FILE)
+    if os.path.isfile(local_path):
+        return local_path
+    snapshot = _first_dir_with_files(_paddle_ocr_vl_snapshot_dirs(), [PADDLE_OCR_VL_MMPROJ_FILE])
+    if snapshot:
+        return os.path.join(snapshot, PADDLE_OCR_VL_MMPROJ_FILE)
+    return None
+
+
+def resolve_llama_server_executable(base_dir: Optional[str] = None) -> Optional[str]:
+    override = os.environ.get("MT_PADDLEOCR_VL_LLAMA_SERVER")
+    if override and os.path.isfile(override):
+        return override
+    root = os.path.join(base_dir or models_root(), "llama.cpp")
+    if not os.path.isdir(root):
+        return None
+    candidates: list[str] = []
+    for current_root, _dirs, files in os.walk(root):
+        for name in files:
+            if name.lower() == "llama-server.exe":
+                candidates.append(os.path.join(current_root, name))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda path: ("cuda" not in path.lower(), len(path), path.lower()))
+    return candidates[0]
+
+
+def has_paddle_ocr_vl_runtime(base_dir: Optional[str] = None) -> bool:
+    return bool(
+        resolve_paddle_ocr_vl_model_file(base_dir)
+        and resolve_paddle_ocr_vl_mmproj_file(base_dir)
+        and resolve_llama_server_executable(base_dir)
+    )
 
 
 def resolve_ner_system_snapshot() -> Optional[str]:
@@ -88,82 +153,3 @@ def resolve_ner_local_dir(model_dir: Optional[str] = None) -> Optional[str]:
         if any(os.path.exists(os.path.join(candidate, name)) for name in optional_weights):
             return candidate
     return None
-
-
-def _paddle_home() -> str:
-    return os.path.join(os.path.expanduser("~"), ".paddleocr", "whl")
-
-
-def resolve_paddle_system_det_dir() -> Optional[str]:
-    candidates = [
-        os.path.join(_paddle_home(), "det", "ch", "ch_PP-OCRv4_det_infer"),
-        os.path.join(_paddle_home(), "det", "ch", "ch_PP-OCRv3_det_infer"),
-        os.path.join(_paddle_home(), "det", "ml", "Multilingual_PP-OCRv3_det_infer"),
-    ]
-    for candidate in candidates:
-        if os.path.isdir(candidate):
-            return candidate
-    return None
-
-
-def resolve_paddle_local_det_dir(base_dir: Optional[str] = None) -> Optional[str]:
-    root = os.path.join(base_dir or models_root(), "paddleocr")
-    candidates = [
-        os.path.join(root, "ch_PP-OCRv4_det_infer"),
-        os.path.join(root, "Multilingual_PP-OCRv3_det_infer"),
-    ]
-    for candidate in candidates:
-        if os.path.isdir(candidate):
-            return candidate
-    return None
-
-
-def resolve_paddle_system_rec_dir(requested_lang: str = "auto") -> tuple[Optional[str], Optional[str]]:
-    roots = {
-        "japan": [
-            os.path.join(_paddle_home(), "rec", "japan", "japan_PP-OCRv4_rec_infer"),
-            os.path.join(_paddle_home(), "rec", "japan", "japan_PP-OCRv3_rec_infer"),
-        ],
-        "ch": [
-            os.path.join(_paddle_home(), "rec", "ch", "ch_PP-OCRv4_rec_infer"),
-            os.path.join(_paddle_home(), "rec", "ch", "ch_PP-OCRv3_rec_infer"),
-        ],
-    }
-    order = [requested_lang] if requested_lang in roots else ["japan", "ch"]
-    for lang in order:
-        for candidate in roots[lang]:
-            if os.path.isdir(candidate):
-                return candidate, lang
-    return None, None
-
-
-def resolve_paddle_local_rec_dir(
-    requested_lang: str = "auto",
-    base_dir: Optional[str] = None,
-) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    root = os.path.join(base_dir or models_root(), "paddleocr")
-    options = {
-        "japan": [
-            os.path.join(root, "japan_PP-OCRv4_rec_infer"),
-            os.path.join(root, "japan_PP-OCRv3_rec_infer"),
-        ],
-        "ch": [
-            os.path.join(root, "ch_PP-OCRv4_rec_infer"),
-            os.path.join(root, "ch_PP-OCRv3_rec_infer"),
-        ],
-    }
-    order = [requested_lang] if requested_lang in options else ["japan", "ch"]
-    for lang in order:
-        for candidate in options[lang]:
-            if os.path.isdir(candidate):
-                cls_dir = os.path.join(root, "ch_ppocr_mobile_v2.0_cls_infer")
-                return candidate, lang, cls_dir if os.path.isdir(cls_dir) else None
-    return None, None, None
-
-
-def has_paddle_runtime_models(requested_lang: str = "auto", base_dir: Optional[str] = None) -> bool:
-    if resolve_paddle_system_det_dir() and resolve_paddle_system_rec_dir(requested_lang)[0]:
-        return True
-    return bool(
-        resolve_paddle_local_det_dir(base_dir) and resolve_paddle_local_rec_dir(requested_lang, base_dir)[0]
-    )

@@ -4,7 +4,12 @@ import importlib.util
 import os
 from PySide6 import QtCore, QtGui, QtWidgets
 from app.config.defaults import get_defaults
-from app.pipeline.controller import PipelineController, PipelineSettings
+from app.pipeline.controller import (
+    OCR_ENGINE_CHOICES,
+    PipelineController,
+    PipelineSettings,
+    _normalize_ocr_engine_name,
+)
 from app.models.ollama import list_models
 from app.ui.theme import apply_dark_palette, apply_light_palette
 from app.io.project import load_project
@@ -110,14 +115,12 @@ class MainWindow(QtWidgets.QMainWindow):
         missing = []
         if not downloader.check_comic_text_detector(models_dir):
             missing.append("comic_text_detector")
-        if not downloader.check_manga_ocr(models_dir):
-            missing.append("manga_ocr")
+        if not downloader.check_paddle_ocr_vl(models_dir):
+            missing.append("paddle_ocr_vl")
         if self._ai_inpaint_runtime_available() and not downloader.check_big_lama(models_dir):
             missing.append("big_lama")
         if not downloader.check_ner(models_dir):
             missing.append("ner")
-        if not downloader.check_paddle_ocr(models_dir):
-            missing.append("paddle")
             
         if missing:
             reply = QtWidgets.QMessageBox.warning(
@@ -164,6 +167,8 @@ class MainWindow(QtWidgets.QMainWindow):
              downloader.prepare_comic_text_detector(models_dir)
         if "manga_ocr" in model_keys:
              downloader.prepare_manga_ocr(models_dir)
+        if "paddle_ocr_vl" in model_keys:
+             downloader.prepare_paddle_ocr_vl(models_dir)
         if "big_lama" in model_keys:
              downloader.prepare_big_lama(models_dir)
         if "sakura" in model_keys:
@@ -172,9 +177,7 @@ class MainWindow(QtWidgets.QMainWindow):
              downloader.prepare_qwen(models_dir)
         if "ner" in model_keys:
              downloader.prepare_ner(models_dir)
-        if "paddle" in model_keys:
-             downloader.prepare_paddle(models_dir)
-            
+
         downloader.moveToThread(self._download_thread)
         
         # Connect signal to SLOT (running in new thread context)
@@ -760,7 +763,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setColumnStretch(0, 1)
         layout.setColumnStretch(1, 1)
         self.detector_engine = QtWidgets.QComboBox()
-        self.detector_engine.addItems(["PaddleOCR", "ComicTextDetector"])
+        self.detector_engine.addItems(["ComicTextDetector"])
         self.detector_engine.setCurrentText(self._defaults.detector_engine)
         
         self.detector_input_size = QtWidgets.QComboBox()
@@ -772,7 +775,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(QtWidgets.QLabel("Text Detector"), 0, 0)
         layout.addWidget(det_layout, 1, 0)
         self.ocr_engine = QtWidgets.QComboBox()
-        self.ocr_engine.addItems(["PaddleOCR", "MangaOCR"])
+        self.ocr_engine.addItems(list(OCR_ENGINE_CHOICES))
         self.ocr_engine.setCurrentText(self._defaults.ocr_engine)
         layout.addWidget(QtWidgets.QLabel("OCR Engine"), 0, 1)
         layout.addWidget(self.ocr_engine, 1, 1)
@@ -833,7 +836,7 @@ class MainWindow(QtWidgets.QMainWindow):
         l_core = QtWidgets.QGridLayout(grp_core)
         
         self.settings_detector_engine = QtWidgets.QComboBox()
-        self.settings_detector_engine.addItems(["PaddleOCR", "ComicTextDetector"])
+        self.settings_detector_engine.addItems(["ComicTextDetector"])
         self.settings_detector_engine.setCurrentText(self._defaults.detector_engine)
         
         self.settings_detector_input_size = QtWidgets.QComboBox()
@@ -841,7 +844,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings_detector_input_size.setCurrentText("640")
         
         self.settings_ocr_engine = QtWidgets.QComboBox()
-        self.settings_ocr_engine.addItems(["PaddleOCR", "MangaOCR"])
+        self.settings_ocr_engine.addItems(list(OCR_ENGINE_CHOICES))
         self.settings_ocr_engine.setCurrentText(self._defaults.ocr_engine)
         
         l_core.addWidget(QtWidgets.QLabel("Text Detector"), 0, 0)
@@ -2580,7 +2583,7 @@ class MainWindow(QtWidgets.QMainWindow):
             filter_background=self.filter_background.isChecked(),
             filter_strength=self.filter_strength.currentText(),
             detector_engine=self.detector_engine.currentText(),
-            ocr_engine=self.ocr_engine.currentText(),
+            ocr_engine=_normalize_ocr_engine_name(self.ocr_engine.currentText()),
             inpaint_mode=self.inpaint_mode.currentText(),
             font_detection=self.font_detection.currentText(),
             translator_backend=self.translator_backend.currentText(),
@@ -2804,7 +2807,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if message.startswith("Failed") or "required" in message:
             self._set_running(False)
         if (
-            "PaddleOCR is not installed" in message
+            "PaddleOCR-VL failed" in message
+            or "PaddleOCR-VL runtime failed" in message
             or "Failed to initialize models" in message
             or "NumPy ABI mismatch" in message
             or "PyTorch DLL load failed" in message
@@ -2830,7 +2834,7 @@ class MainWindow(QtWidgets.QMainWindow):
         settings.setValue("target_lang", self.target_lang.currentText())
         settings.setValue("detector_engine", self.detector_engine.currentText())
         settings.setValue("detector_input_size", self.detector_input_size.currentText())
-        settings.setValue("ocr_engine", self.ocr_engine.currentText())
+        settings.setValue("ocr_engine", _normalize_ocr_engine_name(self.ocr_engine.currentText()))
         settings.setValue("translator_backend", self.translator_backend.currentText())
         settings.setValue("inpaint_mode", self.inpaint_mode.currentText())
         settings.setValue("filter_strength", self.filter_strength.currentText())

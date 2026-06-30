@@ -9,8 +9,6 @@ numpy==1.26.4
 
 # OCR / detection
 manga-ocr
-paddleocr
-paddlepaddle
 onnxruntime
 
 # Translation backends
@@ -36,5 +34,5 @@ unidic-lite>=1.0.8
 # Notes:
 # - This file keeps CPU-safe defaults where possible.
 # - On Windows, GPU users should usually install CUDA-enabled torch,
-#   paddlepaddle-gpu, and a GPU-capable llama-cpp-python build via conda/pip
+#   and a GPU-capable llama-cpp-python build via conda/pip
 #   for their own environment instead of relying on these default wheels.

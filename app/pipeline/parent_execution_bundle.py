@@ -47,6 +47,11 @@ class ParentExecutionBundle:
     source_quality_action: str = "translate"
     source_contract_owner: str = ""
     source_contract_region_id: str = ""
+    ocr_backend: str = ""
+    ocr_model_path: str = ""
+    ocr_mmproj_path: str = ""
+    ocr_endpoint: str = ""
+    ocr_prompt_version: str = ""
     source_quality_reason_codes: list[str] = field(default_factory=list)
     translation_required: bool = False
     cleanup_required: bool = False
@@ -91,6 +96,11 @@ class ParentExecutionBundle:
             "source_quality_action": self.source_quality_action,
             "source_contract_owner": self.source_contract_owner,
             "source_contract_region_id": self.source_contract_region_id,
+            "ocr_backend": self.ocr_backend,
+            "ocr_model_path": self.ocr_model_path,
+            "ocr_mmproj_path": self.ocr_mmproj_path,
+            "ocr_endpoint": self.ocr_endpoint,
+            "ocr_prompt_version": self.ocr_prompt_version,
             "source_quality_reason_codes": list(self.source_quality_reason_codes),
             "translation_required": self.translation_required,
             "cleanup_required": self.cleanup_required,
@@ -218,6 +228,11 @@ class ParentExecutionBundle:
             "source_conservation_status": self.source_quality_state,
             "source_contract_owner": self.source_contract_owner,
             "source_contract_region_id": self.source_contract_region_id,
+            "ocr_backend": self.ocr_backend,
+            "ocr_model_path": self.ocr_model_path,
+            "ocr_mmproj_path": self.ocr_mmproj_path,
+            "ocr_endpoint": self.ocr_endpoint,
+            "ocr_prompt_version": self.ocr_prompt_version,
             "source_quality_reason_codes": list(self.source_quality_reason_codes),
             "source_glyph_mask_ids": list(self.source_glyph_mask_ids),
             "cleanup_job_ids": list(self.cleanup_job_ids),
@@ -282,6 +297,11 @@ class ParentExecutionBundle:
                 "logical_text_source_quality_action": self.source_quality_action,
                 "source_contract_owner": self.source_contract_owner,
                 "source_contract_region_id": self.source_contract_region_id,
+                "ocr_backend": self.ocr_backend,
+                "ocr_model_path": self.ocr_model_path,
+                "ocr_mmproj_path": self.ocr_mmproj_path,
+                "ocr_endpoint": self.ocr_endpoint,
+                "ocr_prompt_version": self.ocr_prompt_version,
                 "source_quality_reason_codes": list(self.source_quality_reason_codes),
                 "wrap_mode": "vertical",
             },
@@ -731,6 +751,11 @@ def _bundle_from_finalized_parent(
             primary_region.get("parent_ocr_source_quality_reason_codes")
             or primary_render.get("parent_ocr_source_quality_reason_codes")
         )
+    ocr_backend = str(primary_region.get("ocr_backend") or primary_render.get("ocr_backend") or "")
+    ocr_model_path = str(primary_region.get("ocr_model_path") or primary_render.get("ocr_model_path") or "")
+    ocr_mmproj_path = str(primary_region.get("ocr_mmproj_path") or primary_render.get("ocr_mmproj_path") or "")
+    ocr_endpoint = str(primary_region.get("ocr_endpoint") or primary_render.get("ocr_endpoint") or "")
+    ocr_prompt_version = str(primary_region.get("ocr_prompt_version") or primary_render.get("ocr_prompt_version") or "")
     return ParentExecutionBundle(
         page_id=page_id,
         bundle_id=parent_id,
@@ -744,6 +769,11 @@ def _bundle_from_finalized_parent(
         source_quality_action=source_action,
         source_contract_owner=source_contract_owner,
         source_contract_region_id=source_contract_region_id,
+        ocr_backend=ocr_backend,
+        ocr_model_path=ocr_model_path,
+        ocr_mmproj_path=ocr_mmproj_path,
+        ocr_endpoint=ocr_endpoint,
+        ocr_prompt_version=ocr_prompt_version,
         source_quality_reason_codes=source_reason_codes,
         translation_required=bool(getattr(parent, "translation_required", False)),
         cleanup_required=bool(getattr(parent, "cleanup_required", False)),
@@ -804,6 +834,11 @@ def _sync_execution_region_from_bundle(
     record["parent_logical_text_unit_source_text"] = bundle.source_text
     record["source_contract_owner"] = bundle.source_contract_owner
     record["source_contract_region_id"] = bundle.source_contract_region_id
+    record["ocr_backend"] = bundle.ocr_backend
+    record["ocr_model_path"] = bundle.ocr_model_path
+    record["ocr_mmproj_path"] = bundle.ocr_mmproj_path
+    record["ocr_endpoint"] = bundle.ocr_endpoint
+    record["ocr_prompt_version"] = bundle.ocr_prompt_version
     record["source_quality_reason_codes"] = list(bundle.source_quality_reason_codes)
     record["translation"] = bundle.translated_text
     record["translated_text"] = bundle.translated_text
@@ -843,6 +878,11 @@ def _sync_execution_region_from_bundle(
     render["source_text"] = bundle.source_text
     render["source_contract_owner"] = bundle.source_contract_owner
     render["source_contract_region_id"] = bundle.source_contract_region_id
+    render["ocr_backend"] = bundle.ocr_backend
+    render["ocr_model_path"] = bundle.ocr_model_path
+    render["ocr_mmproj_path"] = bundle.ocr_mmproj_path
+    render["ocr_endpoint"] = bundle.ocr_endpoint
+    render["ocr_prompt_version"] = bundle.ocr_prompt_version
     render["source_quality_reason_codes"] = list(bundle.source_quality_reason_codes)
     render["translation"] = bundle.translated_text
     render["translated_text"] = bundle.translated_text
@@ -894,6 +934,11 @@ def _source_candidate_from_region(region: Mapping[str, Any], region_id: str) -> 
             or render.get("parent_boundary_ocr_source_contract")
         ),
         "source_contract_owner": str(region.get("source_contract_owner") or render.get("source_contract_owner") or ""),
+        "ocr_backend": str(region.get("ocr_backend") or render.get("ocr_backend") or ""),
+        "ocr_model_path": str(region.get("ocr_model_path") or render.get("ocr_model_path") or ""),
+        "ocr_mmproj_path": str(region.get("ocr_mmproj_path") or render.get("ocr_mmproj_path") or ""),
+        "ocr_endpoint": str(region.get("ocr_endpoint") or render.get("ocr_endpoint") or ""),
+        "ocr_prompt_version": str(region.get("ocr_prompt_version") or render.get("ocr_prompt_version") or ""),
         "parent_ocr_source_quality_state": str(
             region.get("parent_ocr_source_quality_state")
             or render.get("parent_ocr_source_quality_state")
