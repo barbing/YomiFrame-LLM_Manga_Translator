@@ -717,8 +717,16 @@ def build_text_block_hierarchy(
 
         unresolved = [child for child in children if child.final_state == STATE_UNRESOLVED_REVIEW_ONLY]
         translation_units = [parent.parent_id for parent in parent_units if _parent_is_active_translation_unit(parent)]
-        cleanup_units = [parent.parent_id for parent in parent_units if parent.cleanup_unit and _parent_is_active_translation_unit(parent)]
-        render_units = [parent.parent_id for parent in parent_units if parent.render_unit and _parent_is_active_translation_unit(parent)]
+        cleanup_units = [
+            parent.parent_id
+            for parent in parent_units
+            if parent.cleanup_unit and _parent_is_downstream_execution_obligation(parent)
+        ]
+        render_units = [
+            parent.parent_id
+            for parent in parent_units
+            if parent.render_unit and _parent_is_downstream_execution_obligation(parent)
+        ]
         result = TextBlockHierarchyResult(
             page_id=page_id,
             roots=sorted(roots_by_key.values(), key=lambda root: (root.reading_order_index, root.root_id)),
@@ -804,7 +812,11 @@ def _route_owned_ocr_blocker_can_be_represented_by_parent(
         return False
     if str(parent.role or "") not in {ROLE_SPEECH, ROLE_CAPTION, ROLE_BACKGROUND}:
         return False
-    if not (parent.translation_unit and parent.cleanup_unit and parent.render_unit):
+    if not (parent.cleanup_unit and parent.render_unit):
+        return False
+    if _parent_is_punctuation_identity(parent):
+        return state == "ocr_punctuation_only_blocker"
+    if not parent.translation_unit:
         return False
     parent_status, _parent_reasons, parent_action = _parent_source_coherence(parent.source_text, role=parent.role)
     if parent_status not in {"coherent", "weak"} or parent_action not in {"translate", "translate_with_root_proof"}:
@@ -858,7 +870,14 @@ def _evaluate_root_source_coherence(
             child_by_parent.setdefault(child.parent_id, []).append(child)
 
     for parent in parents:
-        status, reasons, action = _parent_source_coherence(parent.source_text, role=parent.role)
+        if _parent_is_punctuation_identity(parent):
+            status = "coherent"
+            reasons = []
+            action = "identity_punctuation"
+            parent.source_contract_quality_state = parent.source_contract_quality_state or "punctuation_identity_source"
+            parent.source_contract_quality_action = parent.source_contract_quality_action or "identity_punctuation"
+        else:
+            status, reasons, action = _parent_source_coherence(parent.source_text, role=parent.role)
         if _parent_owned_ocr_source_should_translate_with_review(parent, action):
             status = "weak"
             action = "translate_with_review"
@@ -1102,11 +1121,6 @@ def _assign_root_final_state(
         root.root_closeout_blocker = False
         return
     if root.root_is_punctuation_only:
-        if root_is_translatable_route:
-            root.root_final_state = ROOT_FINAL_UNRESOLVED_MEANINGFUL_BLOCKER
-            root.root_final_state_reason = "ocr_punctuation_only_blocker"
-            root.root_closeout_blocker = True
-            return
         if root.root_unresolved_visible_source_count > 0 or root.root_validation_blocker:
             root.root_final_state = ROOT_FINAL_UNRESOLVED_MEANINGFUL_BLOCKER
             root.root_final_state_reason = "punctuation_only_ocr_with_visible_root_text_evidence"
@@ -1173,6 +1187,10 @@ def _parent_is_active_translation_unit(parent: ParentLogicalTextUnit) -> bool:
     return bool(_source_body(parent.source_text) or _valid_short_reaction_or_laugh(parent.source_text))
 
 
+def _parent_is_downstream_execution_obligation(parent: ParentLogicalTextUnit) -> bool:
+    return _parent_is_active_translation_unit(parent) or _parent_is_punctuation_identity(parent)
+
+
 def _parent_owned_ocr_source_should_translate_with_review(parent: ParentLogicalTextUnit, action: str) -> bool:
     if str(parent.source_contract_owner or "") != "parent_logical_text_unit_ocr_source_contract":
         return False
@@ -1196,6 +1214,10 @@ def _parent_owned_ocr_source_should_translate_with_review(parent: ParentLogicalT
 
 
 def _parent_is_punctuation_identity(parent: ParentLogicalTextUnit) -> bool:
+    if str(parent.source_contract_quality_action or "") == "identity_punctuation":
+        return True
+    if str(parent.source_contract_quality_state or "") == "punctuation_identity_source":
+        return True
     text = str(parent.source_text or "").strip()
     if not text:
         return False
@@ -1211,8 +1233,8 @@ def _finalized_parent_record(
     if _parent_is_punctuation_identity(parent):
         state = "punctuation_identity_parent"
         translation_required = False
-        cleanup_required = False
-        render_required = False
+        cleanup_required = True
+        render_required = True
     elif _parent_is_active_translation_unit(parent):
         state = "active_translation_parent"
         translation_required = True
@@ -1625,6 +1647,15 @@ def _is_ellipsis_like_source(text: str) -> bool:
     ellipsis_chars = ".．…‥・･"
     allowed_chars = ellipsis_chars + "—―－-ー〜～?？!！"
     return any(ch in ellipsis_chars for ch in stripped) and all(ch in allowed_chars for ch in stripped)
+
+
+def _canonical_punctuation_identity_source(text: str) -> str:
+    cleaned = _clean_source_text(text)
+    if _is_ellipsis_like_source(cleaned):
+        return cleaned
+    if cleaned and not _source_body(cleaned):
+        return cleaned
+    return "……"
 
 
 def _short_reaction_key(text: str) -> str:
@@ -2096,11 +2127,6 @@ def _assign_root_final_state_dict(
         root["root_final_state_reason"] = "root_policy_preserve_sfx_decorative"
         return
     if punctuation_only:
-        if is_translatable_route:
-            root["root_final_state"] = ROOT_FINAL_UNRESOLVED_MEANINGFUL_BLOCKER
-            root["root_final_state_reason"] = "ocr_punctuation_only_blocker"
-            root["root_closeout_blocker"] = True
-            return
         if int(root.get("root_unresolved_visible_source_count") or 0) > 0 or bool(root.get("root_validation_blocker")):
             root["root_final_state"] = ROOT_FINAL_UNRESOLVED_MEANINGFUL_BLOCKER
             root["root_final_state_reason"] = "punctuation_only_ocr_with_visible_root_text_evidence"
@@ -3145,8 +3171,8 @@ def _materialize_graph_plan_parents(
             _append_unique(parent.reason_codes, parent.unresolved_reason)
         elif _parent_is_punctuation_identity(parent):
             parent.translation_unit = False
-            parent.cleanup_unit = False
-            parent.render_unit = False
+            parent.cleanup_unit = True
+            parent.render_unit = True
             _append_unique(parent.reason_codes, "text_area_graph_punctuation_identity_parent")
         else:
             parent.translation_unit = True
@@ -3421,6 +3447,11 @@ def _graph_parent_owned_ocr_source_from_regions(
         region_box = _bbox(region.get("bbox"))
         if not _graph_region_covers_parent_boundary(region_box, parent_box):
             continue
+        if (
+            str(region.get("parent_ocr_source_quality_action") or "") == "identity_punctuation"
+            or str(region.get("parent_ocr_source_quality_state") or "") == "punctuation_identity_source"
+        ):
+            text = _canonical_punctuation_identity_source(text)
         candidates.append((len(_source_body(text) or text), _graph_region_reading_key(region), region, text))
     if not candidates:
         return None

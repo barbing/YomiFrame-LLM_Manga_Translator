@@ -3259,6 +3259,8 @@ def _parent_boundary_ocr_source_quality(
         return "verified_source", "translate", []
     if state == _OCR_LOW_CONFIDENCE_WARNING_STATE:
         return "usable_source_with_warning", "translate_with_review", [reason or "low_confidence_parent_ocr"]
+    if state == "ocr_punctuation_only_blocker":
+        return "punctuation_identity_source", "identity_punctuation", [reason or "parent_ocr_punctuation_identity"]
     body = _non_punct_chars(ocr_text)
     has_japanese = any(_is_kana(ch) or 0x4E00 <= ord(ch) <= 0x9FFF for ch in body)
     if body and has_japanese:
