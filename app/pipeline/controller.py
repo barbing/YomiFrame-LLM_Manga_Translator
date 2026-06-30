@@ -850,6 +850,7 @@ class PipelineWorker(QtCore.QThread):
                         source_glyph_record_count=len(getattr(source_glyph_mask_result, "masks_by_region", {}) or {}),
                     )
                     cleanup_mask_region_records = _cleanup_mask_region_records_with_protection(execution_regions, debug_context)
+                    component_authorization_start = time.time()
                     component_authorization_map = build_text_area_component_authorization_map(
                         page_id=page_id,
                         text_foreground_segmentation=text_foreground_segmentation_mask,
@@ -857,14 +858,28 @@ class PipelineWorker(QtCore.QThread):
                         page_region_records=cleanup_mask_region_records,
                         cleanup_jobs=cleanup_job_contract_result.jobs,
                     )
+                    component_authorization_elapsed = time.time() - component_authorization_start
+                    _page014_timeout_checkpoint(
+                        "text_area_component_authorization",
+                        "end",
+                        page_id=page_id,
+                        component_count=len(component_authorization_map.components),
+                        elapsed_ms=round(component_authorization_elapsed * 1000.0, 3),
+                    )
                     if debug_context is not None:
                         if not debug_context.get("perf_telemetry_only"):
                             debug_context["text_area_component_authorization_map"] = component_authorization_map.to_audit_dict()
+                        set_timing(
+                            debug_context,
+                            "text_area_component_authorization_time",
+                            component_authorization_elapsed,
+                        )
                         set_count(
                             debug_context,
                             "text_area_component_authorization_components",
                             len(component_authorization_map.components),
                         )
+                    cleanup_mask_module_start = time.time()
                     cleanup_mask_contract_result = build_cleanup_masks(
                         page_id=page_id,
                         job_candidates=cleanup_job_contract_result.jobs,
@@ -875,6 +890,9 @@ class PipelineWorker(QtCore.QThread):
                         page_region_records=cleanup_mask_region_records,
                         component_authorization_map=component_authorization_map,
                     )
+                    cleanup_mask_module_elapsed = time.time() - cleanup_mask_module_start
+                    if debug_context is not None:
+                        set_timing(debug_context, "cleanup_mask_build_time", cleanup_mask_module_elapsed)
                     _page014_timeout_checkpoint(
                         "cleanup_mask_build",
                         "end",
@@ -894,14 +912,17 @@ class PipelineWorker(QtCore.QThread):
                         source_image_path=source_path,
                         image_size=source_image_size,
                     )
+                    render_eligibility_elapsed = time.time() - render_eligibility_start
                     _page014_timeout_checkpoint(
                         "render_eligibility_build",
                         "end",
                         page_id=page_id,
                         decision_count=len(getattr(render_eligibility_contract_result, "decisions", []) or []),
                         suppressed_count=len(getattr(render_eligibility_contract_result, "suppressed_records", []) or []),
-                        elapsed_ms=round((time.time() - render_eligibility_start) * 1000.0, 3),
+                        elapsed_ms=round(render_eligibility_elapsed * 1000.0, 3),
                     )
+                    if debug_context is not None:
+                        set_timing(debug_context, "render_eligibility_contract_time", render_eligibility_elapsed)
                     cleanup_plan_start = time.time()
                     cleanup_plan_mask_contracts = cleanup_mask_contract_result
                     _page014_timeout_checkpoint(
@@ -920,13 +941,16 @@ class PipelineWorker(QtCore.QThread):
                         render_eligibility=render_eligibility_contract_result,
                         inpaint_mode=self._settings.inpaint_mode,
                     )
+                    cleanup_plan_elapsed = time.time() - cleanup_plan_start
                     _page014_timeout_checkpoint(
                         "cleanup_plan_build",
                         "end",
                         page_id=page_id,
                         plan_count=len(getattr(cleanup_plan_contract_result, "plans", []) or []),
-                        elapsed_ms=round((time.time() - cleanup_plan_start) * 1000.0, 3),
+                        elapsed_ms=round(cleanup_plan_elapsed * 1000.0, 3),
                     )
+                    if debug_context is not None:
+                        set_timing(debug_context, "cleanup_plan_build_time", cleanup_plan_elapsed)
                     cleanup_runtime_start = time.time()
                     runtime_artifact_dir = None
                     upstream_commit_artifact_dir = None
@@ -959,6 +983,7 @@ class PipelineWorker(QtCore.QThread):
                             artifact_dir=runtime_artifact_dir,
                             inpaint_mode=self._settings.inpaint_mode,
                         )
+                        cleanup_runtime_elapsed = time.time() - cleanup_runtime_start
                         _page014_timeout_checkpoint(
                             "cleanup_runtime_contract",
                             "end",
@@ -966,8 +991,10 @@ class PipelineWorker(QtCore.QThread):
                             status_count=len(cleanup_runtime_contract_result.status_records),
                             result_count=len(cleanup_runtime_contract_result.result_records),
                             proof_count=len(cleanup_runtime_contract_result.proof_records),
-                            elapsed_ms=round((time.time() - cleanup_runtime_start) * 1000.0, 3),
+                            elapsed_ms=round(cleanup_runtime_elapsed * 1000.0, 3),
                         )
+                        if debug_context is not None:
+                            set_timing(debug_context, "cleanup_runtime_contract_time", cleanup_runtime_elapsed)
                         render_eligibility_contract_result = _apply_cleanup_runtime_render_blocks(
                             render_eligibility_contract_result,
                             cleanup_runtime_contract_result,
@@ -982,14 +1009,17 @@ class PipelineWorker(QtCore.QThread):
                             artifact_dir=upstream_commit_artifact_dir,
                             excluded_region_ids=_phase5_upstream_protected_region_ids(page_id),
                         )
+                        commit_elapsed = time.time() - commit_start
                         _page014_timeout_checkpoint(
                             "cleanup_upstream_commit",
                             "end",
                             page_id=page_id,
                             committed_count=len(cleanup_upstream_commit_result.commit_records),
                             blocked_count=len(cleanup_upstream_commit_result.blocked_records),
-                            elapsed_ms=round((time.time() - commit_start) * 1000.0, 3),
+                            elapsed_ms=round(commit_elapsed * 1000.0, 3),
                         )
+                        if debug_context is not None:
+                            set_timing(debug_context, "cleanup_upstream_commit_time", commit_elapsed)
                         render_eligibility_contract_result = _apply_cleanup_upstream_commit_render_blocks(
                             render_eligibility_contract_result,
                             cleanup_upstream_commit_result,
@@ -1076,11 +1106,6 @@ class PipelineWorker(QtCore.QThread):
                                         cleanup_upstream_commit_failure_reason=blocked_record.get("failure_reason"),
                                         cleanup_runtime_renderer_consumed=False,
                                     )
-                            set_timing(
-                                debug_context,
-                                "cleanup_runtime_contract_time",
-                                time.time() - cleanup_runtime_start,
-                            )
                             set_count(
                                 debug_context,
                                 "cleanup_runtime_result_count",
@@ -1163,7 +1188,7 @@ class PipelineWorker(QtCore.QThread):
                             debug_context["cleanup_plan_contracts"] = cleanup_plan_contract_result.to_audit_dict()
                             debug_context["cleanup_backend_inventory"] = cleanup_plan_contract_result.backend_inventory
                         set_timing(debug_context, "cleanup_mask_contract_time", time.time() - cleanup_contract_start)
-                        set_timing(debug_context, "render_eligibility_contract_time", time.time() - render_eligibility_start)
+                        set_timing(debug_context, "render_eligibility_contract_time", render_eligibility_elapsed)
                         set_count(debug_context, "cleanup_job_contract_count", len(cleanup_job_contract_result.jobs))
                         set_count(debug_context, "cleanup_mask_contract_count", len(cleanup_mask_contract_result.masks))
                         set_count(debug_context, "render_eligibility_suppressed_count", len(render_eligibility_contract_result.suppressed_records))

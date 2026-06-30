@@ -2610,9 +2610,8 @@ def build_text_area_component_authorization_map(
         x, y, w, h, pixel_count = [int(item) for item in stats[label][:5]]
         if pixel_count <= 0:
             continue
-        component_mask = labels == label
         bbox = [x, y, x + w, y + h]
-        candidates = _component_auth_candidates(component_mask, pixel_count, centroids[label], scopes, bbox)
+        candidates = _component_auth_candidates(labels, label, pixel_count, centroids[label], scopes, bbox)
         record = _component_auth_record(
             page_id=str(page_id),
             component_index=len(components),
@@ -3430,7 +3429,8 @@ def _component_auth_family(auth: str) -> str:
 
 
 def _component_auth_candidates(
-    component_mask: Any,
+    labels: Any,
+    component_label: int,
     pixel_count: int,
     centroid: Sequence[float],
     scopes: Sequence[Mapping[str, Any]],
@@ -3446,19 +3446,14 @@ def _component_auth_candidates(
         x0, y0, x1, y1 = [int(item) for item in bbox[:4]]
         if x1 <= x0 or y1 <= y0:
             continue
-        scope_mask = scope.get("scope_mask")
-        if scope_mask is not None:
-            try:
-                overlap = int(np.count_nonzero(np.logical_and(component_mask, scope_mask > 0)))
-                ix = max(0, min(scope_mask.shape[1] - 1, int(round(cx))))
-                iy = max(0, min(scope_mask.shape[0] - 1, int(round(cy))))
-                centroid_inside = bool(scope_mask[iy, ix] > 0)
-            except Exception:
-                overlap = int(np.count_nonzero(component_mask[y0:y1, x0:x1]))
-                centroid_inside = x0 <= cx < x1 and y0 <= cy < y1
-        else:
-            overlap = int(np.count_nonzero(component_mask[y0:y1, x0:x1]))
-            centroid_inside = x0 <= cx < x1 and y0 <= cy < y1
+        overlap, centroid_inside = _component_auth_overlap_for_label(
+            labels=labels,
+            component_label=component_label,
+            component_bbox=component_bbox,
+            scope_bbox=(x0, y0, x1, y1),
+            scope_mask=scope.get("scope_mask"),
+            centroid=(cx, cy),
+        )
         if overlap <= 0 and not centroid_inside:
             continue
         ratio = overlap / float(max(1, pixel_count))
@@ -11390,6 +11385,66 @@ def _caption_localization_candidates_from_plan(plan: Mapping[str, Any]) -> List[
             }
         )
     return candidates
+
+
+def _component_auth_overlap_for_label(
+    *,
+    labels: Any,
+    component_label: int,
+    component_bbox: Sequence[int],
+    scope_bbox: Sequence[int],
+    scope_mask: Any,
+    centroid: Sequence[float],
+) -> Tuple[int, bool]:
+    """Count component/scope overlap without materializing a full-page mask."""
+
+    if np is None:
+        return 0, False
+    cx = float(centroid[0])
+    cy = float(centroid[1])
+    sx0, sy0, sx1, sy1 = [int(item) for item in scope_bbox[:4]]
+    cx0, cy0, cx1, cy1 = [int(item) for item in component_bbox[:4]]
+    height = int(getattr(labels, "shape", [0, 0])[0] or 0)
+    width = int(getattr(labels, "shape", [0, 0])[1] or 0)
+    if width <= 0 or height <= 0:
+        return 0, False
+    sx0 = max(0, min(width, sx0))
+    sx1 = max(0, min(width, sx1))
+    sy0 = max(0, min(height, sy0))
+    sy1 = max(0, min(height, sy1))
+    cx0 = max(0, min(width, cx0))
+    cx1 = max(0, min(width, cx1))
+    cy0 = max(0, min(height, cy0))
+    cy1 = max(0, min(height, cy1))
+    ix0 = max(sx0, cx0)
+    ix1 = min(sx1, cx1)
+    iy0 = max(sy0, cy0)
+    iy1 = min(sy1, cy1)
+    centroid_inside = sx0 <= cx < sx1 and sy0 <= cy < sy1
+    if scope_mask is not None:
+        try:
+            mask_h, mask_w = scope_mask.shape[:2]
+            mx = max(0, min(mask_w - 1, int(round(cx))))
+            my = max(0, min(mask_h - 1, int(round(cy))))
+            centroid_inside = bool(scope_mask[my, mx] > 0)
+            ix0 = max(0, min(min(width, mask_w), ix0))
+            ix1 = max(0, min(min(width, mask_w), ix1))
+            iy0 = max(0, min(min(height, mask_h), iy0))
+            iy1 = max(0, min(min(height, mask_h), iy1))
+        except Exception:
+            scope_mask = None
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0, centroid_inside
+    label_slice = labels[iy0:iy1, ix0:ix1]
+    if scope_mask is not None:
+        try:
+            mask_slice = scope_mask[iy0:iy1, ix0:ix1] > 0
+            overlap = int(np.count_nonzero((label_slice == int(component_label)) & mask_slice))
+        except Exception:
+            overlap = int(np.count_nonzero(label_slice == int(component_label)))
+    else:
+        overlap = int(np.count_nonzero(label_slice == int(component_label)))
+    return overlap, centroid_inside
 
 
 def _write_graph_plan_overlay(

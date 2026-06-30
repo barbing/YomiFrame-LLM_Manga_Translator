@@ -34,9 +34,10 @@ _PHASE2E_TARGET_REGION_IDS: dict[tuple[str, str], str] = {}
 _RENDERER_REGION_LOOP_TELEMETRY_FLAG = "MT_RENDERER_REGION_LOOP_TELEMETRY"
 _RENDERER_LAYOUT_TELEMETRY_FLAG = "MT_RENDERER_LAYOUT_TELEMETRY"
 _RENDERER_CANDIDATE_SHADOW_FLAG = "MT_RENDERER_CANDIDATE_SHADOW"
+_RENDERER_FAST_LAYOUT_FLAG = "MT_RENDERER_FAST_LAYOUT"
 _RENDERER_FAST_LAYOUT_SHADOW_FLAG = "MT_RENDERER_FAST_LAYOUT_SHADOW"
 _RENDERER_CLEANUP_MUTATION_ENABLED = False
-_RENDERER_FAST_LAYOUT_FINALIST_CAP = 32
+_RENDERER_FAST_LAYOUT_FINALIST_CAP = 128
 _RENDERER_LAYOUT_HOT_HELPER_TIMING_KEYS = {
     "renderer_text_wrap_measure_time",
 }
@@ -53,6 +54,12 @@ _RENDERER_MICRO_SEEN_KEYS: ContextVar[dict[str, set] | None] = ContextVar(
 )
 _RENDERER_FONT_LOAD_CACHE: ContextVar[dict[tuple[str, int, str], object] | None] = ContextVar(
     "_RENDERER_FONT_LOAD_CACHE",
+    default=None,
+)
+_RENDERER_VERTICAL_FONT_FIT_CACHE: ContextVar[
+    dict[tuple[object, ...], tuple[object, object]] | None
+] = ContextVar(
+    "_RENDERER_VERTICAL_FONT_FIT_CACHE",
     default=None,
 )
 _RENDERER_CURRENT_REGION_ID: ContextVar[str] = ContextVar(
@@ -84,6 +91,17 @@ def _renderer_candidate_shadow_enabled() -> bool:
 
 def _renderer_fast_layout_shadow_enabled() -> bool:
     return _renderer_env_flag_enabled(_RENDERER_FAST_LAYOUT_SHADOW_FLAG)
+
+
+def _renderer_fast_layout_enabled() -> bool:
+    raw = os.environ.get(_RENDERER_FAST_LAYOUT_FLAG)
+    if raw is not None and str(raw).strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    # Shadow diagnostics intentionally keep exhaustive selection as the actual
+    # output so the oracle remains meaningful.
+    if _renderer_candidate_shadow_enabled() or _renderer_fast_layout_shadow_enabled():
+        return False
+    return True
 
 
 def _renderer_cleanup_mutation_enabled() -> bool:
@@ -149,14 +167,28 @@ def _renderer_micro_reset(token) -> None:
 
 
 def _renderer_font_cache_begin():
-    return _RENDERER_FONT_LOAD_CACHE.set({})
+    return (
+        _RENDERER_FONT_LOAD_CACHE.set({}),
+        _RENDERER_VERTICAL_FONT_FIT_CACHE.set({}),
+    )
 
 
 def _renderer_font_cache_reset(token) -> None:
+    font_token = token
+    fit_token = None
+    if isinstance(token, tuple) and len(token) == 2:
+        font_token, fit_token = token
     try:
-        _RENDERER_FONT_LOAD_CACHE.reset(token)
+        _RENDERER_FONT_LOAD_CACHE.reset(font_token)
     except Exception:
         _RENDERER_FONT_LOAD_CACHE.set(None)
+    try:
+        if fit_token is not None:
+            _RENDERER_VERTICAL_FONT_FIT_CACHE.reset(fit_token)
+        else:
+            _RENDERER_VERTICAL_FONT_FIT_CACHE.set(None)
+    except Exception:
+        _RENDERER_VERTICAL_FONT_FIT_CACHE.set(None)
 
 
 @contextmanager
@@ -636,8 +668,21 @@ def _renderer_fast_layout_finalists(
 
     selected_indices: set[int] = set()
     reasons: dict[int, set[str]] = {}
+    candidates_by_bbox: dict[tuple[int, int, int, int], list[dict[str, object]]] = {}
+    for candidate in enriched:
+        box = _renderer_shadow_box(candidate.get("bbox"))
+        if box:
+            candidates_by_bbox.setdefault(box, []).append(candidate)
 
-    def keep(candidate: dict[str, object], reason: str) -> None:
+    def keep(candidate: dict[str, object], reason: str, *, all_variants_for_box: bool = False) -> None:
+        if all_variants_for_box:
+            box = _renderer_shadow_box(candidate.get("bbox"))
+            if box:
+                for variant in candidates_by_bbox.get(box, []):
+                    index = int(variant.get("index") or 0)
+                    selected_indices.add(index)
+                    reasons.setdefault(index, set()).add(reason)
+                return
         index = int(candidate.get("index") or 0)
         selected_indices.add(index)
         reasons.setdefault(index, set()).add(reason)
@@ -659,7 +704,7 @@ def _renderer_fast_layout_finalists(
             int(item.get("index") or 0),
         ),
     )[:8]:
-        keep(candidate, "source_column_guided")
+        keep(candidate, "source_column_guided", all_variants_for_box=True)
 
     shape_contained = []
     for candidate in enriched:
@@ -669,6 +714,7 @@ def _renderer_fast_layout_finalists(
         keep(
             max(shape_contained, key=lambda item: (int(item.get("area") or 0), -int(item.get("index") or 0))),
             "largest_shape_contained",
+            all_variants_for_box=True,
         )
 
     cheap_density = sorted(
@@ -680,7 +726,7 @@ def _renderer_fast_layout_finalists(
         ),
     )
     for candidate in cheap_density[:8]:
-        keep(candidate, "best_cheap_density")
+        keep(candidate, "best_cheap_density", all_variants_for_box=True)
 
     for compact_value in (False, True):
         compact_candidates = [candidate for candidate in enriched if bool(candidate.get("compact")) is compact_value]
@@ -694,6 +740,7 @@ def _renderer_fast_layout_finalists(
                     ),
                 ),
                 "compact_mode_representative" if compact_value else "noncompact_mode_representative",
+                all_variants_for_box=True,
             )
 
     for candidate in sorted(
@@ -705,7 +752,7 @@ def _renderer_fast_layout_finalists(
     ):
         if len(selected_indices) >= _RENDERER_FAST_LAYOUT_FINALIST_CAP:
             break
-        keep(candidate, "cheap_score_fill")
+        keep(candidate, "cheap_score_fill", all_variants_for_box=True)
 
     finalists = [candidate for candidate in enriched if int(candidate.get("index") or 0) in selected_indices]
     finalists.sort(key=lambda item: int(item.get("index") or 0))
@@ -8069,33 +8116,67 @@ def _choose_render_readability_v5_candidate(
     best["shape_source"] = shape_source
     candidate_count = 0
     micro_start = _renderer_micro_start()
-    shadow_loop_start = time.perf_counter() if shadow_candidates is not None else 0.0
-    for box in boxes:
-        for compact in (False, True):
-            for lh in line_heights:
-                candidate_count += 1
-                score = _score_render_readability_v5_candidate(
-                    box,
-                    text,
-                    region_font,
-                    lh,
-                    wrap_mode,
-                    source_orientation,
-                    source_size_hint,
-                    source_size_min,
-                    source_size_max,
-                    compact_layout=compact,
-                    allowed_area_box=allowed,
-                    shape_box=shape_box,
-                    shape_source=shape_source,
-                    source_columns=source_columns,
-                )
-                score["bbox"] = tuple(box)
-                score["compact_layout"] = compact
-                score["line_height_scale"] = round(float(lh), 3)
-                if float(score.get("score") or 9999.0) < float(best.get("score") or 9999.0):
-                    best = score
-    shadow_loop_time = time.perf_counter() - shadow_loop_start if shadow_loop_start > 0 else 0.0
+    fast_layout_enabled = _renderer_fast_layout_enabled()
+    if fast_layout_enabled:
+        if shadow_candidates is None:
+            shadow_candidates = _renderer_shadow_build_candidates(
+                boxes,
+                line_heights,
+                source_orientation=source_orientation,
+                source_columns=source_columns,
+            )
+        best, fast_meta = _choose_render_readability_fast_candidate(
+            current,
+            expanded,
+            allowed,
+            shape_box,
+            text,
+            region_font,
+            line_height_scale,
+            wrap_mode,
+            source_orientation,
+            source_size_hint,
+            source_size_min,
+            source_size_max,
+            before_layout,
+            shape_source,
+            source_columns,
+            boxes=boxes,
+            line_heights=line_heights,
+            candidates=shadow_candidates,
+        )
+        candidate_count = int(best.get("candidate_count") or 0)
+        best["render_readability_v5_fast_layout_enabled"] = True
+        best["render_readability_v5_fast_layout_meta"] = fast_meta
+        shadow_loop_time = 0.0
+    else:
+        shadow_loop_start = time.perf_counter() if shadow_candidates is not None else 0.0
+        for box in boxes:
+            for compact in (False, True):
+                for lh in line_heights:
+                    candidate_count += 1
+                    score = _score_render_readability_v5_candidate(
+                        box,
+                        text,
+                        region_font,
+                        lh,
+                        wrap_mode,
+                        source_orientation,
+                        source_size_hint,
+                        source_size_min,
+                        source_size_max,
+                        compact_layout=compact,
+                        allowed_area_box=allowed,
+                        shape_box=shape_box,
+                        shape_source=shape_source,
+                        source_columns=source_columns,
+                    )
+                    score["bbox"] = tuple(box)
+                    score["compact_layout"] = compact
+                    score["line_height_scale"] = round(float(lh), 3)
+                    if float(score.get("score") or 9999.0) < float(best.get("score") or 9999.0):
+                        best = score
+        shadow_loop_time = time.perf_counter() - shadow_loop_start if shadow_loop_start > 0 else 0.0
     _renderer_micro_add("renderer_v5_candidate_scoring_loop_time", micro_start)
     best["candidate_count"] = candidate_count
     if shadow_candidates is not None:
@@ -9635,18 +9716,23 @@ def _fit_vertical_font(
 ):
     micro_start = _renderer_micro_start()
     font_path = _find_font_path(font_name)
+    cache_key = (
+        str(text or ""),
+        int(box_width or 0),
+        int(box_height or 0),
+        str(font_path or font_name or ""),
+        int(preferred_size) if preferred_size is not None else None,
+        int(min_size) if min_size is not None else None,
+        int(max_size) if max_size is not None else None,
+        round(float(line_height_scale or 0.0), 4),
+    )
+    fit_cache = _RENDERER_VERTICAL_FONT_FIT_CACHE.get()
+    if fit_cache is not None and cache_key in fit_cache:
+        _renderer_micro_add("renderer_fit_vertical_font_time", micro_start)
+        return fit_cache[cache_key]
     _renderer_micro_count_key(
         "renderer_fit_vertical_font",
-        (
-            str(text or ""),
-            int(box_width or 0),
-            int(box_height or 0),
-            str(font_path or font_name or ""),
-            int(preferred_size) if preferred_size is not None else None,
-            int(min_size) if min_size is not None else None,
-            int(max_size) if max_size is not None else None,
-            round(float(line_height_scale or 0.0), 4),
-        ),
+        cache_key,
     )
     sample = _sample_char(text)
     tokens = _vertical_tokens(text) or ["字"]
@@ -9690,24 +9776,34 @@ def _fit_vertical_font(
         start_size = min(start_size, source_max_size)
     if start_size < computed_min_size:
         start_size = computed_min_size
-    for size in range(start_size, computed_min_size - 1, -1):
-        font = _load_font(font_path, size, sample)
-        layout = _measure_vertical_layout(font, tokens, box_width, box_height, line_height_scale)
-        if layout is not None:
-            layout = _rebalance_long_narrow_vertical_layout(tokens, layout, box_width, box_height, content_count)
-            _renderer_micro_add("renderer_fit_vertical_font_time", micro_start)
-            return font, layout
-    # When source-derived minimums are too large for a narrow vertical box, the
-    # legacy fallback can return a layout with fewer cells than tokens and drop
-    # the tail of the translation. Prefer a smaller complete layout over silent
-    # truncation.
-    for size in range(computed_min_size - 1, 7, -1):
-        font = _load_font(font_path, size, sample)
-        layout = _measure_vertical_layout(font, tokens, box_width, box_height, line_height_scale)
-        if layout is not None:
-            layout = _rebalance_long_narrow_vertical_layout(tokens, layout, box_width, box_height, content_count)
-            _renderer_micro_add("renderer_fit_vertical_font_time", micro_start)
-            return font, layout
+    fitted = _largest_fitting_vertical_font_layout(
+        tokens=tokens,
+        box_width=box_width,
+        box_height=box_height,
+        font_path=font_path,
+        sample=sample,
+        high_size=start_size,
+        low_size=computed_min_size,
+        line_height_scale=line_height_scale,
+        content_count=content_count,
+    )
+    if fitted is None and computed_min_size > 8:
+        # When source-derived minimums are too large for a narrow vertical box,
+        # prefer a smaller complete layout over silent truncation.
+        fitted = _largest_fitting_vertical_font_layout(
+            tokens=tokens,
+            box_width=box_width,
+            box_height=box_height,
+            font_path=font_path,
+            sample=sample,
+            high_size=computed_min_size - 1,
+            low_size=8,
+            line_height_scale=line_height_scale,
+            content_count=content_count,
+        )
+    if fitted is not None:
+        font, layout = fitted
+        return _renderer_vertical_font_fit_result(cache_key, font, layout, micro_start)
     font = _load_font(font_path, computed_min_size, sample)
     layout = _measure_vertical_layout(font, tokens, box_width, box_height, line_height_scale)
     if layout is None:
@@ -9725,8 +9821,47 @@ def _fit_vertical_font(
         required_cols = max(1, int(math.ceil(len(tokens) / max(1, rows))))
         cols = max(required_cols, min(len(tokens), cols))
         layout = (rows, cols, cell_height, col_width, col_gap)
+    return _renderer_vertical_font_fit_result(cache_key, font, layout, micro_start)
+
+
+def _renderer_vertical_font_fit_result(cache_key, font, layout, micro_start: float):
+    fit_cache = _RENDERER_VERTICAL_FONT_FIT_CACHE.get()
+    if fit_cache is not None:
+        fit_cache[cache_key] = (font, layout)
     _renderer_micro_add("renderer_fit_vertical_font_time", micro_start)
     return font, layout
+
+
+def _largest_fitting_vertical_font_layout(
+    *,
+    tokens: List[str],
+    box_width: int,
+    box_height: int,
+    font_path: str,
+    sample: str,
+    high_size: int,
+    low_size: int,
+    line_height_scale: float,
+    content_count: int,
+):
+    """Find the largest fitting vertical font size without a linear scan."""
+
+    low = max(8, int(low_size or 8))
+    high = max(low, int(high_size or low))
+    best = None
+    while low <= high:
+        size = (low + high) // 2
+        font = _load_font(font_path, size, sample)
+        layout = _measure_vertical_layout(font, tokens, box_width, box_height, line_height_scale)
+        if layout is None:
+            high = size - 1
+            continue
+        best = (font, layout)
+        low = size + 1
+    if best is None:
+        return None
+    font, layout = best
+    return font, _rebalance_long_narrow_vertical_layout(tokens, layout, box_width, box_height, content_count)
 
 
 def _rebalance_long_narrow_vertical_layout(
