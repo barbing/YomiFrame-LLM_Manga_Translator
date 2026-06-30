@@ -43,6 +43,7 @@ ROUTE_REVIEW_FALLBACK = "review_or_fallback"
 TEXT_AREA_GRAPH_WORKFLOW_DISPOSITION = "workflow_root"
 TEXT_AREA_GRAPH_EXCLUDED_DISPOSITION = "excluded_nonworkflow"
 TEXT_AREA_GRAPH_PARENT_SOURCE_TEXT_UNIT = "text_unit_evidence_bbox"
+TEXT_AREA_GRAPH_PARENT_SOURCE_TEXT_UNIT_REFINED_ISLAND = "text_unit_evidence_visual_refined_island"
 TEXT_AREA_GRAPH_PARENT_SOURCE_ROOT_VISUAL_TEXT_ISLAND = "root_local_visual_text_island"
 TEXT_AREA_GRAPH_PARENT_SOURCE_SINGLE_CLAIM = "single_parent_claim"
 TEXT_AREA_GRAPH_CHILD_SCOPE_PARENT_BOUNDARY = "parent_boundary_bbox"
@@ -1758,6 +1759,13 @@ def _text_area_graph_parent_boundary_entries(
         entries = _semantic_unit_evidence_bboxes_for_container(container)
     else:
         entries = _text_area_graph_mapping_parent_boundary_entries(container)
+    if entries:
+        entries = _text_area_graph_refine_semantic_parent_boundary_entries(
+            container,
+            entries,
+            image_size=image_size,
+            luma_image=luma_image,
+        )
     if not entries:
         entries = _text_area_graph_visual_parent_boundary_entries(
             container,
@@ -1790,6 +1798,173 @@ def _text_area_graph_parent_boundary_entries(
             }
         )
     return output
+
+
+def _text_area_graph_refine_semantic_parent_boundary_entries(
+    container: TextAreaContainer | Mapping[str, Any],
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    image_size: Tuple[int, int],
+    luma_image: Any,
+) -> List[Dict[str, Any]]:
+    """Split a broad model text envelope only when internal ink proves islands."""
+
+    output = [dict(entry) for entry in entries if isinstance(entry, Mapping)]
+    if len(output) != 1 or luma_image is None or np is None:
+        return output
+    entry = output[0]
+    if not bool(entry.get("is_explicit_parent_boundary_evidence", True)):
+        return output
+    if str(entry.get("class_name") or "") != "text_bubble":
+        return output
+    if _text_area_graph_semantic_role(container) != SEMANTIC_KIND_SPEECH:
+        return output
+    bbox = _text_area_graph_bbox_from_entry(entry)
+    if not bbox:
+        return output
+    split_bboxes = _text_area_graph_split_text_unit_bbox_by_horizontal_ink_gap(
+        luma_image=luma_image,
+        root_bbox=_text_area_graph_container_bbox(container),
+        bbox=bbox,
+        image_size=image_size,
+    )
+    if len(split_bboxes) < 2:
+        return output
+    evidence_id = str(entry.get("evidence_id") or "text_unit")
+    refined: List[Dict[str, Any]] = []
+    for index, split_bbox in enumerate(split_bboxes):
+        refined_entry = dict(entry)
+        refined_entry["bbox"] = list(split_bbox)
+        refined_entry["evidence_id"] = f"{evidence_id}_island_{index:02d}"
+        refined_entry["source_text_unit_evidence_id"] = evidence_id
+        refined_entry["boundary_source"] = TEXT_AREA_GRAPH_PARENT_SOURCE_TEXT_UNIT_REFINED_ISLAND
+        refined_entry["is_explicit_parent_boundary_evidence"] = True
+        refined.append(refined_entry)
+    return refined
+
+
+def _text_area_graph_split_text_unit_bbox_by_horizontal_ink_gap(
+    *,
+    luma_image: Any,
+    root_bbox: Sequence[Any],
+    bbox: Sequence[Any],
+    image_size: Tuple[int, int],
+) -> List[List[int]]:
+    if luma_image is None or np is None:
+        return []
+    width, height = max(1, int(image_size[0])), max(1, int(image_size[1]))
+    rx, ry, rw, rh = _coerce_xywh(_normalize_xywh(root_bbox, image_size))
+    bx, by, bw, bh = _coerce_xywh(_normalize_xywh(bbox, image_size))
+    if rw <= 0 or rh <= 0 or bw <= 0 or bh <= 0:
+        return []
+    x0 = max(0, rx, bx)
+    y0 = max(0, ry, by)
+    x1 = min(width, rx + rw, bx + bw)
+    y1 = min(height, ry + rh, by + bh)
+    crop_w, crop_h = int(x1 - x0), int(y1 - y0)
+    if crop_w < 36 or crop_h < 96:
+        return []
+    try:
+        crop = luma_image.crop((x0, y0, x1, y1)).convert("L")
+        arr = np.asarray(crop)
+    except Exception:
+        return []
+    if arr.size <= 0:
+        return []
+    mean_luma = float(arr.mean())
+    dark_threshold = 150 if mean_luma >= 135.0 else 112
+    mask = arr <= dark_threshold
+    ink_count = int(mask.sum())
+    if ink_count < max(64, int(round(crop_w * crop_h * 0.002))):
+        return []
+
+    row_counts = mask.sum(axis=1)
+    row_threshold = max(2, int(round(crop_w * 0.012)))
+    active = [bool(value > row_threshold) for value in row_counts]
+    bands: List[Tuple[int, int]] = []
+    start: int | None = None
+    for row_index, value in enumerate(active):
+        if value and start is None:
+            start = row_index
+        if (not value or row_index == len(active) - 1) and start is not None:
+            end = row_index - 1 if not value else row_index
+            if end >= start:
+                bands.append((start, end))
+            start = None
+    if len(bands) < 2:
+        return []
+
+    small_gap = max(4, int(round(crop_h * 0.014)))
+    merged_bands: List[Tuple[int, int]] = []
+    for band_start, band_end in bands:
+        if merged_bands and band_start - merged_bands[-1][1] - 1 <= small_gap:
+            prev_start, _prev_end = merged_bands[-1]
+            merged_bands[-1] = (prev_start, band_end)
+        else:
+            merged_bands.append((band_start, band_end))
+    if len(merged_bands) < 2:
+        return []
+
+    min_split_gap = max(18, int(round(crop_h * 0.055)))
+    min_side_ink = max(60, int(round(ink_count * 0.08)))
+    min_side_height = max(28, int(round(crop_h * 0.10)))
+    split_gaps: List[Tuple[int, int]] = []
+    for current, nxt in zip(merged_bands, merged_bands[1:]):
+        gap_start = current[1] + 1
+        gap_end = nxt[0] - 1
+        gap = gap_end - gap_start + 1
+        if gap < min_split_gap:
+            continue
+        upper = mask[:gap_start, :]
+        lower = mask[gap_end + 1 :, :]
+        if int(upper.sum()) < min_side_ink or int(lower.sum()) < min_side_ink:
+            continue
+        if gap_start < min_side_height or crop_h - gap_end - 1 < min_side_height:
+            continue
+        split_gaps.append((gap_start, gap_end))
+    if not split_gaps:
+        return []
+
+    ranges: List[Tuple[int, int]] = []
+    current_start = 0
+    for gap_start, gap_end in split_gaps:
+        ranges.append((current_start, gap_start - 1))
+        current_start = gap_end + 1
+    ranges.append((current_start, crop_h - 1))
+
+    pad_x = max(3, min(12, int(round(crop_w * 0.04))))
+    pad_y = max(3, min(14, int(round(crop_h * 0.025))))
+    min_candidate_width = max(32, int(round(crop_w * 0.18)))
+    min_candidate_height = max(52, int(round(crop_h * 0.16)))
+    split_bboxes: List[List[int]] = []
+    for seg_start, seg_end in ranges:
+        if seg_end <= seg_start:
+            continue
+        segment_mask = mask[seg_start : seg_end + 1, :]
+        if int(segment_mask.sum()) < min_side_ink:
+            continue
+        ys, xs = np.where(segment_mask)
+        if len(xs) == 0 or len(ys) == 0:
+            continue
+        local_x0 = max(0, int(xs.min()) - pad_x)
+        local_y0 = max(0, seg_start + int(ys.min()) - pad_y)
+        local_x1 = min(crop_w, int(xs.max()) + 1 + pad_x)
+        local_y1 = min(crop_h, seg_start + int(ys.max()) + 1 + pad_y)
+        if local_x1 <= local_x0 or local_y1 <= local_y0:
+            continue
+        candidate = [
+            int(x0 + local_x0),
+            int(y0 + local_y0),
+            int(local_x1 - local_x0),
+            int(local_y1 - local_y0),
+        ]
+        if candidate[2] < min_candidate_width or candidate[3] < min_candidate_height:
+            continue
+        split_bboxes.append(candidate)
+
+    if len(split_bboxes) < 2:
+        return []
+    return split_bboxes
 
 
 def _text_area_graph_visual_parent_boundary_entries(
