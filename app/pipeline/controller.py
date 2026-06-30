@@ -444,13 +444,13 @@ class PipelineWorker(QtCore.QThread):
 
     def run(self) -> None:
         images = _list_images(self._settings.import_dir)
-        
+
         # Filter by whitelist if provided (for re-translation)
         if self._settings.files_whitelist:
             whitelist_names = set(os.path.basename(f) for f in self._settings.files_whitelist)
             # Find matching images in the import dir
             images = [img for img in images if os.path.basename(img) in whitelist_names]
-            
+
         total = len(images)
         self.queue_reset.emit(images)
         if total == 0:
@@ -548,7 +548,7 @@ class PipelineWorker(QtCore.QThread):
                     prompt_style = self._settings.gguf_prompt_style
                     if "sakura" in self._settings.gguf_model_path.lower() and prompt_style == "qwen":
                         prompt_style = "sakura"
-                        
+
                     ollama = GGUFClient(
                         model_path=self._settings.gguf_model_path,
                         prompt_style=prompt_style,
@@ -596,7 +596,7 @@ class PipelineWorker(QtCore.QThread):
             elif not self._settings.gguf_model_path:
                 self.message.emit("GGUF model path is required for GGUF backend.")
                 return
-            
+
             # Ensure model name is set on the client for glossary translation
             if hasattr(ollama, "translate_glossary"):
                  # Use resolved model for Ollama, or path for GGUF (though GGUF uses internal path)
@@ -630,7 +630,7 @@ class PipelineWorker(QtCore.QThread):
             auto_glossary_state = None
             if self._settings.auto_glossary:
                 auto_glossary_state = {"counts": {}, "map": {}}
-            
+
             # Pre-Scan Mode: Build complete glossary before translation
             if self._settings.prescan_enabled and self._settings.auto_glossary:
                 self.prescan_started.emit()
@@ -1339,7 +1339,7 @@ class PipelineWorker(QtCore.QThread):
                     ]
                 pages.append(page_record)
                 self.page_ready.emit(index - 1, page_record)
-                
+
                 # Track glossary size at this page for consistency checking
                 if auto_glossary_state is not None:
                     with _glossary_lock:
@@ -1400,7 +1400,7 @@ class PipelineWorker(QtCore.QThread):
                     pass
                 import gc
                 gc.collect()
-                
+
                 # Clear CUDA cache every 5 pages to balance speed vs memory
                 if self._settings.use_gpu and index % 5 == 0:
                     try:
@@ -1416,12 +1416,12 @@ class PipelineWorker(QtCore.QThread):
                 save_project(json_path, project)
             except OSError:
                 self.message.emit("Failed to write project JSON.")
-            
+
             # --- MEMORY CLEANUP START ---
             # Flush Python Garbage Collector
             import gc
             gc.collect()
-            
+
             # Flush PyTorch VRAM Cache (if used)
             if self._settings.use_gpu:
                  try:
@@ -1431,7 +1431,7 @@ class PipelineWorker(QtCore.QThread):
                  except Exception:
                      pass
             # --- MEMORY CLEANUP END ---
-            
+
             total_elapsed = time.time() - start_time
             self.total_time_changed.emit(f"Total: {_format_seconds(total_elapsed)}")
             self.message.emit("Completed")
@@ -1537,7 +1537,7 @@ class PipelineWorker(QtCore.QThread):
                         )
                 except Exception as e:
                     self.message.emit(f"Failed to save Auto-Glossary data: {e}")
-            
+
             # Consistency Check: Compare early pages vs final glossary
             # SKIP if running in re-translation mode (files_whitelist is set)
             # to prevent infinite loop: re-translate → consistency check → dialog → re-translate...
@@ -1623,40 +1623,40 @@ class PipelineController(QtCore.QObject):
         """Start deep scan worker."""
         if self._running:
             return
-        
+
         self.deep_scan_worker = DeepScanWorker(settings)
         # Relay signals? For now just simple finished
         self.deep_scan_worker.finished.connect(self._on_deep_scan_finished)
         self.deep_scan_worker.start()
-        
+
     def _on_deep_scan_finished(self):
         self.status.message.emit("Deep scan completed. Glossary updated.")
-        self.status.consistency_issue.emit([]) # Signal to maybe refresh? 
+        self.status.consistency_issue.emit([]) # Signal to maybe refresh?
         # Actually Main Window handles the dialog logic, it waits for this worker to finish?
         # We'll rely on the worker reference in MainWindow if we want to block interaction.
 
 
 class DeepScanWorker(QtCore.QThread):
     finished = QtCore.Signal()
-    
+
     def __init__(self, settings: PipelineSettings, parent=None):
         super().__init__(parent)
         self.settings = settings
-        
+
     def run(self):
         try:
             # Load project pages to get text
             # We assume the project is located at settings.json_path
             if not os.path.exists(self.settings.json_path):
                 return
-                
+
             import json
             from app.translate.ollama_client import OllamaClient
             from app.models.ollama import list_models
-            
+
             with open(self.settings.json_path, 'r', encoding='utf-8') as f:
                 project = json.load(f)
-                
+
             pages = project.get("pages", [])
             accumulated = []
             if isinstance(pages, dict):
@@ -1673,14 +1673,14 @@ class DeepScanWorker(QtCore.QThread):
                         t = str(b["ocr_text"]).replace("\n", "").strip()
                         if t:
                             accumulated.append(t)
-            
+
             if not accumulated:
                 return
 
             # Hybrid Strategy:
             # Even if user checks "GGUF" for translation speed, we can attempt
             # to use a smart Ollama model (like Qwen) for discovery if available.
-            
+
             backend = getattr(self.settings, "discovery_backend", "Ollama")
             discovery_model = getattr(self.settings, "discovery_model", None)
             model_to_use = self.settings.ollama_model
@@ -1719,14 +1719,14 @@ class DeepScanWorker(QtCore.QThread):
                     qwen = next((m for m in available_models if "qwen" in m.lower()), None)
                     non_sakura = next((m for m in available_models if "sakura" not in m.lower()), None)
                     model_to_use = qwen if qwen else (non_sakura if non_sakura else "")
-            
+
             if not model_to_use:
                 # No model found
                 print("DeepScan: No Ollama model found")
                 return
-                
+
             print(f"DeepScan: using model {model_to_use}")
-            
+
             if not ollama:
                 print("DeepScan: No discovery client available")
                 return
@@ -1735,11 +1735,11 @@ class DeepScanWorker(QtCore.QThread):
                 return
             # Load style guide
             base_style = _load_style_guide(self.settings.style_guide_path, self.settings.target_lang)
-            
+
             # Run discovery
             # Mock state
             state = {"buffer": accumulated}
-            
+
             _run_sakura_discovery(
                 ollama=ollama,
                 model=model_to_use,
@@ -1749,7 +1749,7 @@ class DeepScanWorker(QtCore.QThread):
                 base_style=base_style,
                 style_guide_path=self.settings.style_guide_path
             )
-            
+
         except Exception as e:
             print(f"Deep scan error: {e}")
         finally:
@@ -2151,7 +2151,7 @@ def _load_style_guide(path: str, target_lang: str = ""):
             # Handle empty or corrupt files gracefully
             if os.path.getsize(path) == 0:
                 return default_style_guide()
-                
+
             guide = load_style_guide(path)
 
             if target_lang:
@@ -2449,7 +2449,7 @@ def _recognize_with_fallback(
                 trace_record["ocr_backend"] = ocr_engine.__class__.__name__
         else:
             trace_record["ocr_backend"] = ocr_engine.__class__.__name__
-    
+
     # DEBUG: Save crop images
     if settings and getattr(settings, 'debug_ocr', False):
         try:
@@ -2463,7 +2463,7 @@ def _recognize_with_fallback(
             _ocr_debug_counter += 1
         except Exception as e:
             print(f"[OCR DEBUG] Failed to save crop: {e}")
-    
+
     if hasattr(ocr_engine, "recognize_with_confidence"):
         text, conf = ocr_engine.recognize_with_confidence(crop)
     else:
@@ -8081,7 +8081,7 @@ def _process_page(
             debug_context.setdefault("text_area_plan_pre_ocr", text_area_plan.to_dict())
         debug_context["scoped_detection_candidates"] = scoped_detection_candidates
         debug_context["text_area_detection_source"] = text_area_detection_source
-        
+
     merge = getattr(detector, "merge_mode", "auto") != "none"
     grouping_start = time.time()
     groups = _merge_detections(detections, image_size, merge=merge)
@@ -8475,7 +8475,7 @@ def _process_page(
             )
             skip_text = _should_skip_text(ocr_text, bbox, image_size)
             ignore = semantic_ignore or bool(filter_background and skip_text and semantic_bg)
-            
+
             region = _region_record(
                 idx,
                 polygons,
@@ -8626,7 +8626,7 @@ def _process_page(
         # REMOVED: TextFilter check for speech bubbles
         # Speech bubbles detected by the detector should NEVER be filtered
         # They are legitimate dialogue - always translate them
-        
+
         region = _region_record(
             idx,
             polygons,
@@ -8986,14 +8986,14 @@ def _process_page(
         and bool(getattr(settings, "gguf_cross_page_context", False))
     )
     context_lines = _recent_context_lines(context_window, max_lines=4) if use_context_lines else []
-    
+
     # Skip runtime discovery if Pre-Scan is enabled (glossary is already built)
     should_run_discovery = (
-        auto_glossary_state is not None 
-        and glossary_texts 
+        auto_glossary_state is not None
+        and glossary_texts
         and not (settings and settings.prescan_enabled)
     )
-    
+
     glossary_start = time.time()
     if should_run_discovery:
         if _GLOSSARY_DEBUG:
@@ -9227,7 +9227,7 @@ def _process_page(
                 if region["region_id"] in region_ids and region.get("type") == "speech_bubble":
                     is_bubble = True
                     break
-            
+
             translation, lang_ok = _ensure_target_language(
                 ollama,
                 _resolve_model(model),
@@ -9354,7 +9354,7 @@ def _process_page(
                     )
                     if not lang_ok or _translation_is_unsafe_for_output(final_translation, text):
                         region["flags"]["needs_review"] = True
-    
+
     # Update context window
     # Collect confident translations to add to context
     for region in execution_regions:
@@ -9534,13 +9534,13 @@ def _process_page(
         trans = region.get("translation", "").strip()
         if trans:
              page_context.append(trans)
-    
+
     # Keep last 10 lines of context to avoid overflow
     if page_context:
         context_window.extend(page_context)
         while len(context_window) > 4:
             context_window.pop(0)
-            
+
     return PageProcessingResult(regions, execution_regions, parent_execution_bundles, page_class)
 
 
@@ -12140,7 +12140,7 @@ def _sort_groups(groups: list) -> list:
     # Simply sort by Y then -X? No, manga is columns. Vertical columns from right to left.
     # Actually, R-to-L is primary. Top-to-Bottom is secondary within column.
     # But often checking Y first then -X is better for "standard" text detection sorts.
-    # Standard "Manga" order: 
+    # Standard "Manga" order:
     # 1. Top-Right quadrant
     # 2. Bottom-Right quadrant
     # ...
@@ -12152,22 +12152,22 @@ def _sort_groups(groups: list) -> list:
     # Let's try a simple sort: (Y // 100, -X). Rough banding.
     if not groups:
         return []
-    
+
     def sort_key(g):
         bbox = g["bbox"]
         x, y, w, h = bbox
         cx = x + w / 2
         cy = y + h / 2
         # Use simple banding logic to handle slight misalignments
-        return (int(cy / 300), -cx) 
-        # This is very rough. 
-        # Better: recursively partition? 
+        return (int(cy / 300), -cx)
+        # This is very rough.
+        # Better: recursively partition?
         # Let's stick to standard reading order logic: Vertical columns starting from right.
         # But 'ComicTextDetector' usually gives them unsorted.
         # A clearer sort:  - (Right Edge), then Top.
         # But top bubbles in right col come before bottom bubbles in right col.
         # So: Band by X?
-    
+
     # Let's use a simpler heuristic common in OCR:
     # Sort by -X (Right to Left).
     # Then for items with similar X, sort by Y.
@@ -12176,27 +12176,27 @@ def _sort_groups(groups: list) -> list:
     # So Primary: -X (Right). Secondary: Y (Top).
     # But pure -X is bad because slight X difference overrides massive Y difference.
     # It should be: Sort by columns.
-    
+
     # Revised Logic:
     # 1. Sort all by -X.
     # 2. Group into "Right", "Center", "Left" columns?
     # Too complex.
-    
+
     # Let's assume standard R-L, T-B:
     # Just sort by -RightX is usually decent for columns.
     # Let's do: Sort by (sum of X+Y?) No.
-    
+
     # Let's use the logic found in existing manga-ocr tools:
     # Sort by Y-coordinate first? No, that's English/Webtoon (Top to Bottom).
-    # Manga is R-L. 
+    # Manga is R-L.
     # Actually, most sophisticated tools use a graph or precise column detection.
     # For now, let's implement a robust "Top-Right to Bottom-Left" sort:
     # Score = - (X + (ImageHeight - Y))?
-    
+
     # Let's keep it simple and robust for now:
     # Sort by -RightX. (Rightmost first).
     # If X is within a threshold (e.g. 50px), consider them same column, then sort by Y.
-    
+
     return sorted(groups, key=lambda g: (- (g["bbox"][0] + g["bbox"][2]), g["bbox"][1]))
 
 
@@ -13725,28 +13725,28 @@ def _enforce_glossary(
 ) -> str:
     """
     Post-process translation to enforce glossary term consistency.
-    
+
     If source text contains a glossary source term, ensure the translation
     uses the correct target term. This fixes LLM inconsistency issues.
-    
+
     Args:
         translation: The LLM translation output
         source_text: The original Japanese text
         style_guide: The style guide containing glossary entries
-        
+
     Returns:
         Translation with glossary terms enforced
     """
     if not translation or not source_text:
         return translation
-    
+
     terms_to_enforce = _matched_glossary_terms(source_text, style_guide)
     if not terms_to_enforce:
         return translation
-    
+
     # For each term that should be in the translation, check and fix
     result = translation
-    
+
     for item in terms_to_enforce:
         source = str(item.get("source", "")).strip()
         correct_target = str(item.get("target", "")).strip()
@@ -13790,19 +13790,19 @@ def _enforce_glossary(
 
         # Calculate expected length of the name translation (in characters)
         target_len = len(correct_target)
-        
+
         # For kana-based names (like まゆ), the model might have produced
         # a different Chinese transliteration (like 真由 instead of 麻由)
         # Look for Chinese character sequences of similar length to replace
-        
+
         # Find all Chinese character sequences in the result
         # We look for sequences of length target_len
         chinese_sequences = set(re.findall(r'[\u4e00-\u9fff]{' + str(target_len) + '}', result))
-        
+
         for seq in chinese_sequences:
             if seq == correct_target:
                 continue
-            
+
             # Check context to see if this sequence looks like a name
             # We use regex to ensure we only replace instances that look like names
             name_patterns = [
@@ -13812,23 +13812,23 @@ def _enforce_glossary(
                 (r'^(' + re.escape(seq) + r')($|[，。！？])', 1), # Start/End or standalone
                 (r'([，。！？])(' + re.escape(seq) + r')([，。！？]|$)', 2), # Surrounded by punct
             ]
-            
+
             replaced = False
             for pattern, group_idx in name_patterns:
                 # If pattern matches, replace ONLY that instance
                 if re.search(pattern, result):
                     # We found a context match. Now safely replace.
                     # Note: simple replace() is still risky regarding multiple occurrences of same word used differently
-                    # But if we found "seq小姐", it's likely a name. 
+                    # But if we found "seq小姐", it's likely a name.
                     # We'll replace all occurrences if we find strong evidence it's a name anywhere.
                     # This is a compromise.
                     result = result.replace(seq, correct_target)
                     replaced = True
                     break
-            
+
             if replaced:
-                pass 
-                
+                pass
+
     return result
 
 
@@ -13952,24 +13952,24 @@ def _extract_names_heuristic(texts: list[str]) -> list[str]:
     Looks for repeated katakana sequences (common for character names in manga).
     """
     from collections import Counter
-    
+
     # Katakana pattern (2+ chars, common for names)
     katakana_pattern = re.compile(r'[\u30A0-\u30FF]{2,}')
-    
+
     all_katakana = []
     for text in texts:
         matches = katakana_pattern.findall(text)
         all_katakana.extend(matches)
-    
+
     # Count occurrences - names appear multiple times
     counts = Counter(all_katakana)
-    
+
     # Filter: names should appear at least 2 times and be 2-8 chars (typical name length)
     potential_names = [
         name for name, count in counts.items()
         if count >= 2 and 2 <= len(name) <= 8
     ]
-    
+
     # Also look for common suffixes that indicate names
     name_suffixes = ['さん', 'ちゃん', 'くん', '君', '様', '先生', '先輩', '殿']
     for text in texts:
@@ -13978,7 +13978,7 @@ def _extract_names_heuristic(texts: list[str]) -> list[str]:
             pattern = re.compile(rf'([\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]{{1,6}}){re.escape(suffix)}')
             matches = pattern.findall(text)
             potential_names.extend(matches)
-    
+
     # Filter common stopwords
     blacklist = {
         "学校", "先生", "同級生", "委員長", "部長", "会長", "社長", "校長",
@@ -13991,7 +13991,7 @@ def _extract_names_heuristic(texts: list[str]) -> list[str]:
         "男", "女", "人", "奴", "子供", "大人", "生徒", "教師", "医者", "刑事",
         "教室", "部屋", "家", "町", "都市", "国", "王", "城", "村",
     }
-    
+
     # Deduplicate and filter
     unique_names = set(potential_names)
     return [n for n in unique_names if n not in blacklist]
@@ -14038,7 +14038,7 @@ def _translate_name(ollama, model: str, name: str, target_lang: str) -> str:
         prompt = f"把日語人名'{name}'翻譯成繁體中文。\n回復格式：只輸出翻譯後的名字，不要標點、不要解釋。"
     else:
         prompt = f"Translate the Japanese name '{name}' to {target_lang}.\nFormat: Output ONLY the translated name, nothing else."
-    
+
     try:
         result = ollama.generate(model, prompt, timeout=30, options={"num_predict": 30, "temperature": 0.1})
         if result:
@@ -14069,7 +14069,7 @@ def _translate_alias(ollama, model: str, alias: str, hint: str, base_trans: str,
             prompt = f"'{alias}'是人名'{base_trans}'的簡稱或別稱。把'{alias}'翻譯成繁體中文。\n回復格式：只輸出翻譯後的名字，不要標點、不要解釋。"
     else:
         prompt = f"'{alias}' is a nickname for '{base_trans}'. Translate '{alias}' to {target_lang}.\nFormat: Output ONLY the translated name, nothing else."
-    
+
     try:
         result = ollama.generate(model, prompt, timeout=30, options={"num_predict": 30, "temperature": 0.1})
         if result:
@@ -14100,7 +14100,7 @@ def _parse_json_list(text: str) -> list:
             return parsed
     except:
         pass
-    
+
     # Try finding list pattern
     match = re.search(r"\[.*\]", text, re.DOTALL)
     if match:
@@ -14339,7 +14339,7 @@ def _accumulate_text(state: dict, text: str):
         buffer.append(text)
         if len(buffer) > 300:
             buffer.pop(0)
-        
+
 
 
 def _trigger_discovery_if_needed(
@@ -14357,20 +14357,20 @@ def _trigger_discovery_if_needed(
     """Check buffer size and trigger background discovery if threshold met."""
     import tempfile
     log_path = os.path.join(tempfile.gettempdir(), "auto_glossary_debug.log")
-    
+
     if not state:
         return
-        
+
     # User choice: If not allowed to use Ollama for discovery, specifically check if we are using GGUF
     # If users use Ollama for translation, 'ollama' object is valid.
     # If users use GGUF, 'ollama' passed here might be None or a dummy?
     # Actually _process_page logic: if GGUF, ollama might be None.
-    
+
     # If allow_ollama is False, and we are not using Ollama for translation (model is gguf?), skip.
     # But wait, if we are using Ollama for translation, then 'ollama' is valid and we SHOULD use it?
     # User said: "users can decide whether to use Ollama for our Auto-Glossary system"
     # This implies a global switch.
-    
+
     if not allow_ollama and (not ollama or not hasattr(ollama, 'generate')):
          # Only allow if we are ALREADY using ollama for translation?
          # Or stricter: if use_ollama_discovery is False, NEVER do background discovery?
@@ -14385,12 +14385,12 @@ def _trigger_discovery_if_needed(
     # 1. If we are already using Ollama (has list_models), use it.
     # 2. If allow_ollama is True: Instantiate a temporary OllamaClient.
     # 3. Else: Fall back to MeCab-only mode (using GGUF or whatever available for simple translation).
-    
+
     # Logic for Deep Scan Client Resolution
     discovery_client = ollama
     is_real_ollama = hasattr(ollama, "list_models")
     use_deep_scan = False
-    
+
     # Resolve backend preference.
     # MeCab-only mode must never invoke LLM discovery.
     backend = getattr(settings, "discovery_backend", "Ollama") if settings else "Ollama"
@@ -14456,26 +14456,26 @@ def _trigger_discovery_if_needed(
                         use_deep_scan = True
                 except Exception:
                     pass
-            
+
     # Check buffer length
     with _glossary_lock:
         buffer = state.get("buffer", [])
         total_len = sum(len(s) for s in buffer)
         is_running = state.get("is_running", False)
-    
+
     logger.debug(f"TRIGGER CHECK: total_len={total_len}, is_running={is_running}, deep_scan={use_deep_scan}")
-    
+
     # Threshold: ~6000 chars to reduce LLM invocations and memory churn
     if total_len >= 6000 and not is_running:
         logger.info(f"TRIGGER: Starting discovery thread! (Deep Scan: {use_deep_scan})")
-        
+
         with _glossary_lock:
             state["is_running"] = True
             state["had_live_discovery"] = True
-            
+
         # Choose the correct worker function
         target_func = _run_sakura_discovery if use_deep_scan else _run_discovery
-        
+
         if use_deep_scan:
             # Synchronous: Pause pipeline to prevent VRAM thrashing with LLM
             logger.info(f"STARTING DISCOVERY SYNCHRONOUSLY (Deep Scan Safe Mode)")
@@ -14540,16 +14540,16 @@ def _run_sakura_discovery(
     accumulated_text = list(state.get("buffer", []))
     if not accumulated_text:
         return
-        
+
     with _glossary_lock:
          state["buffer"] = []
 
     # 1. Resolve Best Model for Extraction
     extraction_model = None
-    
+
     extraction_model = None
     is_gguf_client = hasattr(ollama, "is_available") # Duck typing check for GGUFClient
-    
+
     # Debug logging for model resolution
     available_models: list[str] = []
     if not is_gguf_client:
@@ -14562,7 +14562,7 @@ def _run_sakura_discovery(
         # GGUF Client doesn't list models, it HAS a model
         # The 'extraction_model' string is ignored by GGUF generate() usually, but strictly speaking
         # we treat the client as the model.
-        extraction_model = "gguf_model" 
+        extraction_model = "gguf_model"
         logger.info("Deep Scan: Using GGUF Client.")
 
     try:
@@ -14577,28 +14577,28 @@ def _run_sakura_discovery(
         )
         if not is_gguf_path and "sakura" not in main_model.lower():
              extraction_model = main_model
-             
+
         # Priority 1: Manual Override
         if target_model and target_model.lower() != "auto-detect" and "sakura" not in target_model.lower():
              extraction_model = target_model
-             
+
         # Priority 2: Use Main Model if it's in Ollama list
         elif extraction_model and extraction_model in available_models:
              pass # extraction_model is already set to main_model
-             
+
         # Priority 3: Smart Selection from Available
         elif not extraction_model:
             qwen_candidates = [m for m in available_models if "qwen" in m.lower() and "sakura" not in m.lower()]
             non_sakura_candidates = [m for m in available_models if "sakura" not in m.lower()]
-            
+
             if qwen_candidates:
                 extraction_model = qwen_candidates[0]
             elif non_sakura_candidates:
                 extraction_model = non_sakura_candidates[0]
-                
+
     except Exception:
         pass
-        
+
     if extraction_model and "sakura" in extraction_model.lower() and not is_gguf_client:
         logger.warning("Deep Scan: Sakura is translation-only; skipping Deep Scan.")
         return
@@ -14618,9 +14618,9 @@ def _run_sakura_discovery(
     full_text = "\n".join(accumulated_text)
     chunk_size = 800 # Reduced from 1500 to prevent timeouts
     chunks = [full_text[i:i+chunk_size] for i in range(0, len(full_text), chunk_size)]
-    
+
     logger.info(f"Starting Discovery on {len(chunks)} chunks using {extraction_model}...")
-    
+
     for i, chunk in enumerate(chunks):
         glossary_map = {}
         # Build prompt - simple line based is safer for weaker models
@@ -14631,30 +14631,30 @@ def _run_sakura_discovery(
             source_lang=source_lang,
             target_lang=target_lang
         )
-        
+
         # Override for extracting model if it's very dumb (optional, but Qwen 14b is smart enough)
-        # If extraction_model is explicitly "sakura", maybe fallback? 
+        # If extraction_model is explicitly "sakura", maybe fallback?
         # But we assume Qwen/Smart model is used for Deep Scan as per design.
-        
+
         # If using Qwen, we can try JSON for better structure, but line-based is universally robust.
         # Let's stick to line-based to be safe for all models including Sakura.
-        
+
         try:
             # Increase timeout to 600s (10min) for very slow GPUs
             # Reduce num_predict to 1024 to save time
             result = ollama.generate(extraction_model, prompt, timeout=600, options={"num_predict": 1024, "temperature": 0.1})
             if not result:
                 continue
-            
+
             if not result:
                 continue
-            
+
             logger.debug(f"Chunk {i+1} Output:\n{result}\n---")
 
             # Parse JSON output
             # We use the robust parser from controller (already defined) or local logic
             current_extracted = _parse_json_list(result)
-            
+
             # Post-process: Resolve Canonical Names (Nicknames -> Full Name Translation)
             # 1. First pass: Collect all "Canonical" -> "Translation" mappings
             #    e.g. Canonical: "Mayuzumi" -> Translation: "Xiao Dai"
@@ -14665,36 +14665,36 @@ def _run_sakura_discovery(
                 raw_trans = item.get("translation", "").strip() or item.get("target", "").strip()
                 source = item.get("text", "").strip() or item.get("source", "").strip()
                 trans = _sanitize_glossary_target(raw_trans, canon or source, target_lang)
-                
+
                 # If this item IS the canonical form (source == canonical), save its translation
                 if canon and trans and source == canon:
                     canonical_map[canon] = trans
-            
+
             # 2. Second pass: Build the Glossary Map
             for item in current_extracted:
                 if not isinstance(item, dict): continue
-                
+
                 source = item.get("text", "").strip() or item.get("source", "").strip()
                 # Try finding translation in 'target' or 'translation' keys (prompts vary slightly)
                 translation = item.get("translation", "").strip() or item.get("target", "").strip()
                 type_ = item.get("type", "proper_noun")
                 canon = item.get("canonical", "").strip()
-                
+
                 if not source or len(source) < 2:
                     continue
-                if source in ["...", "、", "。"]: 
+                if source in ["...", "、", "。"]:
                     continue
-                    
+
                 # MAGIC: Canonical Name Logic
                 # If we have a canonical name (e.g. Mayuzumi -> Xiao Dai)
-                # And the current term is a nickname (e.g. Mayu-Mayu), 
+                # And the current term is a nickname (e.g. Mayu-Mayu),
                 # resolving it is tricky.
-                
-                # Case 1: If the LLM was lazy and just copied the source (Target="Mayu-Mayu"), 
+
+                # Case 1: If the LLM was lazy and just copied the source (Target="Mayu-Mayu"),
                 # we SHOULD overwrite with canonical (Target="Xiao Dai") to be safe.
                 # Case 2: If the LLM gave a specific variation (Target="Xiao Dai Dai"),
                 # we should PRESERVE it.
-                
+
                 if canon and canon in canonical_map:
                     # Only overwrite if current translation is likely trash (same as source)
                     # or if it's completely empty.
@@ -14702,14 +14702,14 @@ def _run_sakura_discovery(
                     if is_lazy:
                         translation = canonical_map[canon]
                 translation = _sanitize_glossary_target(translation, source, target_lang)
-                
+
                 if source and translation:
                     glossary_map[source] = {
                         "target": translation,
                         "type": type_,
                         "info": item.get("info", "") or f"Canon: {canon}" if canon else ""
                     }
-                            
+
             # Update global glossary securely
             if glossary_map:
                 # Re-load style guide inside lock to prevent race conditions with PipelineWorker
@@ -14717,7 +14717,7 @@ def _run_sakura_discovery(
                     # Update in-memory state for other components
                     state_map = state.setdefault("map", {})
                     state_map.update(glossary_map)
-                    
+
                     # Update file on disk
                     try:
                         current_sg = _load_style_guide(style_guide_path, target_lang)
@@ -14728,7 +14728,7 @@ def _run_sakura_discovery(
                         save_style_guide(style_guide_path, updated_sg)
                     except Exception as io_err:
                         logger.error(f"Glossary Save Error: {str(io_err)}")
-                    
+
         except Exception as e:
             logger.error(f"LLM Error in chunk {i+1}: {str(e)}")
 
@@ -14745,7 +14745,7 @@ def _run_discovery(
 ):
     """
     Background worker for Auto-Glossary discovery using MeCab.
-    
+
     This function:
     1. Extracts proper nouns using MeCab (Japanese NLP)
     2. Groups names into canonical + aliases by reading matching
@@ -14755,44 +14755,44 @@ def _run_discovery(
     with _glossary_lock:
         buffer = list(state.get("buffer", []))
         state["buffer"] = []
-    
+
     if not buffer:
         with _glossary_lock:
             state["is_running"] = False
         return
 
     full_text = "\n".join(buffer)
-    
+
     # Debug log file (optional)
     log_path = None
     if _GLOSSARY_DEBUG:
         import tempfile
         log_path = os.path.join(tempfile.gettempdir(), "auto_glossary_debug.log")
-    
+
     try:
         # Determine model to use
         resolved_model = _resolve_model(model)
-        
+
         logger.info(f"--- MECAB DISCOVERY ---\nBuffer size: {len(full_text)} chars\nModel: {resolved_model}")
-        
+
         # Try MeCab-based extraction first
         try:
             from app.nlp.mecab_extractor import MeCabExtractor, ExtractedName
-            
+
             # Load user suffix config if available
             config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "config", "suffixes.json")
             extractor = MeCabExtractor(config_path=config_path)
-            
+
             if extractor.is_available:
                 # Extract proper nouns
                 names = extractor.extract_proper_nouns(full_text)
-                
+
                 if log_path:
                     with open(log_path, "a", encoding="utf-8") as f:
                         f.write(f"MeCab extracted {len(names)} proper nouns\n")
                         for name in names[:10]:
                             f.write(f"  - {name.surface} (reading: {name.reading}, pos: {name.pos})\n")
-                
+
                 # Fallback: add Kanji name-like chunks if MeCab misses full names
                 if source_lang == "Japanese":
                     extra_names = _extract_kanji_name_heuristic(full_text)
@@ -14812,11 +14812,11 @@ def _run_discovery(
                         canonical_trans = _translate_name(ollama, resolved_model, group.canonical, target_lang)
                         if not canonical_trans:
                             continue
-                        
+
                     with _glossary_lock:
                         glossary_map = state.setdefault("map", {})
                         characters_list = state.setdefault("characters", [])
-                        
+
                         if canonical_trans:
                             glossary_map[group.canonical] = {
                                 "target": canonical_trans,
@@ -14824,7 +14824,7 @@ def _run_discovery(
                                 "pattern": "canonical",
                                 "type": "proper_noun"
                             }
-                        
+
                         # Track this as a character
                         char_entry = {
                             "name": canonical_trans or group.canonical,
@@ -14834,12 +14834,12 @@ def _run_discovery(
                             "gender": "unknown",
                             "aliases": []
                         }
-                    
+
                     # Translate each alias
                     for alias in group.aliases:
                         alias_source = alias["source"]
                         alias_hint = alias.get("hint", "")
-                        
+
                         alias_trans = ""
                         if translate_entities:
                             alias_trans = _translate_alias(
@@ -14849,7 +14849,7 @@ def _run_discovery(
                             )
                             if not alias_trans:
                                 continue
-                        
+
                         with _glossary_lock:
                             if alias_trans:
                                 glossary_map[alias_source] = {
@@ -14859,12 +14859,12 @@ def _run_discovery(
                                     "hint": alias.get("hint", ""),
                                     "type": "proper_noun"
                                 }
-                            
+
                             # Store full alias object with translation
                             alias_obj = dict(alias)
                             alias_obj["target"] = alias_trans
                             char_entry["aliases"].append(alias_obj)
-                    
+
                     # Add character entry
                     with _glossary_lock:
                         # Check if character already exists
@@ -14878,14 +14878,14 @@ def _run_discovery(
                                         existing_aliases.append(a)
                                 found = True
                                 break
-                        
+
                         if not found:
                             characters_list.append(char_entry)
-                
+
                 # Also translate standalone names (not in groups)
                 with _glossary_lock:
                     glossary_map = state.setdefault("map", {})
-                
+
                 for name in names:
                     # Skip if already in glossary
                     if name.surface in glossary_map:
@@ -14903,7 +14903,7 @@ def _run_discovery(
                             }
             else:
                 pass
-                
+
         except ImportError:
             # Fallback to old heuristic method
             if translate_entities:
@@ -14916,12 +14916,12 @@ def _run_discovery(
                         glossary_map = state.setdefault("map", {})
                         if name not in glossary_map:
                             glossary_map[name] = trans
-        
+
         # Save to disk
         with _glossary_lock:
             chars = list(state.get("characters", []))
             g_map = dict(state.get("map", {}))
-        
+
         merged_for_save = _merge_glossary(base_style, g_map, chars)
         merged_for_save = _sanitize_style_guide(merged_for_save, target_lang)
         if style_guide_path:
@@ -14973,12 +14973,12 @@ def _apply_auto_glossary(
         discovery_model=discovery_model,
         settings=settings,
     )
-    
+
     # 3. Read current state to merge
     with _glossary_lock:
          chars = list(state.get("characters", []))
          g_map = dict(state.get("map", {}))
-         
+
     return _merge_glossary(base_style, g_map, chars)
 
 
@@ -15833,11 +15833,11 @@ def _batch_translate(
 ) -> dict:
     resolved = _resolve_model(model)
     translations: dict = {}
-    
+
     # Defaults
     temp = 0.2
     top_p = 0.9
-    
+
     if settings:
         if settings.translator_backend == "GGUF":
              temp = settings.gguf_temperature
@@ -15845,7 +15845,7 @@ def _batch_translate(
         else:
              temp = settings.ollama_temperature
              top_p = settings.ollama_top_p
-             
+
     deepseek_backend = _is_deepseek_translation_backend(settings)
     batch_size = 16
     if settings and settings.translator_backend == "GGUF":
@@ -16152,11 +16152,11 @@ def _translate_single(
             prompt_context,
             text,
         )
-    
+
     # Defaults
     temp = 0.2
     top_p = 0.9
-    
+
     if settings:
         if settings.translator_backend == "GGUF":
              temp = settings.gguf_temperature
@@ -16336,7 +16336,7 @@ def _ensure_target_language(
                 retry_skipped_reason="deterministic_short_reaction",
             )
             return deterministic, True
-    
+
     # Only silence SFX/Empty if it's NOT a speech bubble.
     if not translation and TextFilter(None).should_ignore(ocr_text, "background_text") and not is_bubble:
         _translation_perf_record_post_ensure(
@@ -16368,7 +16368,7 @@ def _ensure_target_language(
         )
         _translation_perf_set_final(debug_record, translation=translation, status="ensure_language_ok")
         return translation, True
-    
+
     # Build retry prompt - be explicit about language requirements
     if target_lang == "Simplified Chinese":
         retry_prompt = (
@@ -16434,7 +16434,7 @@ def _ensure_target_language(
             acceptance_status="retry_accepted",
         )
         return retry, True
-    
+
     # Second retry for Chinese if still has Kana - be even more explicit
     if target_lang == "Simplified Chinese" and "meaningful_japanese_kana" in retry_assessment["hard_failure_reasons"]:
         final_prompt = (
@@ -16480,7 +16480,7 @@ def _ensure_target_language(
             return final, True
         retry = final if final else retry
         retry_assessment = final_assessment if final else retry_assessment
-    
+
     if retry_assessment["hard_failure_reasons"]:
         flagged_translation = retry or translation
         if flagged_translation:
@@ -17018,12 +17018,12 @@ def _should_skip_text(text: str, bbox: list, image_size: tuple[int, int]) -> boo
         return True
     if _placeholder_ratio(text) >= 0.15:
         return True
-    
+
     # CRITICAL FIX: If text is strongly valid Japanese, NEVER skip it
     # This ensures short dialogue like "フ…", "そ", "え?" are always translated
     if _is_valid_japanese(text) >= 0.6:
         return False
-    
+
     x, y, w, h = bbox
     area = w * h
     img_w, img_h = image_size
@@ -17034,7 +17034,7 @@ def _should_skip_text(text: str, bbox: list, image_size: tuple[int, int]) -> boo
     if length <= 2 and ratio < 0.003:
         # Check aspect ratio for very small boxes
         aspect = w / h if h else 0
-        
+
         # FIX: "そ" and vertical text (tall/narrow) are often skipped by current aspect ratio check (0.3 < aspect < 3.5)
         # If it's strongly Japanese, KEEP IT regardless of aspect ratio
         if _is_valid_japanese(text) >= 0.5:
@@ -17881,7 +17881,7 @@ def _clean_ocr_text(text: str) -> str:
     cleaned = cleaned.replace("□", "").replace("�", "")
     if _placeholder_ratio(cleaned) >= 0.2:
         cleaned = cleaned.replace("口", "")
-    
+
     # For CJK text, remove ALL spaces (Japanese/Chinese don't use word spaces)
     # Use _is_valid_japanese score which correctly includes punctuation
     # If score > 0.4, it's likely Japanese/Chinese text
@@ -17889,11 +17889,11 @@ def _clean_ocr_text(text: str) -> str:
     if stripped and _is_valid_japanese(stripped) > 0.4:
         # Remove all spaces from Japanese-dominant text
         cleaned = stripped
-    
+
     # For non-CJK text, just normalize whitespace
     if " " in cleaned:
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    
+
     return cleaned
 
 
@@ -18935,10 +18935,10 @@ def _merge_glossary(style_guide: dict, new_map: dict, new_chars: list) -> dict:
     """Merge new glossary items into style guide."""
     # Ensure glossary list exists
     sg_glossary = style_guide.setdefault("glossary", [])
-    
+
     # Map existing entries by source for quick lookup
     existing_map = {item["source"]: item for item in sg_glossary if "source" in item}
-    
+
     for src, val in new_map.items():
         # Handle rich dict vs simple string
         if isinstance(val, dict):
@@ -18953,7 +18953,7 @@ def _merge_glossary(style_guide: dict, new_map: dict, new_chars: list) -> dict:
             pattern = ""
             hint = ""
             entry_type = "term"
-            
+
         if src not in existing_map:
             # Create new entry
             entry = {
@@ -18966,7 +18966,7 @@ def _merge_glossary(style_guide: dict, new_map: dict, new_chars: list) -> dict:
             if pattern: entry["pattern"] = pattern
             if hint: entry["hint"] = hint
             if entry_type: entry["type"] = entry_type
-            
+
             sg_glossary.append(entry)
             existing_map[src] = entry
         else:
@@ -18981,7 +18981,7 @@ def _merge_glossary(style_guide: dict, new_map: dict, new_chars: list) -> dict:
                      entry["pattern"] = pattern
                  if hint and "hint" not in entry:
                      entry["hint"] = hint
-    
+
     # Merge characters with normalized schema.
     sg_chars_raw = style_guide.setdefault("characters", [])
     sg_chars = []

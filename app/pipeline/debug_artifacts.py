@@ -2799,4 +2799,3 @@ def _json_safe(value: Any) -> Any:
     except Exception:
         pass
     return str(value)
-

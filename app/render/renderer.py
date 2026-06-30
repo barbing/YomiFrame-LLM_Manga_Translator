@@ -2185,7 +2185,7 @@ def render_translations(
                 working = _apply_bubble_fill(working, bubble_area_mask, bubble_text_mask, img_np)
                 if text_mask is not None:
                     text_mask = cv2.bitwise_and(text_mask, cv2.bitwise_not(bubble_text_mask))
-            
+
             # Now apply text removal for everything left after local/source-glyph cleanup.
             # Prefer parent/root partitions so unrelated page areas do not force one
             # page-spanning AI crop. The previous global mask remains the fail-closed
@@ -6306,9 +6306,9 @@ def _resolve_text_color(image, box, default=(0, 0, 0)):
         by0 = max(0, y0 - pad)
         bx1 = min(image.width, x1 + pad)
         by1 = min(image.height, y1 + pad)
-        
+
         crop = image.crop((bx0, by0, bx1, by1))
-        
+
         # Mask out the center (text area) to only checking the rim
         mask = Image.new("L", crop.size, 255)
         draw = ImageDraw.Draw(mask)
@@ -6318,20 +6318,20 @@ def _resolve_text_color(image, box, default=(0, 0, 0)):
         ix1 = x1 - bx0
         iy1 = y1 - by0
         draw.rectangle((ix0, iy0, ix1, iy1), fill=0)
-        
+
         stat = ImageStat.Stat(crop, mask)
         if not stat.mean or len(stat.mean) < 3:
             return default
-            
+
         mean = stat.mean
         lum = 0.2126 * mean[0] + 0.7152 * mean[1] + 0.0722 * mean[2]
-        
+
         # If background is bright, use black text. If dark, use white.
         if lum > 140:
              return (0, 0, 0)
         elif lum < 100:
              return (255, 255, 255)
-             
+
     except Exception:
         return default
     return default
