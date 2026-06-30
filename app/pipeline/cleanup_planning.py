@@ -28,7 +28,8 @@ from app.pipeline.cleanup_contracts import (
 from app.pipeline.cleanup_masks import CleanupMaskBuildResult
 from app.pipeline import cleanup_execution
 from app.pipeline import cleanup_backend_runner
-from app.pipeline.debug_artifacts import mask_stats
+from app.pipeline.debug_artifacts import mask_stats, write_debug_image_file
+from app.pipeline.debug_runtime import diagnostic_enabled, write_diagnostic_checkpoint
 
 try:
     import numpy as np
@@ -107,21 +108,11 @@ COMPONENT_PROJECTION_AUDIT_ONLY_REJECTED_COMPONENT_REASONS = {
 
 
 def _page014_timeout_diag_enabled() -> bool:
-    return str(os.environ.get("MT_PAGE014_TIMEOUT_DIAGNOSTIC") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return diagnostic_enabled("MT_PAGE014_TIMEOUT_DIAGNOSTIC")
 
 
 def _cleanup_perf_contract_diag_enabled() -> bool:
-    return str(os.environ.get("MT_CLEANUP_PERF_CONTRACT_DIAGNOSTIC") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return diagnostic_enabled("MT_CLEANUP_PERF_CONTRACT_DIAGNOSTIC")
 
 
 def _cleanup_perf_contract_json_safe(value: Any) -> Any:
@@ -141,22 +132,13 @@ def _cleanup_perf_contract_checkpoint(stage: str, event: str, **fields: Any) -> 
     if not _cleanup_perf_contract_diag_enabled():
         return
     try:
-        debug_dir = str(os.environ.get("MT_DEBUG_DIR") or "")
-        if debug_dir:
-            os.makedirs(debug_dir, exist_ok=True)
-            path = os.path.join(debug_dir, "cleanup_perf_contract_checkpoints.jsonl")
-        else:
-            path = os.path.abspath("cleanup_perf_contract_checkpoints.jsonl")
-        payload = {
-            "ts": time.time(),
-            "monotonic": time.monotonic(),
-            "module": "app.pipeline.cleanup_planning",
-            "stage": stage,
-            "event": event,
-        }
-        payload.update(_cleanup_perf_contract_json_safe(fields))
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        write_diagnostic_checkpoint(
+            "cleanup_perf_contract_checkpoints.jsonl",
+            module="app.pipeline.cleanup_planning",
+            stage=stage,
+            event=event,
+            fields=_cleanup_perf_contract_json_safe(fields),
+        )
     except Exception:
         return
 
@@ -166,21 +148,14 @@ def _page014_timeout_checkpoint(stage: str, event: str, **fields: Any) -> None:
     if not _page014_timeout_diag_enabled():
         return
     try:
-        debug_dir = str(os.environ.get("MT_DEBUG_DIR") or "")
-        if debug_dir:
-            os.makedirs(debug_dir, exist_ok=True)
-            path = os.path.join(debug_dir, "page014_timeout_checkpoints.jsonl")
-        else:
-            path = os.path.abspath("page014_timeout_checkpoints.jsonl")
-        payload = {
-            "ts": time.time(),
-            "module": "app.pipeline.cleanup_planning",
-            "stage": stage,
-            "event": event,
-        }
-        payload.update(fields)
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        write_diagnostic_checkpoint(
+            "page014_timeout_checkpoints.jsonl",
+            module="app.pipeline.cleanup_planning",
+            stage=stage,
+            event=event,
+            fields=fields,
+            include_monotonic=False,
+        )
     except Exception:
         return
 
@@ -2740,7 +2715,7 @@ def _save_commit_diff_mask(before: Any, after: Any, path: str) -> None:
             return
         diff = np.abs(after_np.astype(np.int16) - before_np.astype(np.int16))
         changed = np.any(diff > 8, axis=2) if diff.ndim == 3 else diff > 8
-        Image.fromarray(changed.astype(np.uint8) * 255).save(path)
+        write_debug_image_file(path, Image.fromarray(changed.astype(np.uint8) * 255))
     except Exception:
         return
 
@@ -6885,8 +6860,7 @@ def _write_runtime_artifacts(
 
 
 def _save_image(image: Any, path: str) -> None:
-    if hasattr(image, "save"):
-        image.save(path)
+    write_debug_image_file(path, image)
 
 
 def _save_diff(before: Any, after: Any, path: str) -> None:
@@ -6901,7 +6875,7 @@ def _save_diff(before: Any, after: Any, path: str) -> None:
         diff_gray = np.max(diff, axis=2).astype(np.uint8)
     else:
         diff_gray = diff.astype(np.uint8)
-    Image.fromarray(diff_gray).save(path)
+    write_debug_image_file(path, Image.fromarray(diff_gray))
 
 
 def _save_mask(mask: Any, path: str) -> None:
@@ -6910,14 +6884,14 @@ def _save_mask(mask: Any, path: str) -> None:
     arr = np.asarray(mask)
     if arr.ndim != 2:
         return
-    Image.fromarray((arr > 0).astype(np.uint8) * 255).save(path)
+    write_debug_image_file(path, Image.fromarray((arr > 0).astype(np.uint8) * 255))
 
 
 def _save_crop(image: Any, bbox: Sequence[int] | None, path: str) -> None:
     box = _valid_bbox(bbox)
     if box is None or not hasattr(image, "crop"):
         return
-    image.crop(tuple(box)).save(path)
+    write_debug_image_file(path, image.crop(tuple(box)))
 
 
 def _clip_mask_to_valid_bbox(mask: Any, bbox: Sequence[int]) -> Any:
@@ -7537,8 +7511,8 @@ def _write_residual_source_mask(
             filename = f"cres_{digest}_residual_source_mask.png"
             path = os.path.join(artifact_dir, filename)
         arr = (np.asarray(residual_mask) > 0).astype(np.uint8) * 255
-        Image.fromarray(arr, mode="L").save(path)
-        return path, ""
+        written = write_debug_image_file(path, Image.fromarray(arr, mode="L"))
+        return written, "" if written else "cleanup_artifact_write_failed"
     except Exception as exc:
         return "", f"{type(exc).__name__}: {exc}"
 

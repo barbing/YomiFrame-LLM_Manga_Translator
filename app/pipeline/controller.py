@@ -27,6 +27,12 @@ from app.pipeline.parent_execution_bundle import (
     parent_execution_region_records,
     sync_bundles_from_region_records,
 )
+from app.pipeline.debug_runtime import (
+    diagnostic_enabled,
+    safe_trace_token,
+    save_context_image,
+    write_diagnostic_checkpoint,
+)
 from app.pipeline.steps import build_output_path, build_page_record
 from app.models.ollama import list_models
 from app.translate.prompts import build_translation_prompt, build_batch_translation_prompt, build_entity_extraction_prompt
@@ -65,21 +71,11 @@ class PageProcessingResult:
 
 
 def _page014_timeout_diag_enabled() -> bool:
-    return str(os.environ.get("MT_PAGE014_TIMEOUT_DIAGNOSTIC") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return diagnostic_enabled("MT_PAGE014_TIMEOUT_DIAGNOSTIC")
 
 
 def _cleanup_perf_contract_diag_enabled() -> bool:
-    return str(os.environ.get("MT_CLEANUP_PERF_CONTRACT_DIAGNOSTIC") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return diagnostic_enabled("MT_CLEANUP_PERF_CONTRACT_DIAGNOSTIC")
 
 
 def _cleanup_perf_contract_json_safe(value: Any) -> Any:
@@ -99,22 +95,15 @@ def _cleanup_perf_contract_checkpoint(stage: str, event: str, **fields: Any) -> 
     if not _cleanup_perf_contract_diag_enabled():
         return
     try:
-        debug_dir = str(os.environ.get("MT_DEBUG_DIR") or fields.pop("debug_dir", "") or "")
-        if debug_dir:
-            os.makedirs(debug_dir, exist_ok=True)
-            path = os.path.join(debug_dir, "cleanup_perf_contract_checkpoints.jsonl")
-        else:
-            path = os.path.abspath("cleanup_perf_contract_checkpoints.jsonl")
-        payload = {
-            "ts": time.time(),
-            "monotonic": time.monotonic(),
-            "module": "app.pipeline.controller",
-            "stage": stage,
-            "event": event,
-        }
-        payload.update(_cleanup_perf_contract_json_safe(fields))
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        debug_dir = str(fields.pop("debug_dir", "") or "")
+        write_diagnostic_checkpoint(
+            "cleanup_perf_contract_checkpoints.jsonl",
+            module="app.pipeline.controller",
+            stage=stage,
+            event=event,
+            fields=_cleanup_perf_contract_json_safe(fields),
+            debug_dir=debug_dir,
+        )
     except Exception:
         return
 
@@ -277,21 +266,16 @@ def _page014_timeout_checkpoint(stage: str, event: str, **fields: Any) -> None:
     if not _page014_timeout_diag_enabled():
         return
     try:
-        debug_dir = str(os.environ.get("MT_DEBUG_DIR") or fields.pop("debug_dir", "") or "")
-        if debug_dir:
-            os.makedirs(debug_dir, exist_ok=True)
-            path = os.path.join(debug_dir, "page014_timeout_checkpoints.jsonl")
-        else:
-            path = os.path.abspath("page014_timeout_checkpoints.jsonl")
-        payload = {
-            "ts": time.time(),
-            "module": "app.pipeline.controller",
-            "stage": stage,
-            "event": event,
-        }
-        payload.update(fields)
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        debug_dir = str(fields.pop("debug_dir", "") or "")
+        write_diagnostic_checkpoint(
+            "page014_timeout_checkpoints.jsonl",
+            module="app.pipeline.controller",
+            stage=stage,
+            event=event,
+            fields=fields,
+            debug_dir=debug_dir,
+            include_monotonic=False,
+        )
     except Exception:
         return
 
@@ -361,6 +345,8 @@ class PipelineSettings:
     gguf_cross_page_context: bool = False
     debug_artifacts: bool = False
     debug_pages: str = ""
+    debug_stages: str = ""
+    debug_disabled_stages: str = ""
     debug_dir: str = ""
     private_cleanup_validation_stop_after_cleanup: bool = False
 
@@ -486,6 +472,7 @@ class PipelineWorker(QtCore.QThread):
             debug_enabled,
             debug_pages,
             debug_root,
+            debug_stage_artifact_dir,
             mark_render_region,
             new_page_context,
             new_perf_page_context,
@@ -676,7 +663,13 @@ class PipelineWorker(QtCore.QThread):
                 output_path = build_output_path(self._settings.export_dir, name, self._settings.output_suffix)
                 debug_context = None
                 if debug_artifacts_enabled and page_matches(name, debug_page_filter):
-                    debug_context = new_page_context(name, source_path, output_path, debug_artifacts_root)
+                    debug_context = new_page_context(
+                        name,
+                        source_path,
+                        output_path,
+                        debug_artifacts_root,
+                        settings=self._settings,
+                    )
                 elif perf_telemetry_is_enabled:
                     debug_context = new_perf_page_context(name, source_path, output_path, perf_telemetry_output_root)
 
@@ -938,9 +931,16 @@ class PipelineWorker(QtCore.QThread):
                     runtime_artifact_dir = None
                     upstream_commit_artifact_dir = None
                     if debug_context is not None and not debug_context.get("perf_telemetry_only"):
-                        debug_page_dir = os.path.join(str(debug_context.get("debug_dir") or ""), page_id)
-                        runtime_artifact_dir = os.path.join(debug_page_dir, "cleanup_runtime_contracts")
-                        upstream_commit_artifact_dir = os.path.join(debug_page_dir, "cleanup_upstream_commit")
+                        runtime_artifact_dir = debug_stage_artifact_dir(
+                            debug_context,
+                            "cleanup_runtime",
+                            "cleanup_runtime_contracts",
+                        )
+                        upstream_commit_artifact_dir = debug_stage_artifact_dir(
+                            debug_context,
+                            "cleanup_commit",
+                            "cleanup_upstream_commit",
+                        )
                     try:
                         from PIL import Image
                         with Image.open(source_path) as runtime_source:
@@ -2167,21 +2167,13 @@ _ocr_debug_counter = 0
 
 
 def _safe_trace_token(value: object, fallback: str = "item") -> str:
-    text = str(value or "").strip() or fallback
-    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", text)
-    return text[:96] or fallback
+    return safe_trace_token(value, fallback)
 
 
 def _debug_page_dir(debug_context: dict | None) -> str:
-    if not debug_context:
-        return ""
-    root_dir = str(debug_context.get("debug_dir") or "").strip()
-    page_id = str(debug_context.get("page_id") or "page").strip() or "page"
-    if not root_dir:
-        return ""
-    page_dir = os.path.join(root_dir, page_id)
-    os.makedirs(page_dir, exist_ok=True)
-    return page_dir
+    from app.pipeline.debug_artifacts import debug_stage_artifact_dir
+
+    return debug_stage_artifact_dir(debug_context, "ocr")
 
 
 def _build_text_foreground_segmentation_mask(
@@ -2223,12 +2215,16 @@ def _build_text_foreground_segmentation_mask(
     refined_ref = ""
     page_dir = _debug_page_dir(debug_context)
     if page_dir:
-        seg_dir = os.path.join(page_dir, "text_foreground_segmentation")
-        os.makedirs(seg_dir, exist_ok=True)
-        raw_ref = _save_segmentation_mask_ref(getattr(result, "raw_mask", None), seg_dir, f"{page_id}_ctd_raw_mask.png")
+        raw_ref = _save_segmentation_mask_ref(
+            getattr(result, "raw_mask", None),
+            debug_context,
+            "text_foreground_segmentation",
+            f"{page_id}_ctd_raw_mask.png",
+        )
         refined_ref = _save_segmentation_mask_ref(
             getattr(result, "refined_mask", None),
-            seg_dir,
+            debug_context,
+            "text_foreground_segmentation",
             f"{page_id}_ctd_refined_mask.png",
         )
     contract = TextForegroundSegmentationMask(
@@ -2254,7 +2250,7 @@ def _build_text_foreground_segmentation_mask(
     return contract
 
 
-def _save_segmentation_mask_ref(mask, directory: str, filename: str) -> str:
+def _save_segmentation_mask_ref(mask, debug_context: dict | None, subdir: str, filename: str) -> str:
     if mask is None:
         return ""
     try:
@@ -2267,9 +2263,14 @@ def _save_segmentation_mask_ref(mask, directory: str, filename: str) -> str:
         elif arr.ndim != 2:
             return ""
         out = (arr > 0).astype("uint8") * 255
-        path = os.path.join(directory, filename)
-        Image.fromarray(out, mode="L").save(path)
-        return path
+        path, saved, _error = save_context_image(
+            debug_context,
+            subdir=subdir,
+            filename=filename,
+            image=Image.fromarray(out, mode="L"),
+            stage="ocr",
+        )
+        return path if saved else ""
     except Exception:
         return ""
 
@@ -2314,27 +2315,22 @@ def _begin_scoped_ocr_trace(
     if not debug_context:
         return None
     trace_context = dict(trace_context or {})
-    page_dir = _debug_page_dir(debug_context)
-    if not page_dir:
+    if not _debug_page_dir(debug_context):
         return None
     counter = int(debug_context.get("_scoped_ocr_trace_counter") or 0)
     debug_context["_scoped_ocr_trace_counter"] = counter + 1
     page_id = str(trace_context.get("page_id") or debug_context.get("page_id") or "page")
     attempt_id = f"{page_id}_ocr_{counter:04d}"
-    crop_dir = os.path.join(page_dir, "scoped_ocr_crops")
-    os.makedirs(crop_dir, exist_ok=True)
-    crop_path = os.path.join(
-        crop_dir,
-        f"{attempt_id}_{_safe_trace_token(trace_context.get('attempt_kind') or trace_context.get('text_area_container_id') or 'scoped')}.png",
+    crop_filename = (
+        f"{attempt_id}_"
+        f"{_safe_trace_token(trace_context.get('attempt_kind') or trace_context.get('text_area_container_id') or 'scoped')}.png"
     )
-    crop_saved = False
-    crop_error = ""
-    try:
-        if hasattr(crop, "save"):
-            crop.save(crop_path)
-            crop_saved = True
-    except Exception as exc:
-        crop_error = f"{type(exc).__name__}: {exc}"
+    crop_path, crop_saved, crop_error = save_context_image(
+        debug_context,
+        subdir="scoped_ocr_crops",
+        filename=crop_filename,
+        image=crop,
+    )
     record = {
         "page_id": page_id,
         "ocr_trace_attempt_id": attempt_id,
@@ -2452,17 +2448,21 @@ def _recognize_with_fallback(
 
     # DEBUG: Save crop images
     if settings and getattr(settings, 'debug_ocr', False):
-        try:
-            import os
-            debug_dir = os.path.join(settings.export_dir, "ocr_debug")
-            os.makedirs(debug_dir, exist_ok=True)
-            crop_path = os.path.join(debug_dir, f"crop_{_ocr_debug_counter:04d}_bbox_{bbox}.png")
-            if hasattr(crop, 'save'):
-                crop.save(crop_path)
-                print(f"[OCR DEBUG] Saved crop: {crop_path}")
-            _ocr_debug_counter += 1
-        except Exception as e:
-            print(f"[OCR DEBUG] Failed to save crop: {e}")
+        ocr_debug_context = debug_context or {
+            "debug_dir": os.path.join(str(getattr(settings, "export_dir", "") or os.getcwd()), "debug_artifacts"),
+            "page_id": "ocr_debug",
+        }
+        crop_path, crop_saved, crop_error = save_context_image(
+            ocr_debug_context,
+            subdir="ocr_debug_crops",
+            filename=f"crop_{_ocr_debug_counter:04d}_bbox_{_safe_trace_token(bbox, 'bbox')}.png",
+            image=crop,
+        )
+        if crop_saved:
+            print(f"[OCR DEBUG] Saved crop: {crop_path}")
+        elif crop_error:
+            print(f"[OCR DEBUG] Failed to save crop: {crop_error}")
+        _ocr_debug_counter += 1
 
     if hasattr(ocr_engine, "recognize_with_confidence"):
         text, conf = ocr_engine.recognize_with_confidence(crop)

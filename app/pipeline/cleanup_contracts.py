@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
+from app.pipeline.debug_runtime import diagnostic_enabled, write_diagnostic_checkpoint
 from app.pipeline.parent_execution_bundle import parent_execution_region_records
 
 
@@ -20,12 +21,7 @@ CLEANUP_CONTRACT_VERSION = "cleanup_contracts_phase0"
 
 
 def _cleanup_perf_contract_diag_enabled() -> bool:
-    return str(os.environ.get("MT_CLEANUP_PERF_CONTRACT_DIAGNOSTIC") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return diagnostic_enabled("MT_CLEANUP_PERF_CONTRACT_DIAGNOSTIC")
 
 
 def _cleanup_perf_contract_json_safe(value: Any) -> Any:
@@ -45,22 +41,13 @@ def _cleanup_perf_contract_checkpoint(stage: str, event: str, **fields: Any) -> 
     if not _cleanup_perf_contract_diag_enabled():
         return
     try:
-        debug_dir = str(os.environ.get("MT_DEBUG_DIR") or "")
-        if debug_dir:
-            os.makedirs(debug_dir, exist_ok=True)
-            path = os.path.join(debug_dir, "cleanup_perf_contract_checkpoints.jsonl")
-        else:
-            path = os.path.abspath("cleanup_perf_contract_checkpoints.jsonl")
-        payload = {
-            "ts": time.time(),
-            "monotonic": time.monotonic(),
-            "module": "app.pipeline.cleanup_contracts",
-            "stage": stage,
-            "event": event,
-        }
-        payload.update(_cleanup_perf_contract_json_safe(fields))
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        write_diagnostic_checkpoint(
+            "cleanup_perf_contract_checkpoints.jsonl",
+            module="app.pipeline.cleanup_contracts",
+            stage=stage,
+            event=event,
+            fields=_cleanup_perf_contract_json_safe(fields),
+        )
     except Exception:
         return
 

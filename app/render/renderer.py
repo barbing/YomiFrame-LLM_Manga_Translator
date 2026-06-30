@@ -9,7 +9,16 @@ import re
 import time
 from typing import Any, Dict, List, Tuple
 
-from app.pipeline.debug_artifacts import add_count, add_timing, debug_artifact_level, mark_render_region, mask_stats
+from app.pipeline.debug_artifacts import (
+    add_count,
+    add_timing,
+    debug_artifact_level,
+    debug_stage_artifact_dir,
+    mark_render_region,
+    mask_stats,
+    write_debug_stage_image_path,
+    write_pre_render_source_erasure_debug_image as _debug_write_pre_render_source_erasure_debug_image,
+)
 from app.pipeline import cleanup_execution
 from app.pipeline import source_glyph_masks as source_glyph_mask_stage
 from app.pipeline.parent_execution_bundle import parent_execution_region_records
@@ -4443,20 +4452,7 @@ def _mask_overlap_ratio(expected_mask, cleanup_mask) -> float:
 
 
 def _write_pre_render_source_erasure_debug_image(working, debug_context: dict | None) -> None:
-    if not debug_context or Image is None or working is None:
-        return
-    debug_dir = str(debug_context.get("debug_dir") or "")
-    page_id = str(debug_context.get("page_id") or "page")
-    if not debug_dir:
-        return
-    try:
-        page_dir = os.path.join(debug_dir, page_id)
-        os.makedirs(page_dir, exist_ok=True)
-        path = os.path.join(page_dir, f"{page_id}_pre_render_cleaned.jpg")
-        working.save(path, quality=92)
-        debug_context["pre_render_source_erasure_image_path"] = path
-    except Exception as exc:
-        debug_context["pre_render_source_erasure_image_error"] = f"{type(exc).__name__}: {exc}"
+    _debug_write_pre_render_source_erasure_debug_image(working, debug_context)
 
 
 def _xyxy_or_xywh_to_xyxy(value, img_w: int, img_h: int) -> tuple[int, int, int, int] | None:
@@ -5094,15 +5090,7 @@ def _render_eligibility_value(decision: object | None, key: str):
 
 
 def _cleanup_trace_page_dir(debug_context: dict | None) -> str:
-    if not debug_context:
-        return ""
-    root_dir = str(debug_context.get("debug_dir") or "").strip()
-    page_id = str(debug_context.get("page_id") or "page").strip() or "page"
-    if not root_dir:
-        return ""
-    page_dir = os.path.join(root_dir, page_id)
-    os.makedirs(page_dir, exist_ok=True)
-    return page_dir
+    return debug_stage_artifact_dir(debug_context, "cleanup_trace")
 
 
 def _cleanup_trace_crop_box(operation: dict[str, object], mask) -> tuple[int, int, int, int] | None:
@@ -5132,18 +5120,22 @@ def _clip_cleanup_trace_box(box: tuple[int, int, int, int], width: int, height: 
     return x0, y0, x1, y1
 
 
-def _save_cleanup_trace_image(image, box: tuple[int, int, int, int] | None, path: str) -> str:
+def _save_cleanup_trace_image(debug_context: dict | None, image, box: tuple[int, int, int, int] | None, path: str) -> str:
     if Image is None or image is None or box is None:
         return ""
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        image.crop(box).save(path)
-        return path
+        written_path, ok, _error = write_debug_stage_image_path(
+            debug_context,
+            "cleanup_trace",
+            path,
+            image.crop(box),
+        )
+        return written_path if ok else ""
     except Exception:
         return ""
 
 
-def _save_cleanup_trace_mask(mask, box: tuple[int, int, int, int] | None, path: str) -> str:
+def _save_cleanup_trace_mask(debug_context: dict | None, mask, box: tuple[int, int, int, int] | None, path: str) -> str:
     if Image is None or np is None or mask is None or box is None:
         return ""
     try:
@@ -5152,14 +5144,19 @@ def _save_cleanup_trace_mask(mask, box: tuple[int, int, int, int] | None, path: 
         if crop.size == 0:
             return ""
         img = Image.fromarray(((crop > 0).astype(np.uint8) * 255), mode="L")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        img.save(path)
-        return path
+        written_path, ok, _error = write_debug_stage_image_path(debug_context, "cleanup_trace", path, img)
+        return written_path if ok else ""
     except Exception:
         return ""
 
 
-def _save_cleanup_residual_map(before_image, after_image, box: tuple[int, int, int, int] | None, path: str) -> tuple[str, int, float]:
+def _save_cleanup_residual_map(
+    debug_context: dict | None,
+    before_image,
+    after_image,
+    box: tuple[int, int, int, int] | None,
+    path: str,
+) -> tuple[str, int, float]:
     if Image is None or ImageChops is None or before_image is None or after_image is None or box is None:
         return "", 0, 0.0
     try:
@@ -5172,9 +5169,8 @@ def _save_cleanup_residual_map(before_image, after_image, box: tuple[int, int, i
         heat = Image.new("RGB", threshold.size, (0, 0, 0))
         heat.paste((255, 32, 32), mask=threshold)
         blended = Image.blend(after_crop, heat, 0.45)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        blended.save(path)
-        return path, pixels, round(pixels / total, 4)
+        written_path, ok, _error = write_debug_stage_image_path(debug_context, "cleanup_trace", path, blended)
+        return (written_path if ok else ""), pixels, round(pixels / total, 4)
     except Exception:
         return "", 0, 0.0
 
@@ -5409,10 +5405,11 @@ def _record_cleanup_operation_trace(
     changed_proxy_ratio = 0.0
     cleanup_trace_image_write_start = time.time()
     if save_trace_images:
-        pre_path = _save_cleanup_trace_image(before_image, crop_box, os.path.join(trace_dir, "pre_clean_crop.png"))
-        post_path = _save_cleanup_trace_image(after_image, crop_box, os.path.join(trace_dir, "post_clean_crop.png"))
-        mask_path = _save_cleanup_trace_mask(cleanup_mask, crop_box, os.path.join(trace_dir, "cleanup_mask_crop.png"))
+        pre_path = _save_cleanup_trace_image(debug_context, before_image, crop_box, os.path.join(trace_dir, "pre_clean_crop.png"))
+        post_path = _save_cleanup_trace_image(debug_context, after_image, crop_box, os.path.join(trace_dir, "post_clean_crop.png"))
+        mask_path = _save_cleanup_trace_mask(debug_context, cleanup_mask, crop_box, os.path.join(trace_dir, "cleanup_mask_crop.png"))
         pre_post_map, changed_proxy_pixels, changed_proxy_ratio = _save_cleanup_residual_map(
+            debug_context,
             before_image,
             after_image,
             crop_box,
@@ -5420,6 +5417,7 @@ def _record_cleanup_operation_trace(
         )
         if source_image is not None:
             original_post_map, _orig_pixels, _orig_ratio = _save_cleanup_residual_map(
+                debug_context,
                 source_image,
                 after_image,
                 crop_box,

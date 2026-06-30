@@ -6093,10 +6093,69 @@ def write_text_area_plan_artifacts(
     paths["caption_localization_candidates"].write_text(json.dumps(caption_candidates, ensure_ascii=False, indent=2), encoding="utf-8")
     graph_plan = plan_dict.get("root_parent_child_plan")
     if isinstance(graph_plan, Mapping):
-        paths["root_parent_child_plan"] = page_dir / "root_parent_child_plan.json"
-        paths["root_parent_child_plan"].write_text(json.dumps(dict(graph_plan), ensure_ascii=False, indent=2), encoding="utf-8")
+        paths.update(
+            {
+                key: Path(value)
+                for key, value in write_root_parent_child_overlay_artifacts(
+                    page_dir=page_dir,
+                    image_path=image_path,
+                    graph_plan=graph_plan,
+                ).items()
+            }
+        )
     _write_plan_summary(paths["text_area_plan_summary"], plan_dict, scoped_detection_candidates or [], scoped_ocr_candidates or [], fallback_decisions or [], blocked)
     _write_plan_overlay(paths["text_area_plan_overlay"], image_path, plan_dict, scoped_detection_candidates or [])
+    return {key: str(path) for key, path in paths.items()}
+
+
+def write_root_parent_child_overlay_artifacts(
+    *,
+    page_dir: str | Path,
+    image_path: str | Path,
+    graph_plan: Mapping[str, Any] | None,
+) -> Dict[str, str]:
+    """Write visual graph overlays from an already-built TextAreaPlan graph."""
+
+    page_dir = Path(page_dir)
+    page_dir.mkdir(parents=True, exist_ok=True)
+    graph = dict(graph_plan or {})
+    paths: Dict[str, Path] = {
+        "root_parent_child_plan": page_dir / "root_parent_child_plan.json",
+    }
+    paths["root_parent_child_plan"].write_text(json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
+    if graph:
+        paths.update(
+            {
+                "root_workflow_nodes_overlay": page_dir / "root_workflow_nodes_overlay.jpg",
+                "parent_boundary_overlay": page_dir / "parent_boundary_overlay.jpg",
+                "child_slot_overlay": page_dir / "child_slot_overlay.jpg",
+                "root_parent_overlay": page_dir / "root_parent_overlay.jpg",
+            }
+        )
+        _write_graph_plan_overlay(
+            paths["root_workflow_nodes_overlay"],
+            image_path,
+            graph,
+            layer="root",
+        )
+        _write_graph_plan_overlay(
+            paths["parent_boundary_overlay"],
+            image_path,
+            graph,
+            layer="parent",
+        )
+        _write_graph_plan_overlay(
+            paths["child_slot_overlay"],
+            image_path,
+            graph,
+            layer="child",
+        )
+        _write_graph_plan_overlay(
+            paths["root_parent_overlay"],
+            image_path,
+            graph,
+            layer="root_parent",
+        )
     return {key: str(path) for key, path in paths.items()}
 
 
@@ -11331,6 +11390,133 @@ def _caption_localization_candidates_from_plan(plan: Mapping[str, Any]) -> List[
             }
         )
     return candidates
+
+
+def _write_graph_plan_overlay(
+    path: Path,
+    image_path: str | Path,
+    graph_plan: Mapping[str, Any],
+    *,
+    layer: str,
+) -> None:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception:
+        return
+    image_path = Path(image_path)
+    if not image_path.exists():
+        return
+    try:
+        base = Image.open(image_path).convert("RGB")
+    except Exception:
+        return
+    draw = ImageDraw.Draw(base)
+    font = _overlay_font(ImageFont)
+    colors = {
+        "root": (40, 120, 255),
+        "parent": (255, 130, 0),
+        "child": (160, 0, 220),
+        "excluded": (120, 120, 120),
+        "blocker": (220, 0, 0),
+    }
+    title_by_layer = {
+        "root": "Root workflow nodes",
+        "parent": "Parent boundary nodes",
+        "child": "Child evidence slots",
+        "root_parent": "Root/parent graph overlay",
+    }
+    legend = title_by_layer.get(layer, "Root/parent graph overlay")
+    draw.rectangle((8, 8, 640, 74), fill=(255, 255, 255), outline=(0, 0, 0), width=2)
+    draw.text((16, 14), legend, fill=(0, 0, 0), font=font)
+    draw.text(
+        (16, 38),
+        "blue=root, orange=parent, purple=child, gray=excluded, red=blocker",
+        fill=(0, 0, 0),
+        font=font,
+    )
+    if layer in {"root", "root_parent"}:
+        _draw_graph_nodes(
+            draw,
+            font,
+            graph_plan.get("root_nodes") or [],
+            id_key="root_node_id",
+            color=colors["root"],
+            prefix="R",
+            width=4,
+        )
+    if layer in {"parent", "root_parent"}:
+        _draw_graph_nodes(
+            draw,
+            font,
+            graph_plan.get("parent_nodes") or [],
+            id_key="parent_node_id",
+            color=colors["parent"],
+            prefix="P",
+            width=3,
+        )
+    if layer == "child":
+        _draw_graph_nodes(
+            draw,
+            font,
+            graph_plan.get("child_evidence_slots") or [],
+            id_key="child_slot_id",
+            color=colors["child"],
+            prefix="C",
+            width=3,
+        )
+    if layer in {"root", "root_parent"}:
+        _draw_graph_nodes(
+            draw,
+            font,
+            graph_plan.get("excluded_inventory") or [],
+            id_key="excluded_id",
+            color=colors["excluded"],
+            prefix="X",
+            width=2,
+        )
+    _draw_graph_nodes(
+        draw,
+        font,
+        graph_plan.get("graph_blockers") or [],
+        id_key="blocker_id",
+        color=colors["blocker"],
+        prefix="B",
+        width=3,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    base.save(path, quality=92)
+
+
+def _draw_graph_nodes(
+    draw: Any,
+    font: Any,
+    nodes: Sequence[Any],
+    *,
+    id_key: str,
+    color: Tuple[int, int, int],
+    prefix: str,
+    width: int,
+) -> None:
+    for node in nodes:
+        if not isinstance(node, Mapping):
+            continue
+        box = _xywh_to_xyxy(node.get("bbox") or [])
+        if not box:
+            continue
+        xyxy = tuple(int(round(v)) for v in box)
+        draw.rectangle(xyxy, outline=color, width=width)
+        node_id = str(node.get(id_key) or node.get("id") or "").strip()
+        role = str(
+            node.get("semantic_role")
+            or node.get("parent_kind")
+            or node.get("exclusion_kind")
+            or node.get("blocker_kind")
+            or ""
+        ).strip()
+        label = f"{prefix} {node_id}"
+        if role:
+            label = f"{label} {role}"
+        _draw_label(draw, font, (xyxy[0] + 2, max(0, xyxy[1] - 18)), label, color)
 
 
 def _write_plan_overlay(

@@ -13,6 +13,7 @@ import time
 from functools import lru_cache
 
 from app.config.defaults import CLEANUP_INPAINT_MODEL_FILE, IOPAINT_ANIME_MANGA_BIG_LAMA
+from app.pipeline.debug_runtime import diagnostic_enabled, write_diagnostic_checkpoint
 
 try:
     from PIL import Image
@@ -32,21 +33,11 @@ FIXED_CLEANUP_INPAINT_SELECTION_POLICY = "fixed_cleanup_iopaint_model"
 
 
 def _page014_timeout_diag_enabled() -> bool:
-    return str(os.environ.get("MT_PAGE014_TIMEOUT_DIAGNOSTIC") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return diagnostic_enabled("MT_PAGE014_TIMEOUT_DIAGNOSTIC")
 
 
 def _cleanup_perf_contract_diag_enabled() -> bool:
-    return str(os.environ.get("MT_CLEANUP_PERF_CONTRACT_DIAGNOSTIC") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return diagnostic_enabled("MT_CLEANUP_PERF_CONTRACT_DIAGNOSTIC")
 
 
 def _cleanup_perf_contract_json_safe(value):
@@ -66,22 +57,13 @@ def _cleanup_perf_contract_checkpoint(stage: str, event: str, **fields) -> None:
     if not _cleanup_perf_contract_diag_enabled():
         return
     try:
-        debug_dir = str(os.environ.get("MT_DEBUG_DIR") or "")
-        if debug_dir:
-            os.makedirs(debug_dir, exist_ok=True)
-            path = os.path.join(debug_dir, "cleanup_perf_contract_checkpoints.jsonl")
-        else:
-            path = os.path.abspath("cleanup_perf_contract_checkpoints.jsonl")
-        payload = {
-            "ts": time.time(),
-            "monotonic": time.monotonic(),
-            "module": "app.pipeline.cleanup_inpainting",
-            "stage": stage,
-            "event": event,
-        }
-        payload.update(_cleanup_perf_contract_json_safe(fields))
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        write_diagnostic_checkpoint(
+            "cleanup_perf_contract_checkpoints.jsonl",
+            module="app.pipeline.cleanup_inpainting",
+            stage=stage,
+            event=event,
+            fields=_cleanup_perf_contract_json_safe(fields),
+        )
     except Exception:
         return
 
@@ -91,21 +73,14 @@ def _page014_timeout_checkpoint(stage: str, event: str, **fields) -> None:
     if not _page014_timeout_diag_enabled():
         return
     try:
-        debug_dir = str(os.environ.get("MT_DEBUG_DIR") or "")
-        if debug_dir:
-            os.makedirs(debug_dir, exist_ok=True)
-            path = os.path.join(debug_dir, "page014_timeout_checkpoints.jsonl")
-        else:
-            path = os.path.abspath("page014_timeout_checkpoints.jsonl")
-        payload = {
-            "ts": time.time(),
-            "module": "app.pipeline.cleanup_inpainting",
-            "stage": stage,
-            "event": event,
-        }
-        payload.update(fields)
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        write_diagnostic_checkpoint(
+            "page014_timeout_checkpoints.jsonl",
+            module="app.pipeline.cleanup_inpainting",
+            stage=stage,
+            event=event,
+            fields=fields,
+            include_monotonic=False,
+        )
     except Exception:
         return
 

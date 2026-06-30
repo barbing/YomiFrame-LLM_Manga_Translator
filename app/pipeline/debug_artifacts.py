@@ -8,6 +8,22 @@ import os
 import re
 from typing import Any
 
+from app.pipeline.debug_runtime import (
+    debug_artifact_level,
+    debug_disabled_stages,
+    debug_enabled,
+    debug_pages,
+    debug_root,
+    debug_stage_enabled,
+    debug_stages,
+    page_debug_dir,
+    perf_telemetry_enabled,
+    perf_telemetry_root,
+    stage_artifact_dir,
+    stage_artifact_path,
+    write_image_path,
+)
+
 try:
     from PIL import Image, ImageDraw, ImageFont
 except Exception:  # pragma: no cover - optional runtime dependency
@@ -17,75 +33,6 @@ except Exception:  # pragma: no cover - optional runtime dependency
 
 _PHASE2E_TARGET_ROOT_IDS: dict[str, str] = {}
 _PHASE2E_TARGET_REGION_IDS: dict[tuple[str, str], str] = {}
-
-
-def debug_enabled(settings=None) -> bool:
-    value = os.getenv("MT_DEBUG_ARTIFACTS", "").strip().lower()
-    if value in {"1", "true", "yes", "on"}:
-        return True
-    if value in {"0", "false", "no", "off"}:
-        return False
-    return bool(getattr(settings, "debug_artifacts", False))
-
-
-def debug_artifact_level(settings=None) -> str:
-    value = os.getenv("MT_DEBUG_ARTIFACT_LEVEL", "").strip().lower()
-    if not value:
-        value = str(getattr(settings, "debug_artifact_level", "") or "").strip().lower()
-    if value in {"full", "lite", "off"}:
-        return value
-    if value in {"1", "true", "yes", "on"}:
-        return "full"
-    if value in {"0", "false", "no"}:
-        return "off"
-    return "full"
-
-
-def debug_pages(settings=None) -> set[str]:
-    raw = os.getenv("MT_DEBUG_PAGES", "").strip()
-    if not raw:
-        raw = str(getattr(settings, "debug_pages", "") or "").strip()
-    pages: set[str] = set()
-    for part in re.split(r"[,;\s]+", raw):
-        token = part.strip()
-        if not token:
-            continue
-        stem = os.path.splitext(os.path.basename(token))[0]
-        pages.add(stem)
-        digits = "".join(ch for ch in stem if ch.isdigit())
-        if digits:
-            pages.add(digits)
-            pages.add(digits.zfill(3))
-    return pages
-
-
-def debug_root(settings=None) -> str:
-    configured = os.getenv("MT_DEBUG_DIR", "").strip() or str(getattr(settings, "debug_dir", "") or "").strip()
-    if configured:
-        return configured
-    export_dir = str(getattr(settings, "export_dir", "") or "").strip()
-    if export_dir:
-        return os.path.join(export_dir, "debug_artifacts")
-    return os.path.join(os.getcwd(), "debug_artifacts")
-
-
-def perf_telemetry_enabled(settings=None) -> bool:
-    value = os.getenv("MT_PERF_TELEMETRY", "").strip().lower()
-    if value in {"1", "true", "yes", "on"}:
-        return True
-    if value in {"0", "false", "no", "off"}:
-        return False
-    return bool(getattr(settings, "perf_telemetry", False))
-
-
-def perf_telemetry_root(settings=None) -> str:
-    configured = os.getenv("MT_PERF_TELEMETRY_DIR", "").strip()
-    if configured:
-        return configured
-    export_dir = str(getattr(settings, "export_dir", "") or "").strip()
-    if export_dir:
-        return os.path.join(export_dir, "performance_timing")
-    return os.path.join(os.getcwd(), "performance_timing")
 
 
 def page_matches(page_name: str, pages: set[str]) -> bool:
@@ -138,11 +85,19 @@ def _phase2e_append_debug_validation_trace(
     enriched.setdefault("phase2e_debug_validation_trace", []).append(record)
 
 
-def new_page_context(page_name: str, source_path: str, output_path: str, root_dir: str) -> dict[str, Any]:
+def new_page_context(
+    page_name: str,
+    source_path: str,
+    output_path: str,
+    root_dir: str,
+    settings: Any = None,
+) -> dict[str, Any]:
     page_id = os.path.splitext(os.path.basename(page_name))[0]
     return {
         "enabled": True,
-        "debug_artifact_level": debug_artifact_level(),
+        "debug_artifact_level": debug_artifact_level(settings),
+        "debug_stages": sorted(debug_stages(settings)),
+        "debug_disabled_stages": sorted(debug_disabled_stages(settings)),
         "page_id": page_id,
         "source_path": source_path,
         "output_path": output_path,
@@ -173,6 +128,55 @@ def new_page_context(page_name: str, source_path: str, output_path: str, root_di
             "inpaint_calls": 0,
         },
     }
+
+
+def debug_stage_artifact_dir(context: dict[str, Any] | None, stage: str, *parts: str) -> str:
+    return stage_artifact_dir(context, stage, *parts)
+
+
+def write_debug_stage_image_path(
+    context: dict[str, Any] | None,
+    stage: str,
+    path: str,
+    image: Any,
+    *,
+    quality: int | None = None,
+) -> tuple[str, bool, str]:
+    return write_image_path(context, stage, path, image, quality=quality)
+
+
+def write_debug_image_file(path: str, image: Any, *, quality: int | None = None) -> str:
+    """Write a debug image to an already authorized artifact path."""
+
+    if not path or image is None:
+        return ""
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        if not hasattr(image, "save"):
+            return ""
+        if quality is not None:
+            image.save(path, quality=int(quality))
+        else:
+            image.save(path)
+        return path
+    except Exception:
+        return ""
+
+
+def write_pre_render_source_erasure_debug_image(working: Any, debug_context: dict[str, Any] | None) -> None:
+    if not debug_context or working is None:
+        return
+    page_id = str(debug_context.get("page_id") or "page")
+    path = stage_artifact_path(debug_context, "cleanup_trace", f"{page_id}_pre_render_cleaned.jpg")
+    if not path:
+        return
+    written_path, ok, error = write_image_path(debug_context, "cleanup_trace", path, working, quality=92)
+    if ok:
+        debug_context["pre_render_source_erasure_image_path"] = written_path
+    elif error != "debug_stage_disabled":
+        debug_context["pre_render_source_erasure_image_error"] = error
 
 
 def new_perf_page_context(page_name: str, source_path: str, output_path: str, root_dir: str) -> dict[str, Any]:
@@ -360,10 +364,10 @@ def mask_stats(mask) -> dict[str, Any] | None:
 def write_page_artifacts(context: dict[str, Any] | None, regions: list[dict]) -> None:
     if not context:
         return
-    root_dir = str(context.get("debug_dir") or "debug_artifacts")
     page_id = str(context.get("page_id") or "page")
-    page_dir = os.path.join(root_dir, page_id)
-    os.makedirs(page_dir, exist_ok=True)
+    page_dir = page_debug_dir(context)
+    if not page_dir:
+        return
 
     audit = _build_audit(context, regions)
     audit = _add_rollback_forbidden_marker_scan(audit, regions)
@@ -371,41 +375,46 @@ def write_page_artifacts(context: dict[str, Any] | None, regions: list[dict]) ->
     audit = _maybe_add_model_fusion_assist(audit, page_dir)
     audit = _maybe_add_route_advisor(audit)
     audit = _maybe_add_render_planner(audit)
-    audit = _maybe_write_text_area_overlays(audit, page_dir)
+    audit = _maybe_write_text_area_overlays(context, audit, page_dir)
     audit = _maybe_write_source_glyph_mask_overlay(context, audit, page_dir)
     audit = _maybe_add_source_erasure_visual_validation(context, audit)
     audit = _maybe_add_caption_background_visual_evidence(context, audit)
     audit = _maybe_add_root_final_state_closeout(context, audit)
     audit = _maybe_write_text_block_hierarchy_artifacts(context, audit, page_dir)
     audit = _maybe_write_text_area_plan_artifacts(context, audit, page_dir)
-    audit_path = os.path.join(page_dir, f"{page_id}_region_audit.json")
-    with open(audit_path, "w", encoding="utf-8") as handle:
-        json.dump(audit, handle, ensure_ascii=False, indent=2)
+    if debug_stage_enabled(context, "audit"):
+        audit_path = os.path.join(page_dir, f"{page_id}_region_audit.json")
+        with open(audit_path, "w", encoding="utf-8") as handle:
+            json.dump(audit, handle, ensure_ascii=False, indent=2)
 
-    timing_path = os.path.join(page_dir, f"{page_id}_timing.json")
-    with open(timing_path, "w", encoding="utf-8") as handle:
-        json.dump(
-            {
-                "page_id": page_id,
-                "page_class": context.get("page_class"),
-                "debug_artifact_level": context.get("debug_artifact_level") or debug_artifact_level(),
-                "timing": context.get("timing", {}),
-                "counts": context.get("counts", {}),
-                "scoped_ocr_trace": context.get("scoped_ocr_trace", []),
-                "route_owned_ocr_retry_attempts": context.get("route_owned_ocr_retry_attempts", []),
-                "render_cleanup_operations": context.get("render_cleanup_operations", []),
-                "cleanup_operation_traces": context.get("cleanup_operation_traces", []),
-                "phase2e_cleanup_propagation_trace": context.get("phase2e_cleanup_propagation_trace", []),
-                "translation_unit_timings": context.get("translation_unit_timings", []),
-            },
-            handle,
-            ensure_ascii=False,
-            indent=2,
-        )
+    if debug_stage_enabled(context, "timing"):
+        timing_path = os.path.join(page_dir, f"{page_id}_timing.json")
+        with open(timing_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "page_id": page_id,
+                    "page_class": context.get("page_class"),
+                    "debug_artifact_level": context.get("debug_artifact_level") or debug_artifact_level(),
+                    "debug_stages": context.get("debug_stages", []),
+                    "debug_disabled_stages": context.get("debug_disabled_stages", []),
+                    "timing": context.get("timing", {}),
+                    "counts": context.get("counts", {}),
+                    "scoped_ocr_trace": context.get("scoped_ocr_trace", []),
+                    "route_owned_ocr_retry_attempts": context.get("route_owned_ocr_retry_attempts", []),
+                    "render_cleanup_operations": context.get("render_cleanup_operations", []),
+                    "cleanup_operation_traces": context.get("cleanup_operation_traces", []),
+                    "phase2e_cleanup_propagation_trace": context.get("phase2e_cleanup_propagation_trace", []),
+                    "translation_unit_timings": context.get("translation_unit_timings", []),
+                },
+                handle,
+                ensure_ascii=False,
+                indent=2,
+            )
 
-    _write_translation_unit_timing_artifacts(context, page_dir)
-    overlay_path = os.path.join(page_dir, f"{page_id}_overlay.jpg")
-    _write_overlay(context, audit["regions"], overlay_path)
+    write_translation_review_artifacts(context, page_dir)
+    if debug_stage_enabled(context, "overlay"):
+        overlay_path = os.path.join(page_dir, f"{page_id}_overlay.jpg")
+        _write_overlay(context, audit["regions"], overlay_path)
 
 
 def write_perf_timing_artifact(context: dict[str, Any] | None, regions: list[dict]) -> str:
@@ -521,7 +530,11 @@ def _add_rollback_forbidden_marker_scan(audit: dict[str, Any], regions: list[dic
     return enriched
 
 
-def _write_translation_unit_timing_artifacts(context: dict[str, Any], page_dir: str) -> None:
+def write_translation_review_artifacts(context: dict[str, Any], page_dir: str) -> None:
+    """Write OCR-to-translation review artifacts owned by debug mode."""
+
+    if not debug_stage_enabled(context, "translation_review"):
+        return
     records = context.get("translation_unit_timings") or []
     if not isinstance(records, list) or not records:
         return
@@ -603,22 +616,43 @@ def _write_translation_unit_timing_artifacts(context: dict[str, Any], page_dir: 
 
 
 def _maybe_write_text_area_plan_artifacts(context: dict[str, Any], audit: dict[str, Any], page_dir: str) -> dict[str, Any]:
+    text_area_enabled = debug_stage_enabled(context, "text_area_plan")
+    graph_enabled = debug_stage_enabled(context, "root_parent_child")
+    if not text_area_enabled and not graph_enabled:
+        return audit
     plan = context.get("text_area_plan")
     if not plan:
         return audit
     try:
-        from app.pipeline.text_area_plan import write_text_area_plan_artifacts
-
-        paths = write_text_area_plan_artifacts(
-            page_dir=page_dir,
-            image_path=context.get("source_path") or "",
-            plan=plan,
-            pre_ocr_plan=context.get("text_area_plan_pre_ocr") or plan,
-            scoped_detection_candidates=context.get("scoped_detection_candidates") or [],
-            scoped_ocr_candidates=context.get("scoped_ocr_candidates") or [],
-            fallback_decisions=context.get("fallback_decisions") or [],
-            blocked_text_area_candidates=context.get("blocked_text_area_candidates") or [],
+        from app.pipeline.text_area_plan import (
+            write_root_parent_child_overlay_artifacts,
+            write_text_area_plan_artifacts,
         )
+
+        if text_area_enabled:
+            paths = write_text_area_plan_artifacts(
+                page_dir=page_dir,
+                image_path=context.get("source_path") or "",
+                plan=plan,
+                pre_ocr_plan=context.get("text_area_plan_pre_ocr") or plan,
+                scoped_detection_candidates=context.get("scoped_detection_candidates") or [],
+                scoped_ocr_candidates=context.get("scoped_ocr_candidates") or [],
+                fallback_decisions=context.get("fallback_decisions") or [],
+                blocked_text_area_candidates=context.get("blocked_text_area_candidates") or [],
+            )
+        else:
+            if isinstance(plan, dict):
+                plan_payload = plan
+            elif hasattr(plan, "to_dict"):
+                plan_payload = plan.to_dict()
+            else:
+                plan_payload = {}
+            graph_plan = plan_payload.get("root_parent_child_plan") if isinstance(plan_payload, dict) else None
+            paths = write_root_parent_child_overlay_artifacts(
+                page_dir=page_dir,
+                image_path=context.get("source_path") or "",
+                graph_plan=graph_plan if isinstance(graph_plan, dict) else {},
+            )
         enriched = dict(audit)
         enriched["text_area_plan_version"] = plan.get("version") if isinstance(plan, dict) else None
         enriched["text_area_plan_generated"] = bool(plan.get("generated")) if isinstance(plan, dict) else False
@@ -666,7 +700,9 @@ def _caption_localization_candidates(plan: Any) -> list[dict[str, Any]]:
     return candidates
 
 
-def _maybe_write_text_area_overlays(audit: dict[str, Any], page_dir: str) -> dict[str, Any]:
+def _maybe_write_text_area_overlays(context: dict[str, Any], audit: dict[str, Any], page_dir: str) -> dict[str, Any]:
+    if not debug_stage_enabled(context, "text_area_diagnostics"):
+        return audit
     if not audit.get("diagnostic_generated"):
         return audit
     try:
@@ -687,6 +723,8 @@ def _maybe_write_source_glyph_mask_overlay(
     audit: dict[str, Any],
     page_dir: str,
 ) -> dict[str, Any]:
+    if not debug_stage_enabled(context, "source_glyph"):
+        return audit
     if Image is None or ImageDraw is None:
         return audit
     source_info = context.get("source_glyph_masks") or {}
@@ -1919,33 +1957,53 @@ def _maybe_add_root_final_state_closeout(
         return enriched
 
 
+def write_root_parent_child_debug_artifacts(
+    *,
+    page_dir: str,
+    hierarchy: dict[str, Any],
+    source_glyph_masks: dict[str, Any] | None = None,
+    root_reconstruction_executor: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Write root/parent/child debug overlays and tables from the debug module."""
+
+    from app.pipeline.text_block_hierarchy import write_text_block_hierarchy_artifacts
+    from app.pipeline.text_block_root_graph import write_root_graph_debug_artifacts
+
+    paths = write_text_block_hierarchy_artifacts(
+        page_dir=page_dir,
+        hierarchy=hierarchy,
+        source_glyph_masks=source_glyph_masks or {},
+    )
+    root_graph_paths = write_root_graph_debug_artifacts(
+        page_dir=page_dir,
+        hierarchy=hierarchy,
+        root_reconstruction_executor=root_reconstruction_executor or {},
+    )
+    paths.update(root_graph_paths)
+    return paths
+
+
 def _maybe_write_text_block_hierarchy_artifacts(
     context: dict[str, Any],
     audit: dict[str, Any],
     page_dir: str,
 ) -> dict[str, Any]:
+    if not debug_stage_enabled(context, "root_parent_child"):
+        return audit
     hierarchy = context.get("text_block_hierarchy") or audit.get("text_block_hierarchy")
     if not isinstance(hierarchy, dict) or not hierarchy.get("text_block_hierarchy_generated"):
         return audit
     try:
-        from app.pipeline.text_block_hierarchy import write_text_block_hierarchy_artifacts
-        from app.pipeline.text_block_root_graph import write_root_graph_debug_artifacts
-
-        paths = write_text_block_hierarchy_artifacts(
+        paths = write_root_parent_child_debug_artifacts(
             page_dir=page_dir,
             hierarchy=hierarchy,
             source_glyph_masks=context.get("source_glyph_masks") or audit.get("source_glyph_masks") or {},
-        )
-        root_graph_paths = write_root_graph_debug_artifacts(
-            page_dir=page_dir,
-            hierarchy=hierarchy,
             root_reconstruction_executor=(
                 context.get("root_reconstruction_executor")
                 or audit.get("root_reconstruction_executor")
                 or {}
             ),
         )
-        paths.update(root_graph_paths)
         enriched = dict(audit)
         enriched["text_block_hierarchy_artifact_paths"] = paths
         return enriched
