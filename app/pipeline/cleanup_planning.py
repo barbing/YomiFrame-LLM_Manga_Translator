@@ -93,6 +93,17 @@ CANONICAL_COMPONENT_PROJECTION_METHOD = "text_area_component_authorization_map"
 COMPONENT_PROJECTION_METHODS = {
     CANONICAL_COMPONENT_PROJECTION_METHOD,
 }
+PROJECTION_READY_STATE = "projection_ready"
+MASK_READY_STATE = "mask_ready"
+PROJECTION_OUTSIDE_AUTHORIZED_AREA_STATE = "projection_outside_authorized_area"
+MASK_NOT_READY_STATE = "mask_not_ready"
+COMPONENT_PROJECTION_AUDIT_ONLY_REJECTION_REASONS = {
+    "effective_mask_not_ready",
+}
+COMPONENT_PROJECTION_AUDIT_ONLY_REJECTED_COMPONENT_REASONS = {
+    "effective_mask_not_ready",
+    "ambiguous_component_owner_components",
+}
 
 
 def _page014_timeout_diag_enabled() -> bool:
@@ -6251,6 +6262,116 @@ def _is_component_projected_cleanup_mask(cleanup_mask: CleanupMask, visual_scope
     return scope == "segmentation_component" or method in COMPONENT_PROJECTION_METHODS
 
 
+def _state_token_set(value: Any) -> set[str]:
+    return {part.strip() for part in str(value or "").split(",") if part.strip()}
+
+
+def _optional_ratio_at_least(value: Any, minimum: float) -> bool:
+    if value is None:
+        return True
+    try:
+        return float(value) >= minimum
+    except Exception:
+        return False
+
+
+def _component_projection_outside_warning_is_audit_only(
+    cleanup_mask: CleanupMask,
+    rejection_reason: str = "",
+) -> bool:
+    if not _is_component_projected_cleanup_mask(cleanup_mask):
+        return False
+    reason = str(rejection_reason or getattr(cleanup_mask, "rejection_reason", "") or "")
+    if reason and reason not in COMPONENT_PROJECTION_AUDIT_ONLY_REJECTION_REASONS:
+        return False
+    if int(getattr(cleanup_mask, "foreground_mask_pixels", 0) or 0) <= 0:
+        return False
+    if int(getattr(cleanup_mask, "erase_mask_pixels", 0) or 0) <= 0:
+        return False
+    if bool(getattr(cleanup_mask, "protected", False)):
+        return False
+    if getattr(cleanup_mask, "foreground_mask", None) is None or getattr(cleanup_mask, "erase_mask", None) is None:
+        return False
+    if bool(getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)):
+        return False
+    if bool(getattr(cleanup_mask, "segmentation_contract_override_detected", False)):
+        return False
+    if bool(getattr(cleanup_mask, "bbox_executable_foreground_detected", False)):
+        return False
+    if bool(getattr(cleanup_mask, "page_level_executable_foreground_detected", False)):
+        return False
+
+    protected_ids = [item for item in getattr(cleanup_mask, "protected_component_ids", []) or [] if str(item)]
+    unowned_ids = [item for item in getattr(cleanup_mask, "unowned_component_ids", []) or [] if str(item)]
+    if protected_ids or unowned_ids:
+        return False
+    if int(getattr(cleanup_mask, "protected_component_pixel_count", 0) or 0) > 0:
+        return False
+    if int(getattr(cleanup_mask, "unowned_component_pixels", 0) or 0) > 0:
+        return False
+
+    owned_ids = [item for item in getattr(cleanup_mask, "owned_component_ids", []) or [] if str(item)]
+    owned_component_pixels = int(getattr(cleanup_mask, "owned_component_pixel_count", 0) or 0)
+    if not owned_ids and owned_component_pixels <= 0:
+        return False
+    owned_pixels = int(
+        owned_component_pixels
+        or getattr(cleanup_mask, "owned_segmentation_pixels", None)
+        or getattr(cleanup_mask, "foreground_mask_pixels", 0)
+        or 0
+    )
+
+    projection_tokens = _state_token_set(getattr(cleanup_mask, "projection_quality_state", ""))
+    if projection_tokens:
+        allowed_projection_tokens = {PROJECTION_READY_STATE, PROJECTION_OUTSIDE_AUTHORIZED_AREA_STATE}
+        if PROJECTION_READY_STATE not in projection_tokens:
+            return False
+        if not projection_tokens.issubset(allowed_projection_tokens):
+            return False
+
+    readiness_tokens = _state_token_set(getattr(cleanup_mask, "mask_readiness_state", ""))
+    if readiness_tokens:
+        allowed_readiness_tokens = {MASK_READY_STATE, MASK_NOT_READY_STATE}
+        if MASK_READY_STATE not in readiness_tokens:
+            return False
+        if not readiness_tokens.issubset(allowed_readiness_tokens):
+            return False
+
+    failure_tokens = _state_token_set(getattr(cleanup_mask, "mask_readiness_failure_reason", ""))
+    if failure_tokens and not failure_tokens.issubset({PROJECTION_OUTSIDE_AUTHORIZED_AREA_STATE}):
+        return False
+
+    rejected_component_reasons = {
+        str(item)
+        for item in getattr(cleanup_mask, "rejected_component_reasons", []) or []
+        if str(item)
+    }
+    if rejected_component_reasons and not rejected_component_reasons.issubset(
+        COMPONENT_PROJECTION_AUDIT_ONLY_REJECTED_COMPONENT_REASONS
+    ):
+        return False
+
+    ambiguous_pixels = int(
+        getattr(cleanup_mask, "ambiguous_component_pixel_count", None)
+        or getattr(cleanup_mask, "ambiguous_component_pixels", None)
+        or 0
+    )
+    if ambiguous_pixels > 0 and ambiguous_pixels / float(max(1, owned_pixels)) > PROOF_COLLATERAL_INSIDE_ALLOWED_RATIO:
+        return False
+
+    if not _optional_ratio_at_least(
+        getattr(cleanup_mask, "effective_coverage_ratio", None),
+        PROOF_MASK_SOURCE_OVERLAP_RATIO,
+    ):
+        return False
+    if not _optional_ratio_at_least(
+        getattr(cleanup_mask, "text_block_coverage_estimate", None),
+        PROOF_MASK_SOURCE_OVERLAP_RATIO,
+    ):
+        return False
+    return True
+
+
 def _is_component_projection_ready_audit_rejection(cleanup_mask: CleanupMask, rejection_reason: str) -> bool:
     if str(rejection_reason or "") not in {
         "effective_mask_not_ready",
@@ -6262,6 +6383,8 @@ def _is_component_projection_ready_audit_rejection(cleanup_mask: CleanupMask, re
         return False
     if not _is_component_projected_cleanup_mask(cleanup_mask):
         return False
+    if _component_projection_outside_warning_is_audit_only(cleanup_mask, rejection_reason):
+        return True
     if str(getattr(cleanup_mask, "projection_quality_state", "") or "") != "projection_ready":
         return False
     if str(getattr(cleanup_mask, "mask_readiness_state", "") or "") != "mask_ready":
@@ -7010,13 +7133,17 @@ def _accepted_executable_cleanup_mask(cleanup_mask: CleanupMask) -> bool:
         return False
     if int(getattr(cleanup_mask, "erase_mask_pixels", 0) or 0) <= 0:
         return False
+    rejection_reason = str(getattr(cleanup_mask, "rejection_reason", "") or "")
+    audit_only_projection_warning = _component_projection_outside_warning_is_audit_only(
+        cleanup_mask,
+        rejection_reason,
+    )
     projection_state = str(getattr(cleanup_mask, "projection_quality_state", "") or "")
-    if projection_state and projection_state != "projection_ready":
+    if projection_state and projection_state != PROJECTION_READY_STATE and not audit_only_projection_warning:
         return False
     readiness_state = str(getattr(cleanup_mask, "mask_readiness_state", "") or "")
-    if readiness_state and readiness_state != "mask_ready":
+    if readiness_state and readiness_state != MASK_READY_STATE and not audit_only_projection_warning:
         return False
-    rejection_reason = str(getattr(cleanup_mask, "rejection_reason", "") or "")
     if rejection_reason and not _is_component_projection_ready_audit_rejection(cleanup_mask, rejection_reason):
         return False
     if bool(getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)):
@@ -7043,14 +7170,18 @@ def _cleanup_mask_non_executable_defect(cleanup_mask: CleanupMask) -> str:
         return "foreground_mask_empty"
     if int(getattr(cleanup_mask, "erase_mask_pixels", 0) or 0) <= 0:
         return "erase_mask_empty"
+    rejection_reason = str(getattr(cleanup_mask, "rejection_reason", "") or "")
+    audit_only_projection_warning = _component_projection_outside_warning_is_audit_only(
+        cleanup_mask,
+        rejection_reason,
+    )
     projection_state = str(getattr(cleanup_mask, "projection_quality_state", "") or "")
-    if projection_state and projection_state != "projection_ready":
+    if projection_state and projection_state != PROJECTION_READY_STATE and not audit_only_projection_warning:
         return f"projection_not_ready_{_safe_reason_token(projection_state)}"
     readiness_state = str(getattr(cleanup_mask, "mask_readiness_state", "") or "")
-    if readiness_state and readiness_state != "mask_ready":
+    if readiness_state and readiness_state != MASK_READY_STATE and not audit_only_projection_warning:
         return f"mask_not_ready_{_safe_reason_token(readiness_state)}"
-    rejection_reason = str(getattr(cleanup_mask, "rejection_reason", "") or "")
-    if rejection_reason:
+    if rejection_reason and not _is_component_projection_ready_audit_rejection(cleanup_mask, rejection_reason):
         return f"mask_rejected_{rejection_reason}"
     if bool(getattr(cleanup_mask, "sourceglyph_executable_influence_detected", False)):
         return "sourceglyph_executable_influence_detected"
