@@ -1810,6 +1810,35 @@ def enrich_hierarchy_with_root_closeout(
         for region in audit_regions or []
         if isinstance(region, dict) and str(region.get("region_id") or "")
     }
+    regions_by_execution_id: dict[str, dict[str, Any]] = {}
+
+    def _remember_render_region_alias(value: Any, region: dict[str, Any]) -> None:
+        key = str(value or "").strip()
+        if key and key not in regions_by_execution_id:
+            regions_by_execution_id[key] = region
+
+    for region in audit_regions or []:
+        if not isinstance(region, dict):
+            continue
+        render = region.get("render") if isinstance(region.get("render"), dict) else {}
+        for key in (
+            "region_id",
+            "parent_logical_text_unit_id",
+            "active_translation_unit_id",
+            "logical_text_block_id",
+            "parent_execution_bundle_id",
+        ):
+            _remember_render_region_alias(region.get(key), region)
+            _remember_render_region_alias(render.get(key), region)
+        for key in (
+            "source_region_ids",
+            "represented_child_ids",
+            "logical_text_block_member_region_ids",
+            "logical_text_block_transferred_region_ids",
+            "parent_logical_text_unit_child_segment_ids",
+        ):
+            for item in _string_list(region.get(key)) + _string_list(render.get(key)):
+                _remember_render_region_alias(item, region)
     parents_by_root: dict[str, list[dict[str, Any]]] = {}
     children_by_root: dict[str, list[dict[str, Any]]] = {}
     for parent in parents:
@@ -1845,7 +1874,22 @@ def enrich_hierarchy_with_root_closeout(
             )
             and str(child.get("source_region_id") or "")
         ]
-        root_region_records = [regions_by_id[rid] for rid in child_region_ids if rid in regions_by_id]
+        root_region_records: list[dict[str, Any]] = []
+        seen_render_record_ids: set[str] = set()
+
+        def _append_root_region_record(region: dict[str, Any] | None) -> None:
+            if not isinstance(region, dict):
+                return
+            key = str(region.get("region_id") or id(region))
+            if key in seen_render_record_ids:
+                return
+            seen_render_record_ids.add(key)
+            root_region_records.append(region)
+
+        for parent_id in accepted_parent_ids:
+            _append_root_region_record(regions_by_execution_id.get(parent_id) or regions_by_id.get(parent_id))
+        for child_region_id in child_region_ids:
+            _append_root_region_record(regions_by_id.get(child_region_id) or regions_by_execution_id.get(child_region_id))
         cleanup_validation = _root_source_erasure_validation(root, root_region_records, bool(accepted_parent_ids))
         render_validation = _root_render_readability_validation(root, root_region_records, bool(accepted_parent_ids))
         source_erasure_records.append({"root_id": root_id, **cleanup_validation})

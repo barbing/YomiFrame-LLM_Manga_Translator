@@ -1847,11 +1847,34 @@ def _text_area_graph_filter_visual_parent_islands(
         area_ratio = (w * h) / root_area
         width_ratio = w / float(max(1, rw))
         height_ratio = h / float(max(1, rh))
-        touches_vertical_border = x <= rx + 1 or x + w >= rx + rw - 1
-        touches_horizontal_border = y <= ry + 1 or y + h >= ry + rh - 1
+        touches_left_border = x <= rx + 1
+        touches_right_border = x + w >= rx + rw - 1
+        touches_top_border = y <= ry + 1
+        touches_bottom_border = y + h >= ry + rh - 1
+        touches_vertical_border = touches_left_border or touches_right_border
+        touches_horizontal_border = touches_top_border or touches_bottom_border
+        touches_border_count = sum(
+            bool(value)
+            for value in (
+                touches_left_border,
+                touches_right_border,
+                touches_top_border,
+                touches_bottom_border,
+            )
+        )
         if area_ratio < 0.018:
             continue
         if h < max(28, int(round(rh * 0.12))):
+            continue
+        if (
+            touches_border_count >= 2
+            and area_ratio >= 0.10
+            and (height_ratio >= 0.72 or width_ratio >= 0.72)
+        ):
+            continue
+        if touches_vertical_border and height_ratio >= 0.72 and width_ratio >= 0.24:
+            continue
+        if touches_horizontal_border and width_ratio >= 0.72 and height_ratio >= 0.24:
             continue
         if touches_vertical_border and width_ratio < 0.18:
             continue
@@ -4910,6 +4933,18 @@ def _component_auth_resolve_ambiguous_component(record: TextAreaComponentAuthori
         record.explicit_protected_authority = False
         return
 
+    if _component_auth_is_parent_execution_bound_cleanup_record(record):
+        cleanup_state = _component_auth_cleanup_state_for_record(record)
+        _component_auth_set_state(
+            record,
+            cleanup_state,
+            reason="ambiguous_parent_execution_component_resolved_to_cleanup_authority",
+        )
+        _component_auth_bind_cleanup_job_from_candidates(record)
+        record.explicit_cleanup_authority = True
+        record.explicit_protected_authority = False
+        return
+
     if _component_auth_record_has_protected_conflict(record) or _component_auth_has_decorative_evidence(record):
         _component_auth_set_state(
             record,
@@ -4934,6 +4969,8 @@ def _component_auth_resolve_ambiguous_component(record: TextAreaComponentAuthori
 
 
 def _component_auth_cleanup_overrides_protected_conflict(record: TextAreaComponentAuthorizationRecord) -> bool:
+    if _component_auth_is_parent_execution_bound_cleanup_record(record):
+        return True
     if not _component_auth_is_speech_record(record):
         return False
     if _component_auth_is_weak_background_authority_record(record):
@@ -4946,6 +4983,49 @@ def _component_auth_cleanup_overrides_protected_conflict(record: TextAreaCompone
     ):
         return True
     return False
+
+
+def _component_auth_is_parent_execution_bound_cleanup_record(record: TextAreaComponentAuthorizationRecord) -> bool:
+    states = {
+        str(record.authorization_state or ""),
+        str(record.semantic_authorization_state or ""),
+        str(record.cleanup_authorization or ""),
+        str(record.final_mask_authorization_state or ""),
+        *(str(item or "") for item in (record.semantic_unit_states or [])),
+    }
+    if not any(_component_auth_family(state) == "cleanup" for state in states):
+        return False
+    job_ids = [
+        str(item or "")
+        for item in (
+            ([record.owner_cleanup_job_id] if record.owner_cleanup_job_id else [])
+            + list(record.candidate_cleanup_job_ids or [])
+            + list(record.scope_cleanup_job_ids or [])
+        )
+        if str(item or "")
+    ]
+    job_ids = list(dict.fromkeys(job_ids))
+    if len(job_ids) != 1:
+        return False
+    marker = _component_auth_record_marker(record)
+    source_marker = " ".join(
+        [
+            str(record.source_stage or ""),
+            str(record.authorization_field_origin or ""),
+            *[str(item or "") for item in (record.reason_codes or [])],
+        ]
+    ).lower()
+    if "parent_execution_bundle" not in source_marker and "parent_execution_region" not in marker and not any(
+        str(item or "").startswith("parent_") or str(item or "").startswith("tap_parent_")
+        for item in (record.owning_region_ids or record.candidate_region_ids or [])
+    ):
+        return False
+    if not any(
+        str(item or "").startswith("parent_") or str(item or "").startswith("tap_parent_")
+        for item in (record.owning_region_ids or record.candidate_region_ids or [])
+    ):
+        return False
+    return True
 
 
 def _component_auth_is_completed_ogkalu_speech_text_run_record(record: TextAreaComponentAuthorizationRecord) -> bool:
