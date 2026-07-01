@@ -1270,6 +1270,7 @@ def render_translations(
             source_size_hint = max(0, int(render.get("source_size_hint", render.get("font_size", 0)) or 0))
             source_size_min = max(0, int(render.get("source_size_min", 0) or 0))
             source_size_max = max(0, int(render.get("source_size_max", 0) or 0))
+            parent_style_font_size_locked = bool(render.get("font_size_locked"))
             parent_execution_layout_box, parent_execution_layout_source = _parent_execution_hard_layout_box(
                 region,
                 render,
@@ -1976,7 +1977,7 @@ def render_translations(
                     source_size_max,
                 )
             _renderer_micro_add("renderer_root_local_render_fit_pass_time", micro_start)
-            if render_fit_adjustment:
+            if render_fit_adjustment and not parent_style_font_size_locked:
                 try:
                     adjusted_line_height = float(render_fit_adjustment.get("render_layout_v2_line_height_scale") or line_height)
                     line_height = _coerce_render_line_height(
@@ -1989,6 +1990,11 @@ def render_translations(
                     )
                 except Exception:
                     pass
+            elif render_fit_adjustment:
+                render_fit_adjustment["render_layout_line_height_override_suppressed"] = True
+                render_fit_adjustment["render_layout_line_height_override_suppressed_reason"] = (
+                    "parent_style_authoritative"
+                )
             if parent_execution_layout_authoritative and allowed_area_box is not None:
                 hard_box = tuple(int(v) for v in allowed_area_box[:4])
                 render_box = _intersect_box(render_box, hard_box) or hard_box
@@ -2024,6 +2030,7 @@ def render_translations(
                     source_size_hint,
                     source_size_min,
                     source_size_max,
+                    parent_style_font_size_locked,
                     render_constraint_adjustment,
                     render_fit_adjustment,
                     parent_execution_layout_authoritative,
@@ -2490,6 +2497,7 @@ def render_translations(
             source_size_hint,
             source_size_min,
             source_size_max,
+            parent_style_font_size_locked,
             render_constraint_adjustment,
             render_fit_adjustment,
             parent_execution_layout_authoritative,
@@ -2506,15 +2514,22 @@ def render_translations(
             local_max = None
             if font_size_override > 0:
                 local_preferred = font_size_override
-                if source_size_min > 0:
+                if parent_style_font_size_locked:
+                    local_min = local_preferred
+                    local_max = local_preferred
+                elif source_size_min > 0:
                     local_preferred = max(local_preferred, source_size_min)
                     local_min = source_size_min
-                if source_size_max > 0:
+                if not parent_style_font_size_locked and source_size_max > 0:
                     local_max = max(local_preferred, source_size_max)
             elif source_size_hint > 0:
                 local_preferred = source_size_hint
-                local_min = source_size_min if source_size_min > 0 else None
-                local_max = source_size_max if source_size_max > 0 else None
+                if parent_style_font_size_locked:
+                    local_min = local_preferred
+                    local_max = local_preferred
+                else:
+                    local_min = source_size_min if source_size_min > 0 else None
+                    local_max = source_size_max if source_size_max > 0 else None
             elif (
                 preferred_size
                 and not parent_execution_layout_authoritative
@@ -2539,6 +2554,8 @@ def render_translations(
                     compact_layout=bool((render_fit_adjustment or {}).get("render_fit_compact_layout")),
                 )
                 if isinstance(vertical_diag, dict):
+                    if parent_style_font_size_locked and local_preferred:
+                        _mark_parent_style_font_size_result(vertical_diag, local_preferred)
                     if parent_execution_layout_authoritative:
                         vertical_diag.update(
                             {
@@ -2613,6 +2630,14 @@ def render_translations(
                 fit_ratio=max(
                     max((_text_width(best_font, line) for line in best_lines), default=0) / max(1, w),
                     best_height / max(1, h),
+                ),
+                **(
+                    _parent_style_font_size_result_fields(
+                        getattr(best_font, "size", None),
+                        local_preferred,
+                    )
+                    if parent_style_font_size_locked and local_preferred
+                    else {}
                 ),
                 **(
                     {
@@ -6395,6 +6420,9 @@ _RENDER_STYLE_FLAT_FIELDS = {
     "font_size_hint": "source_size_hint",
     "font_size_min": "source_size_min",
     "font_size_max": "source_size_max",
+    "font_size_locked": "font_size_locked",
+    "font_size_policy": "font_size_policy",
+    "font_size_fallback_policy": "font_size_fallback_policy",
     "source_orientation": "source_orientation",
     "wrap_mode": "wrap_mode",
     "line_height": "line_height",
@@ -6453,12 +6481,60 @@ def _render_style_debug_fields(render: dict) -> dict:
         "source_orientation",
         "wrap_mode",
         "line_height",
+        "font_size",
+        "font_size_hint",
+        "font_size_min",
+        "font_size_max",
+        "font_size_locked",
+        "font_size_policy",
+        "font_size_fallback_policy",
         "spacing_profile",
     ):
         value = style.get(nested_key)
         if _style_value_present(value):
             fields[f"render_style_{nested_key}"] = value
     return {key: value for key, value in fields.items() if value not in (None, "", [])}
+
+
+def _parent_style_font_size_result_fields(selected_size, resolved_size) -> dict[str, object]:
+    try:
+        resolved = int(resolved_size or 0)
+    except Exception:
+        resolved = 0
+    try:
+        selected = int(selected_size or 0)
+    except Exception:
+        selected = 0
+    if resolved <= 0:
+        return {}
+    fields: dict[str, object] = {
+        "parent_style_font_size_locked": True,
+        "parent_style_resolved_font_size": resolved,
+        "parent_style_font_size_preserved": selected == resolved,
+    }
+    if selected > 0 and selected != resolved:
+        fields.update(
+            {
+                "parent_style_font_size_fallback_applied": True,
+                "parent_style_font_size_fallback_reason": "resolved_parent_font_size_did_not_fit_execution_region",
+                "parent_style_font_size_fallback_selected_size": selected,
+            }
+        )
+    return fields
+
+
+def _mark_parent_style_font_size_result(diag: dict, resolved_size) -> None:
+    if str(diag.get("selected_font_size_kind") or "") == "ellipsis_dot_diameter":
+        diag.update(
+            {
+                "parent_style_font_size_locked": True,
+                "parent_style_resolved_font_size": int(resolved_size or 0),
+                "parent_style_font_size_preserved": True,
+                "parent_style_font_size_audit_note": "ellipsis_renderer_reports_dot_diameter",
+            }
+        )
+        return
+    diag.update(_parent_style_font_size_result_fields(diag.get("selected_font_size"), resolved_size))
 
 
 def _style_value_present(value) -> bool:
@@ -9713,6 +9789,7 @@ def _draw_vertical_ellipsis(
     measured_width = int(radius * 2)
     return {
         "selected_font_size": int(radius * 2),
+        "selected_font_size_kind": "ellipsis_dot_diameter",
         "wrapped_lines": ["ellipsis"],
         "measured_rendered_width": measured_width,
         "measured_rendered_height": measured_height,

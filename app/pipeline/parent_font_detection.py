@@ -471,6 +471,7 @@ def _style_for_bundle(
         font_family=font_path,
     )
     style.update(_normalize_layout_hints_to_visual_cohort(layout_hints, arbitration=arbitration))
+    _lock_resolved_parent_font_size(style)
     if detection:
         style.update(
             {
@@ -769,15 +770,19 @@ def _style_size_decision(
                     f"relative_distance:{distance:.3f}",
                 ],
             }
-        if measured < cohort_size and (
-            (not preserved_style and dominant_components < MIN_DOMINANT_COMPONENTS_FOR_LOW_SIZE_OUTLIER)
-            or str(style_decision or "") == "normalized_to_visual_cohort"
-        ):
+        if not preserved_style:
+            reason = "high_side_glyph_measurement_normalized_to_visual_cohort"
+            if measured < cohort_size:
+                reason = "low_side_glyph_measurement_less_reliable_than_visual_cohort"
             return {
                 "arbitrated_glyph_size_px": round(float(cohort_size), 3),
-                "font_size_arbitration_decision": "normalized_sparse_low_size_to_visual_cohort",
+                "font_size_arbitration_decision": (
+                    "normalized_sparse_low_size_to_visual_cohort"
+                    if measured < cohort_size and dominant_components < MIN_DOMINANT_COMPONENTS_FOR_LOW_SIZE_OUTLIER
+                    else "normalized_outlier_size_to_visual_cohort"
+                ),
                 "font_size_arbitration_reason_codes": [
-                    "low_side_glyph_measurement_less_reliable_than_visual_cohort",
+                    reason,
                     f"dominant_component_count:{dominant_components}",
                     f"relative_distance:{distance:.3f}",
                 ],
@@ -844,6 +849,41 @@ def _normalize_layout_hints_to_visual_cohort(
     spacing["font_size_normalization_source"] = str(arbitration.get("cohort_font_size_source") or "")
     hints["spacing_profile"] = spacing
     return hints
+
+
+def _lock_resolved_parent_font_size(style: dict[str, Any]) -> None:
+    """Make the arbitrated parent font size the renderer contract."""
+
+    try:
+        resolved = int(style.get("font_size_hint") or style.get("font_size") or 0)
+    except Exception:
+        resolved = 0
+    if resolved <= 0:
+        return
+
+    original_min = style.get("font_size_min")
+    original_max = style.get("font_size_max")
+    style["font_size"] = resolved
+    style["font_size_hint"] = resolved
+    style["font_size_min"] = resolved
+    style["font_size_max"] = resolved
+    style["font_size_locked"] = True
+    style["font_size_policy"] = "parent_style_authoritative"
+    style["font_size_fallback_policy"] = "layout_failure_audit_only"
+
+    spacing = dict(style.get("spacing_profile") or {})
+    if original_min not in (None, "", resolved):
+        spacing["detected_font_size_min"] = original_min
+    if original_max not in (None, "", resolved):
+        spacing["detected_font_size_max"] = original_max
+    spacing["font_size"] = resolved
+    spacing["font_size_hint"] = resolved
+    spacing["font_size_min"] = resolved
+    spacing["font_size_max"] = resolved
+    spacing["font_size_locked"] = True
+    spacing["font_size_policy"] = "parent_style_authoritative"
+    spacing["font_size_fallback_policy"] = "layout_failure_audit_only"
+    style["spacing_profile"] = spacing
 
 
 def _should_preserve_style_exception(

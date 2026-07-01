@@ -20,6 +20,9 @@ _RENDER_STYLE_FLAT_FIELDS = {
     "font_size_hint": "source_size_hint",
     "font_size_min": "source_size_min",
     "font_size_max": "source_size_max",
+    "font_size_locked": "font_size_locked",
+    "font_size_policy": "font_size_policy",
+    "font_size_fallback_policy": "font_size_fallback_policy",
     "source_orientation": "source_orientation",
     "wrap_mode": "wrap_mode",
     "line_height": "line_height",
@@ -1315,6 +1318,8 @@ def _normalize_render_style_contract(
                 style[key] = max(0, int(style.get(key) or 0))
             except Exception:
                 style.pop(key, None)
+    if "font_size_locked" in style:
+        style["font_size_locked"] = bool(style.get("font_size_locked"))
     return style
 
 
