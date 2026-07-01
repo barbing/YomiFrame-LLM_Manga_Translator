@@ -50,6 +50,9 @@ validation/
 # Local test data
 tests/
 
+# Local debug artifacts
+debug_artifacts/
+
 # Documentation
 *.md
 !README.md
