@@ -60,6 +60,20 @@ class TranslationAssignment:
     source_text: str
     cache_key: str
     region_ids: list[str]
+    source_contract_owner: str = ""
+    source_contract_region_id: str = ""
+    source_contract_bbox: tuple[int, ...] = ()
+    source_contract_scope: str = ""
+    source_contract_stage: str = ""
+    source_contract_ocr_confidence: float | None = None
+    ocr_backend: str = ""
+    ocr_model_path: str = ""
+    ocr_mmproj_path: str = ""
+    ocr_endpoint: str = ""
+    ocr_prompt_version: str = ""
+    source_quality_state: str = ""
+    source_quality_action: str = ""
+    source_quality_reason_codes: tuple[str, ...] = ()
 
 
 @dataclass
@@ -3038,6 +3052,7 @@ def _append_parent_boundary_ocr_source_regions(
     assign_bbox_to_text_area_plan,
     apply_text_area_assignment_to_region,
     build_scoped_ocr_candidate,
+    existing_parent_units: Iterable[Any] | None = None,
 ) -> dict[str, Any]:
     """Attach parent-boundary OCR as source evidence for finalized graph parents."""
 
@@ -3057,6 +3072,7 @@ def _append_parent_boundary_ocr_source_regions(
     records: list[dict[str, Any]] = []
     created = 0
     skipped = 0
+    reused = 0
     next_index = len(regions)
     for parent_node in parent_nodes:
         if not isinstance(parent_node, Mapping):
@@ -3080,45 +3096,63 @@ def _append_parent_boundary_ocr_source_regions(
                 }
             )
             continue
-        crop = _crop_image(image_path, bbox, expand_wide=False, image_obj=page_image)
-        if crop is None:
-            skipped += 1
-            records.append({"parent_id": parent_id, "status": "skipped_crop_failed", "bbox": bbox})
-            continue
         route = _parent_boundary_ocr_route(parent_node)
         region_id = _parent_boundary_ocr_region_id(parent_id, regions)
-        ocr_start = time.time()
-        ocr_text, ocr_conf = _recognize_with_fallback(
-            ocr_engine,
-            crop,
-            settings,
-            bbox,
-            debug_context=debug_context,
-            trace_context={
-                "page_id": page_id,
-                "region_id": region_id,
-                "parent_id": parent_id,
-                "root_id": parent_node.get("root_node_id"),
-                "attempt_kind": "parent_boundary_ocr_source_contract",
-                "text_area_container_id": parent_node.get("container_id"),
-                "route_intent": route,
-                "ocr_eligible": True,
-                "source_bbox": list(bbox),
-                "actual_crop_bbox": list(bbox),
-                "container_bbox": list(bbox),
-            },
-        )
-        add_timing(debug_context, "ocr_time", time.time() - ocr_start)
-        ocr_backend_meta = {}
-        if hasattr(ocr_engine, "backend_metadata"):
-            try:
-                ocr_backend_meta = dict(ocr_engine.backend_metadata())
-            except Exception:
-                ocr_backend_meta = {}
-        if not ocr_backend_meta:
-            ocr_backend_meta = {"ocr_backend": ocr_engine.__class__.__name__}
+        deterministic_source = _existing_parent_punctuation_identity_source(
+            parent_node,
+            existing_parent_units,
+        ) or _existing_region_punctuation_identity_source(parent_node, bbox, regions)
+        source_scope = "parent_boundary"
+        source_stage = "controller_parent_boundary_ocr"
+        status = "created"
+        ocr_backend_meta: dict[str, Any] = {}
+        if deterministic_source:
+            ocr_text = deterministic_source
+            ocr_conf = 1.0
+            state = "ocr_punctuation_only_blocker"
+            reason = "existing_parent_punctuation_identity_source"
+            source_scope = "parent_execution_region"
+            source_stage = "text_block_hierarchy_punctuation_identity"
+            status = "created_from_existing_punctuation_identity_source"
+            reused += 1
+        else:
+            crop = _crop_image(image_path, bbox, expand_wide=False, image_obj=page_image)
+            if crop is None:
+                skipped += 1
+                records.append({"parent_id": parent_id, "status": "skipped_crop_failed", "bbox": bbox})
+                continue
+            ocr_start = time.time()
+            ocr_text, ocr_conf = _recognize_with_fallback(
+                ocr_engine,
+                crop,
+                settings,
+                bbox,
+                debug_context=debug_context,
+                trace_context={
+                    "page_id": page_id,
+                    "region_id": region_id,
+                    "parent_id": parent_id,
+                    "root_id": parent_node.get("root_node_id"),
+                    "attempt_kind": "parent_boundary_ocr_source_contract",
+                    "text_area_container_id": parent_node.get("container_id"),
+                    "route_intent": route,
+                    "ocr_eligible": True,
+                    "source_bbox": list(bbox),
+                    "actual_crop_bbox": list(bbox),
+                    "container_bbox": list(bbox),
+                },
+            )
+            add_timing(debug_context, "ocr_time", time.time() - ocr_start)
+            if hasattr(ocr_engine, "backend_metadata"):
+                try:
+                    ocr_backend_meta = dict(ocr_engine.backend_metadata())
+                except Exception:
+                    ocr_backend_meta = {}
+            if not ocr_backend_meta:
+                ocr_backend_meta = {"ocr_backend": ocr_engine.__class__.__name__}
         ocr_text = _clean_ocr_text(str(ocr_text or ""))
-        state, reason = _ocr_transaction_state_for_text_area_route(ocr_text, ocr_conf, route)
+        if not deterministic_source:
+            state, reason = _ocr_transaction_state_for_text_area_route(ocr_text, ocr_conf, route)
         assignment = _parent_boundary_ocr_assignment(
             parent_node,
             assign_bbox_to_text_area_plan(text_area_plan, bbox, detection_source="parent_boundary_ocr_source_contract"),
@@ -3146,7 +3180,7 @@ def _append_parent_boundary_ocr_source_regions(
             region_type=region_type,
             ocr_conf=ocr_conf,
             render_updates={
-                "classification_reason": "parent_boundary_ocr_source_contract",
+                "classification_reason": status,
                 "cleanup_mode": "local_text_mask" if route == "translate_caption_background" else "bubble",
             },
         )
@@ -3162,6 +3196,8 @@ def _append_parent_boundary_ocr_source_regions(
             quality_state=quality_state,
             quality_action=quality_action,
             quality_reasons=quality_reasons,
+            source_contract_scope=source_scope,
+            source_contract_stage=source_stage,
         )
         for meta_key, meta_value in ocr_backend_meta.items():
             region[meta_key] = meta_value
@@ -3186,6 +3222,10 @@ def _append_parent_boundary_ocr_source_regions(
                     "parent_ocr_source_quality_state": quality_state,
                     "parent_ocr_source_quality_action": quality_action,
                     "parent_ocr_source_quality_reason_codes": list(quality_reasons),
+                    "source_contract_bbox": list(bbox),
+                    "source_contract_scope": source_scope,
+                    "source_contract_stage": source_stage,
+                    "source_contract_ocr_confidence": float(ocr_conf or 0.0),
                     **ocr_backend_meta,
                 }
             )
@@ -3195,7 +3235,7 @@ def _append_parent_boundary_ocr_source_regions(
             {
                 "parent_id": parent_id,
                 "region_id": region_id,
-                "status": "created",
+                "status": status,
                 "bbox": bbox,
                 "ocr_text": ocr_text,
                 "ocr_confidence": float(ocr_conf or 0.0),
@@ -3204,6 +3244,10 @@ def _append_parent_boundary_ocr_source_regions(
                 "source_quality_state": quality_state,
                 "source_quality_action": quality_action,
                 "source_quality_reason_codes": list(quality_reasons),
+                "source_contract_bbox": list(bbox),
+                "source_contract_scope": source_scope,
+                "source_contract_stage": source_stage,
+                "source_contract_ocr_confidence": float(ocr_conf or 0.0),
                 "ocr_backend": ocr_backend_meta.get("ocr_backend", ""),
                 "ocr_model_path": ocr_backend_meta.get("ocr_model_path", ""),
                 "ocr_mmproj_path": ocr_backend_meta.get("ocr_mmproj_path", ""),
@@ -3211,11 +3255,12 @@ def _append_parent_boundary_ocr_source_regions(
                 "ocr_prompt_version": ocr_backend_meta.get("ocr_prompt_version", ""),
             }
         )
-    result = {"attempted": len(parent_nodes), "created": created, "skipped": skipped, "records": records}
+    result = {"attempted": len(parent_nodes), "created": created, "skipped": skipped, "reused": reused, "records": records}
     if debug_context is not None:
         debug_context["parent_boundary_ocr_source_contract"] = result
         set_count(debug_context, "parent_boundary_ocr_source_contract_created", created)
         set_count(debug_context, "parent_boundary_ocr_source_contract_skipped", skipped)
+        set_count(debug_context, "parent_boundary_ocr_source_contract_reused", reused)
     return result
 
 
@@ -3228,6 +3273,116 @@ def _parent_boundary_ocr_region_id(parent_id: str, regions: list[dict]) -> str:
     while f"{base}_{suffix}" in existing:
         suffix += 1
     return f"{base}_{suffix}"
+
+
+def _existing_parent_punctuation_identity_source(
+    parent_node: Mapping[str, Any],
+    existing_parent_units: Iterable[Any] | None,
+) -> str:
+    parent_id = str(parent_node.get("parent_node_id") or "").strip()
+    if not parent_id:
+        return ""
+    for parent_unit in existing_parent_units or []:
+        if isinstance(parent_unit, Mapping):
+            unit_parent_id = str(parent_unit.get("parent_id") or parent_unit.get("parent_node_id") or "").strip()
+            source_text = str(parent_unit.get("source_text") or "")
+            quality_action = str(
+                parent_unit.get("source_contract_quality_action")
+                or parent_unit.get("source_coherence_action")
+                or parent_unit.get("source_quality_action")
+                or ""
+            )
+            quality_state = str(parent_unit.get("source_contract_quality_state") or "")
+        else:
+            unit_parent_id = str(
+                getattr(parent_unit, "parent_id", "")
+                or getattr(parent_unit, "parent_node_id", "")
+                or ""
+            ).strip()
+            source_text = str(getattr(parent_unit, "source_text", "") or "")
+            quality_action = str(
+                getattr(parent_unit, "source_contract_quality_action", "")
+                or getattr(parent_unit, "source_coherence_action", "")
+                or getattr(parent_unit, "source_quality_action", "")
+                or ""
+            )
+            quality_state = str(getattr(parent_unit, "source_contract_quality_state", "") or "")
+        if unit_parent_id != parent_id:
+            continue
+        cleaned = _clean_ocr_text(source_text)
+        if not cleaned:
+            return ""
+        if quality_action == "identity_punctuation" or quality_state == "punctuation_identity_source":
+            return cleaned
+        if _is_identity_punctuation_source_text(cleaned):
+            return cleaned
+        return ""
+    return ""
+
+
+def _existing_region_punctuation_identity_source(
+    parent_node: Mapping[str, Any],
+    parent_bbox: list[int],
+    regions: list[dict],
+) -> str:
+    parent_id = str(parent_node.get("parent_node_id") or "").strip()
+    container_id = str(parent_node.get("container_id") or "").strip()
+    if not parent_id or not parent_bbox:
+        return ""
+    candidates: list[str] = []
+    for region in regions:
+        if not isinstance(region, dict) or bool(region.get("parent_boundary_ocr_source_contract")):
+            continue
+        text = _clean_ocr_text(str(region.get("ocr_text") or ""))
+        if not text:
+            continue
+        render = region.get("render") if isinstance(region.get("render"), dict) else {}
+        region_parent_id = str(
+            region.get("parent_logical_text_unit_id")
+            or render.get("parent_logical_text_unit_id")
+            or region.get("source_text_represented_by_block_id")
+            or render.get("source_text_represented_by_block_id")
+            or ""
+        ).strip()
+        region_container_id = str(
+            region.get("text_area_container_id")
+            or render.get("text_area_container_id")
+            or region.get("logical_text_block_container_id")
+            or render.get("logical_text_block_container_id")
+            or ""
+        ).strip()
+        region_bbox = _clip_controller_bbox(list(region.get("bbox") or []), None)
+        if not region_bbox:
+            continue
+        if region_parent_id and region_parent_id != parent_id:
+            continue
+        if not region_parent_id:
+            if container_id and region_container_id and region_container_id != container_id:
+                continue
+            inside_parent = _bbox_inside_ratio_controller(region_bbox, parent_bbox)
+            overlap = _overlap_ratio(region_bbox, parent_bbox)
+            if inside_parent < 0.55 and not (_bbox_center_inside(region_bbox, parent_bbox) and overlap >= 0.45):
+                continue
+        block_source = _clean_ocr_text(
+            str(region.get("logical_text_block_source_text") or render.get("logical_text_block_source_text") or "")
+        )
+        if region_parent_id == parent_id and _is_identity_punctuation_source_text(block_source):
+            candidates.append(block_source)
+            continue
+        if not _is_identity_punctuation_source_text(text):
+            return ""
+        candidates.append(text)
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda value: (len(value), value), reverse=True)
+    return candidates[0]
+
+
+def _is_identity_punctuation_source_text(text: str) -> bool:
+    cleaned = _clean_ocr_text(text)
+    if not cleaned:
+        return False
+    return _is_punct_only(cleaned) or not _non_punct_chars(cleaned)
 
 
 def _parent_boundary_ocr_route(parent_node: Mapping[str, Any]) -> str:
@@ -3305,17 +3460,25 @@ def _stamp_parent_boundary_ocr_source_contract(
     quality_state: str,
     quality_action: str,
     quality_reasons: list[str],
+    source_contract_scope: str = "parent_boundary",
+    source_contract_stage: str = "controller_parent_boundary_ocr",
 ) -> None:
     parent_id = str(parent_node.get("parent_node_id") or "")
     root_id = str(parent_node.get("root_node_id") or "")
     region["parent_boundary_ocr_source_contract"] = True
     region["source_region_evidence_only"] = True
     region["source_contract_owner"] = "parent_logical_text_unit_ocr_source_contract"
+    region["source_contract_region_id"] = str(region.get("region_id") or "")
     region["parent_ocr_source_contract_owner"] = "parent_logical_text_unit_ocr_source_contract"
     region["parent_ocr_source_parent_id"] = parent_id
     region["parent_ocr_source_root_id"] = root_id
-    region["parent_source_candidate_scope"] = "parent_boundary"
-    region["parent_source_candidate_stage"] = "controller_parent_boundary_ocr"
+    region["source_contract_bbox"] = list(region.get("bbox") or [])
+    region["source_contract_scope"] = source_contract_scope
+    region["source_contract_stage"] = source_contract_stage
+    confidence = region.get("confidence") if isinstance(region.get("confidence"), dict) else {}
+    region["source_contract_ocr_confidence"] = confidence.get("ocr")
+    region["parent_source_candidate_scope"] = source_contract_scope
+    region["parent_source_candidate_stage"] = source_contract_stage
     region["parent_ocr_source_quality_state"] = quality_state
     region["parent_ocr_source_quality_action"] = quality_action
     region["parent_ocr_source_quality_reason_codes"] = list(quality_reasons)
@@ -3331,9 +3494,14 @@ def _stamp_parent_boundary_ocr_source_contract(
         "parent_boundary_ocr_source_contract",
         "source_region_evidence_only",
         "source_contract_owner",
+        "source_contract_region_id",
         "parent_ocr_source_contract_owner",
         "parent_ocr_source_parent_id",
         "parent_ocr_source_root_id",
+        "source_contract_bbox",
+        "source_contract_scope",
+        "source_contract_stage",
+        "source_contract_ocr_confidence",
         "parent_source_candidate_scope",
         "parent_source_candidate_stage",
         "parent_ocr_source_quality_state",
@@ -8951,6 +9119,7 @@ def _process_page(
         assign_bbox_to_text_area_plan=assign_bbox_to_text_area_plan,
         apply_text_area_assignment_to_region=apply_text_area_assignment_to_region,
         build_scoped_ocr_candidate=build_scoped_ocr_candidate,
+        existing_parent_units=initial_text_block_hierarchy.parent_units,
     )
     text_block_hierarchy = build_text_block_hierarchy(
         page_id=page_id,
@@ -10630,6 +10799,20 @@ def _translation_assignments_from_parent_execution_bundles(
             source_text=text,
             cache_key=text,
             region_ids=[str(bundle.bundle_id or parent_id)],
+            source_contract_owner=str(bundle.source_contract_owner or ""),
+            source_contract_region_id=str(bundle.source_contract_region_id or ""),
+            source_contract_bbox=tuple(int(v) for v in (bundle.source_contract_bbox or [])[:4]),
+            source_contract_scope=str(bundle.source_contract_scope or ""),
+            source_contract_stage=str(bundle.source_contract_stage or ""),
+            source_contract_ocr_confidence=bundle.source_contract_ocr_confidence,
+            ocr_backend=str(bundle.ocr_backend or ""),
+            ocr_model_path=str(bundle.ocr_model_path or ""),
+            ocr_mmproj_path=str(bundle.ocr_mmproj_path or ""),
+            ocr_endpoint=str(bundle.ocr_endpoint or ""),
+            ocr_prompt_version=str(bundle.ocr_prompt_version or ""),
+            source_quality_state=str(bundle.source_quality_state or ""),
+            source_quality_action=str(bundle.source_quality_action or ""),
+            source_quality_reason_codes=tuple(str(reason) for reason in (bundle.source_quality_reason_codes or [])),
         )
     return assignments
 

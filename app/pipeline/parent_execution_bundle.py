@@ -47,6 +47,10 @@ class ParentExecutionBundle:
     source_quality_action: str = "translate"
     source_contract_owner: str = ""
     source_contract_region_id: str = ""
+    source_contract_bbox: list[int] = field(default_factory=list)
+    source_contract_scope: str = ""
+    source_contract_stage: str = ""
+    source_contract_ocr_confidence: float | None = None
     ocr_backend: str = ""
     ocr_model_path: str = ""
     ocr_mmproj_path: str = ""
@@ -96,6 +100,10 @@ class ParentExecutionBundle:
             "source_quality_action": self.source_quality_action,
             "source_contract_owner": self.source_contract_owner,
             "source_contract_region_id": self.source_contract_region_id,
+            "source_contract_bbox": list(self.source_contract_bbox),
+            "source_contract_scope": self.source_contract_scope,
+            "source_contract_stage": self.source_contract_stage,
+            "source_contract_ocr_confidence": self.source_contract_ocr_confidence,
             "ocr_backend": self.ocr_backend,
             "ocr_model_path": self.ocr_model_path,
             "ocr_mmproj_path": self.ocr_mmproj_path,
@@ -228,6 +236,10 @@ class ParentExecutionBundle:
             "source_conservation_status": self.source_quality_state,
             "source_contract_owner": self.source_contract_owner,
             "source_contract_region_id": self.source_contract_region_id,
+            "source_contract_bbox": list(self.source_contract_bbox),
+            "source_contract_scope": self.source_contract_scope,
+            "source_contract_stage": self.source_contract_stage,
+            "source_contract_ocr_confidence": self.source_contract_ocr_confidence,
             "ocr_backend": self.ocr_backend,
             "ocr_model_path": self.ocr_model_path,
             "ocr_mmproj_path": self.ocr_mmproj_path,
@@ -297,6 +309,10 @@ class ParentExecutionBundle:
                 "logical_text_source_quality_action": self.source_quality_action,
                 "source_contract_owner": self.source_contract_owner,
                 "source_contract_region_id": self.source_contract_region_id,
+                "source_contract_bbox": list(self.source_contract_bbox),
+                "source_contract_scope": self.source_contract_scope,
+                "source_contract_stage": self.source_contract_stage,
+                "source_contract_ocr_confidence": self.source_contract_ocr_confidence,
                 "ocr_backend": self.ocr_backend,
                 "ocr_model_path": self.ocr_model_path,
                 "ocr_mmproj_path": self.ocr_mmproj_path,
@@ -441,6 +457,14 @@ def sync_bundles_from_region_records(
         )
         bundle.source_contract_owner = str(record.get("source_contract_owner") or bundle.source_contract_owner or "")
         bundle.source_contract_region_id = str(record.get("source_contract_region_id") or bundle.source_contract_region_id or "")
+        bundle.source_contract_bbox = _best_bbox(record.get("source_contract_bbox"), bundle.source_contract_bbox)
+        bundle.source_contract_scope = str(record.get("source_contract_scope") or bundle.source_contract_scope or "")
+        bundle.source_contract_stage = str(record.get("source_contract_stage") or bundle.source_contract_stage or "")
+        bundle.source_contract_ocr_confidence = _float_or_none(
+            record.get("source_contract_ocr_confidence")
+            if record.get("source_contract_ocr_confidence") is not None
+            else bundle.source_contract_ocr_confidence
+        )
         if record.get("source_quality_reason_codes"):
             bundle.source_quality_reason_codes = _list_strings(record.get("source_quality_reason_codes"))
         bundle.to_region_record()
@@ -468,6 +492,10 @@ def parent_execution_bundles_from_audit_records(
             source_quality_action=str(record.get("source_quality_action") or "translate"),
             source_contract_owner=str(record.get("source_contract_owner") or ""),
             source_contract_region_id=str(record.get("source_contract_region_id") or ""),
+            source_contract_bbox=_best_bbox(record.get("source_contract_bbox")),
+            source_contract_scope=str(record.get("source_contract_scope") or ""),
+            source_contract_stage=str(record.get("source_contract_stage") or ""),
+            source_contract_ocr_confidence=_float_or_none(record.get("source_contract_ocr_confidence")),
             source_quality_reason_codes=_list_strings(record.get("source_quality_reason_codes")),
             translation_required=bool(record.get("translation_required")),
             cleanup_required=bool(record.get("cleanup_required")),
@@ -745,6 +773,46 @@ def _bundle_from_finalized_parent(
         or primary_render.get("parent_boundary_ocr_source_contract")
     ):
         source_contract_region_id = str(primary_region.get("region_id") or "")
+    source_contract_bbox = _best_bbox(
+        primary_region.get("source_contract_bbox"),
+        primary_render.get("source_contract_bbox"),
+        primary_region.get("bbox") if (
+            primary_region.get("parent_boundary_ocr_source_contract")
+            or primary_render.get("parent_boundary_ocr_source_contract")
+        ) else [],
+    )
+    if not source_contract_bbox and source_contract_owner:
+        source_contract_bbox = list(parent_bbox)
+    source_contract_scope = str(
+        primary_region.get("source_contract_scope")
+        or primary_render.get("source_contract_scope")
+        or primary_region.get("parent_source_candidate_scope")
+        or primary_render.get("parent_source_candidate_scope")
+        or ""
+    )
+    if not source_contract_scope and source_contract_owner:
+        source_contract_scope = "parent_execution_region"
+    source_contract_stage = str(
+        primary_region.get("source_contract_stage")
+        or primary_render.get("source_contract_stage")
+        or primary_region.get("parent_source_candidate_stage")
+        or primary_render.get("parent_source_candidate_stage")
+        or ""
+    )
+    if not source_contract_stage and source_contract_owner:
+        source_contract_stage = (
+            "text_block_hierarchy_punctuation_identity"
+            if source_action == "identity_punctuation"
+            else "parent_execution_bundle_source_contract_fallback"
+        )
+    source_contract_ocr_confidence = _float_or_none(
+        primary_region.get("source_contract_ocr_confidence")
+        if primary_region.get("source_contract_ocr_confidence") is not None
+        else primary_render.get("source_contract_ocr_confidence")
+    )
+    if source_contract_ocr_confidence is None:
+        confidence = primary_region.get("confidence") if isinstance(primary_region.get("confidence"), Mapping) else {}
+        source_contract_ocr_confidence = _float_or_none(confidence.get("ocr"))
     source_reason_codes = _list_strings(getattr(parent_unit, "source_quality_warning_reason_codes", []))
     if not source_reason_codes:
         source_reason_codes = _list_strings(
@@ -769,6 +837,10 @@ def _bundle_from_finalized_parent(
         source_quality_action=source_action,
         source_contract_owner=source_contract_owner,
         source_contract_region_id=source_contract_region_id,
+        source_contract_bbox=source_contract_bbox,
+        source_contract_scope=source_contract_scope,
+        source_contract_stage=source_contract_stage,
+        source_contract_ocr_confidence=source_contract_ocr_confidence,
         ocr_backend=ocr_backend,
         ocr_model_path=ocr_model_path,
         ocr_mmproj_path=ocr_mmproj_path,
@@ -834,6 +906,10 @@ def _sync_execution_region_from_bundle(
     record["parent_logical_text_unit_source_text"] = bundle.source_text
     record["source_contract_owner"] = bundle.source_contract_owner
     record["source_contract_region_id"] = bundle.source_contract_region_id
+    record["source_contract_bbox"] = list(bundle.source_contract_bbox)
+    record["source_contract_scope"] = bundle.source_contract_scope
+    record["source_contract_stage"] = bundle.source_contract_stage
+    record["source_contract_ocr_confidence"] = bundle.source_contract_ocr_confidence
     record["ocr_backend"] = bundle.ocr_backend
     record["ocr_model_path"] = bundle.ocr_model_path
     record["ocr_mmproj_path"] = bundle.ocr_mmproj_path
@@ -878,6 +954,10 @@ def _sync_execution_region_from_bundle(
     render["source_text"] = bundle.source_text
     render["source_contract_owner"] = bundle.source_contract_owner
     render["source_contract_region_id"] = bundle.source_contract_region_id
+    render["source_contract_bbox"] = list(bundle.source_contract_bbox)
+    render["source_contract_scope"] = bundle.source_contract_scope
+    render["source_contract_stage"] = bundle.source_contract_stage
+    render["source_contract_ocr_confidence"] = bundle.source_contract_ocr_confidence
     render["ocr_backend"] = bundle.ocr_backend
     render["ocr_model_path"] = bundle.ocr_model_path
     render["ocr_mmproj_path"] = bundle.ocr_mmproj_path
@@ -934,6 +1014,15 @@ def _source_candidate_from_region(region: Mapping[str, Any], region_id: str) -> 
             or render.get("parent_boundary_ocr_source_contract")
         ),
         "source_contract_owner": str(region.get("source_contract_owner") or render.get("source_contract_owner") or ""),
+        "source_contract_region_id": str(region.get("source_contract_region_id") or render.get("source_contract_region_id") or ""),
+        "source_contract_bbox": _best_bbox(region.get("source_contract_bbox"), render.get("source_contract_bbox")),
+        "source_contract_scope": str(region.get("source_contract_scope") or render.get("source_contract_scope") or ""),
+        "source_contract_stage": str(region.get("source_contract_stage") or render.get("source_contract_stage") or ""),
+        "source_contract_ocr_confidence": _float_or_none(
+            region.get("source_contract_ocr_confidence")
+            if region.get("source_contract_ocr_confidence") is not None
+            else render.get("source_contract_ocr_confidence")
+        ),
         "ocr_backend": str(region.get("ocr_backend") or render.get("ocr_backend") or ""),
         "ocr_model_path": str(region.get("ocr_model_path") or render.get("ocr_model_path") or ""),
         "ocr_mmproj_path": str(region.get("ocr_mmproj_path") or render.get("ocr_mmproj_path") or ""),
