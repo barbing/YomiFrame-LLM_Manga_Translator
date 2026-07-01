@@ -333,6 +333,14 @@ def _style_for_bundle(
         "fallback_reason": fallback_reason,
         "font_detection_status": status,
     }
+    style.update(
+        _layout_hints_for_bundle(
+            bundle,
+            detection=trusted_detection if trusted_detection else None,
+            caption_like=caption_like,
+            source_orientation=str(style.get("source_orientation") or ""),
+        )
+    )
     if detection:
         style.update(
             {
@@ -361,6 +369,128 @@ def _merge_render_style(bundle: Any, style: Mapping[str, Any]) -> None:
     merged = dict(existing)
     merged.update(dict(style))
     setattr(bundle, "render_style", merged)
+
+
+def _layout_hints_for_bundle(
+    bundle: Any,
+    *,
+    detection: Mapping[str, Any] | None,
+    caption_like: bool,
+    source_orientation: str,
+) -> dict[str, Any]:
+    bbox = _best_style_bbox(bundle)
+    if not bbox:
+        return {}
+    _x, _y, width, height = bbox
+    vertical = str(source_orientation or "").strip().lower() != "horizontal"
+    content_count = _content_char_count(
+        str(getattr(bundle, "source_text", "") or getattr(bundle, "translated_text", "") or "")
+    )
+    size_ratio = _clamp_float(
+        detection.get("text_size_ratio") if isinstance(detection, Mapping) else 0.0,
+        0.0,
+        0.80,
+    )
+    line_spacing_ratio = _clamp_float(
+        detection.get("line_spacing_ratio") if isinstance(detection, Mapping) else 0.0,
+        0.0,
+        0.65,
+    )
+
+    if vertical:
+        if content_count <= 3:
+            width_factor, height_factor = 0.50, 0.26
+        elif content_count <= 6:
+            width_factor, height_factor = 0.46, 0.23
+        elif content_count <= 12:
+            width_factor, height_factor = 0.40, 0.18
+        else:
+            width_factor, height_factor = 0.36, 0.145
+        geometry_size = min(width * width_factor, height * height_factor)
+        if size_ratio > 0:
+            ratio_size = min(
+                width * (0.30 + min(size_ratio, 0.50) * 0.12),
+                height * (0.11 + min(size_ratio, 0.50) * 0.16),
+            )
+            hint = int(round(geometry_size * 0.78 + ratio_size * 0.22))
+        else:
+            hint = int(round(geometry_size))
+        readable_min = 20 if content_count <= 3 else 18 if content_count <= 8 else 16
+        if caption_like:
+            readable_min = max(18, readable_min)
+        line_height = max(
+            1.10 if caption_like else 1.06,
+            1.06 + min(line_spacing_ratio, 0.50) * 0.14,
+        )
+        line_height = _clamp_float(line_height, 1.06, 1.18)
+    else:
+        geometry_size = min(height * 0.72, width * 0.16)
+        if size_ratio > 0:
+            ratio_size = min(
+                height * (0.45 + min(size_ratio, 0.50) * 0.35),
+                width * (0.08 + min(size_ratio, 0.45) * 0.16),
+            )
+            hint = int(round(geometry_size * 0.60 + ratio_size * 0.40))
+        else:
+            hint = int(round(geometry_size))
+        readable_min = 16 if caption_like else 15
+        line_height = max(
+            1.16 if not caption_like else 1.18,
+            1.14 + min(line_spacing_ratio, 0.50) * 0.24,
+        )
+        line_height = _clamp_float(line_height, 1.14, 1.32)
+
+    if vertical:
+        if caption_like:
+            hint_cap = 58
+        elif content_count >= 20:
+            hint_cap = 50
+        elif content_count >= 13:
+            hint_cap = 52
+        elif content_count <= 3:
+            hint_cap = 46
+        else:
+            hint_cap = 56
+    else:
+        hint_cap = 64 if caption_like else 58
+    hint = max(readable_min, min(hint_cap, int(hint or 0)))
+    min_size = max(12, min(hint, int(round(hint * 0.86))))
+    max_size = max(hint, min(hint_cap, int(round(hint * 1.08))))
+    return {
+        "font_size_hint": hint,
+        "font_size_min": min_size,
+        "font_size_max": max_size,
+        "line_height": round(float(line_height), 3),
+        "spacing_profile": {
+            "source": "yuzumarker" if detection else "parent_geometry_fallback",
+            "orientation": "vertical" if vertical else "horizontal",
+            "content_count": content_count,
+            "font_size_hint": hint,
+            "font_size_min": min_size,
+            "font_size_max": max_size,
+            "line_height": round(float(line_height), 3),
+            "minimum_readable_font_size": readable_min,
+            "source_text_size_ratio": round(float(size_ratio), 4),
+            "source_line_spacing_ratio": round(float(line_spacing_ratio), 4),
+        },
+    }
+
+
+def _content_char_count(text: str) -> int:
+    count = 0
+    for char in str(text or ""):
+        if char.isspace() or char in "…。、，,.!?！？ー─-—~〜・：:；;「」『』（）()[]【】":
+            continue
+        count += 1
+    return count or len(str(text or ""))
+
+
+def _clamp_float(value: Any, low: float, high: float) -> float:
+    try:
+        number = float(value)
+    except Exception:
+        number = 0.0
+    return max(float(low), min(float(high), number))
 
 
 def _load_onnx_session(model_path: str, *, use_gpu: bool) -> Any:

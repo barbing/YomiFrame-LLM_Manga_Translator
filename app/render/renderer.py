@@ -1865,7 +1865,7 @@ def render_translations(
                 forced_color = (255, 255, 255)
                 stroke_color = (20, 20, 20)
                 stroke_width = max(2, stroke_width)
-            line_height = max(0.82, min(1.2, float(render.get("line_height", 1.0) or 1.0)))
+            line_height = _coerce_render_line_height(render, source_orientation, region_type)
             font_size_override = max(0, int(render.get("font_size", 0) or 0))
             if (
                 font_size_override <= 0
@@ -1978,9 +1978,14 @@ def render_translations(
             _renderer_micro_add("renderer_root_local_render_fit_pass_time", micro_start)
             if render_fit_adjustment:
                 try:
-                    line_height = max(
-                        0.78,
-                        min(1.2, float(render_fit_adjustment.get("render_layout_v2_line_height_scale") or line_height)),
+                    adjusted_line_height = float(render_fit_adjustment.get("render_layout_v2_line_height_scale") or line_height)
+                    line_height = _coerce_render_line_height(
+                        {
+                            "line_height": adjusted_line_height,
+                            "wrap_mode": render.get("wrap_mode", "auto"),
+                        },
+                        source_orientation,
+                        region_type,
                     )
                 except Exception:
                     pass
@@ -2558,6 +2563,8 @@ def render_translations(
                 h,
                 region_font,
                 preferred_size=local_preferred,
+                min_size=local_min,
+                max_size=local_max,
                 line_height_scale=line_height_scale,
             )
             best_lines = _wrap_text(draw, text, base_font, w)
@@ -9785,6 +9792,46 @@ def _fit_vertical_font(
         start_size = min(start_size, source_max_size)
     if start_size < computed_min_size:
         start_size = computed_min_size
+    if preferred_size is not None and preferred_size > 0:
+        preferred_target = max(computed_min_size, int(preferred_size))
+        if source_max_size > 0:
+            preferred_target = min(preferred_target, source_max_size)
+        preferred_fit = _largest_fitting_vertical_font_layout(
+            tokens=tokens,
+            box_width=box_width,
+            box_height=box_height,
+            font_path=font_path,
+            sample=sample,
+            high_size=preferred_target,
+            low_size=preferred_target,
+            line_height_scale=line_height_scale,
+            content_count=content_count,
+        )
+        if preferred_fit is not None and _vertical_layout_has_readable_margin(
+            tokens,
+            preferred_fit[1],
+            box_width,
+            box_height,
+            content_count,
+        ):
+            font, layout = preferred_fit
+            return _renderer_vertical_font_fit_result(cache_key, font, layout, micro_start)
+        if preferred_target > computed_min_size:
+            comfortable_fit = _largest_comfortable_vertical_font_layout(
+                tokens=tokens,
+                box_width=box_width,
+                box_height=box_height,
+                font_path=font_path,
+                sample=sample,
+                high_size=preferred_target - 1,
+                low_size=computed_min_size,
+                line_height_scale=line_height_scale,
+                content_count=content_count,
+            )
+            if comfortable_fit is not None:
+                font, layout = comfortable_fit
+                return _renderer_vertical_font_fit_result(cache_key, font, layout, micro_start)
+        start_size = min(start_size, max(computed_min_size, preferred_target - 1))
     fitted = _largest_fitting_vertical_font_layout(
         tokens=tokens,
         box_width=box_width,
@@ -9871,6 +9918,67 @@ def _largest_fitting_vertical_font_layout(
         return None
     font, layout = best
     return font, _rebalance_long_narrow_vertical_layout(tokens, layout, box_width, box_height, content_count)
+
+
+def _largest_comfortable_vertical_font_layout(
+    *,
+    tokens: List[str],
+    box_width: int,
+    box_height: int,
+    font_path: str,
+    sample: str,
+    high_size: int,
+    low_size: int,
+    line_height_scale: float,
+    content_count: int,
+):
+    low = max(8, int(low_size or 8))
+    high = max(low, int(high_size or low))
+    best = None
+    while low <= high:
+        size = (low + high) // 2
+        font = _load_font(font_path, size, sample)
+        layout = _measure_vertical_layout(font, tokens, box_width, box_height, line_height_scale)
+        if layout is None:
+            high = size - 1
+            continue
+        layout = _rebalance_long_narrow_vertical_layout(tokens, layout, box_width, box_height, content_count)
+        if _vertical_layout_has_readable_margin(tokens, layout, box_width, box_height, content_count):
+            best = (font, layout)
+            low = size + 1
+        else:
+            high = size - 1
+    return best
+
+
+def _vertical_layout_has_readable_margin(
+    tokens: List[str],
+    layout,
+    box_width: int,
+    box_height: int,
+    content_count: int,
+) -> bool:
+    if layout is None:
+        return False
+    rows, cols, cell_height, col_width, col_gap = layout
+    cols = max(1, int(cols or 1))
+    max_rows_used = 0
+    for col in range(cols):
+        max_rows_used = max(max_rows_used, len(tokens[col * rows : (col + 1) * rows]))
+    max_rows_used = max(1, max_rows_used)
+    height_usage = (max_rows_used * max(1, cell_height)) / max(1, box_height)
+    width_usage = (
+        cols * max(1, col_width) + max(0, cols - 1) * max(0, col_gap)
+    ) / max(1, box_width)
+    if content_count <= 3:
+        height_limit, width_limit = 0.96, 0.96
+    elif content_count <= 8:
+        height_limit, width_limit = 0.92, 0.94
+    elif content_count <= 14:
+        height_limit, width_limit = 0.90, 0.92
+    else:
+        height_limit, width_limit = 0.88, 0.90
+    return height_usage <= height_limit and width_usage <= width_limit
 
 
 def _rebalance_long_narrow_vertical_layout(
@@ -10232,6 +10340,23 @@ def _text_padding(w: int, h: int) -> int:
     return min(base, 28)
 
 
+def _coerce_render_line_height(render: dict, source_orientation: str, region_type: str) -> float:
+    try:
+        raw = float(render.get("line_height", 1.0) or 1.0)
+    except Exception:
+        raw = 1.0
+    wrap_mode = str(render.get("wrap_mode", "auto") or "auto").strip().lower()
+    horizontal = wrap_mode == "horizontal" or str(source_orientation or "").strip().lower() == "horizontal"
+    caption_like = str(region_type or "").strip().lower() in {"background_text", "decorative_text", "narration_box"}
+    if horizontal:
+        floor = 1.18 if caption_like else 1.14
+        ceiling = 1.32
+    else:
+        floor = 1.10 if caption_like else 1.06
+        ceiling = 1.22
+    return max(floor, min(ceiling, raw))
+
+
 def _expand_box(box, pad_x: int, pad_y: int, max_w: int, max_h: int):
     x0, y0, x1, y1 = box
     return (
@@ -10249,6 +10374,8 @@ def _fit_font(
     max_height: int,
     font_name: str,
     preferred_size: int | None = None,
+    min_size: int | None = None,
+    max_size: int | None = None,
     line_height_scale: float = 1.0,
 ):
     micro_start = _renderer_micro_start()
@@ -10261,28 +10388,41 @@ def _fit_font(
             int(max_height or 0),
             str(font_path or font_name or ""),
             int(preferred_size) if preferred_size is not None else None,
+            int(min_size) if min_size is not None else None,
+            int(max_size) if max_size is not None else None,
             round(float(line_height_scale or 0.0), 4),
         ),
     )
     sample = _sample_char(text)
     start_size = min(72, max(12, int(min(max_height * 0.75, max_width * 1.15))))
-    min_size = max(8, int(min(max_height * 0.18, max_width * 0.55)))
+    computed_min_size = max(8, int(min(max_height * 0.18, max_width * 0.55)))
+    if min_size is not None and min_size > 0:
+        computed_min_size = max(computed_min_size, int(min_size))
+    if max_size is not None and max_size > 0:
+        start_size = min(start_size, max(computed_min_size, int(max_size)))
     if preferred_size is not None:
-        target = max(min_size, min(preferred_size, start_size))
+        target = max(computed_min_size, min(int(preferred_size), start_size))
         font = _load_font(font_path, target, sample)
         lines = _wrap_text(draw, text, font, max_width)
         total_height = _measure_lines_height(font, lines, line_height_scale)
         if total_height <= max_height:
             _renderer_micro_add("renderer_fit_font_time", micro_start)
             return font
-    for size in range(start_size, min_size - 1, -1):
+        for size in range(target - 1, computed_min_size - 1, -1):
+            font = _load_font(font_path, size, sample)
+            lines = _wrap_text(draw, text, font, max_width)
+            total_height = _measure_lines_height(font, lines, line_height_scale)
+            if total_height <= max_height:
+                _renderer_micro_add("renderer_fit_font_time", micro_start)
+                return font
+    for size in range(start_size, computed_min_size - 1, -1):
         font = _load_font(font_path, size, sample)
         lines = _wrap_text(draw, text, font, max_width)
         total_height = _measure_lines_height(font, lines, line_height_scale)
         if total_height <= max_height:
             _renderer_micro_add("renderer_fit_font_time", micro_start)
             return font
-    for size in range(min_size - 1, 9, -1):
+    for size in range(computed_min_size - 1, 9, -1):
         font = _load_font(font_path, size, sample)
         lines = _wrap_text(draw, text, font, max_width)
         total_height = _measure_lines_height(font, lines, line_height_scale)
