@@ -474,6 +474,7 @@ class PipelineWorker(QtCore.QThread):
         from app.render.renderer import render_parent_execution_bundles, render_translations
         from app.pipeline.cleanup_contracts import build_cleanup_job_candidates_for_parent_bundles
         from app.pipeline.cleanup_masks import build_cleanup_masks
+        from app.pipeline.parent_font_detection import apply_parent_font_detection
         from app.pipeline.cleanup_planning import (
             build_cleanup_plans,
             commit_cleanup_runtime_results_to_working_image,
@@ -520,7 +521,7 @@ class PipelineWorker(QtCore.QThread):
                 self.message.emit(_friendly_model_error(inner_exc))
                 return
 
-            if self._settings.font_detection != "off":
+            if str(self._settings.font_detection or "").strip().lower() == "heuristic":
                 try:
                     from app.render.font_detection import FontDetection
                     font_detector = FontDetection(mode=self._settings.font_detection)
@@ -803,6 +804,69 @@ class PipelineWorker(QtCore.QThread):
                             "source_glyph_mask_generated": False,
                             "source_glyph_mask_errors": [f"{type(exc).__name__}: {exc}"],
                             "source_glyph_masks": [],
+                        }
+
+                try:
+                    parent_font_mode = str(self._settings.font_detection or "off").strip()
+                    if parent_execution_bundles and parent_font_mode.lower() != "off":
+                        parent_font_start = time.time()
+                        _page014_timeout_checkpoint(
+                            "parent_font_detection",
+                            "start",
+                            page_id=page_id,
+                            mode=parent_font_mode,
+                            parent_execution_bundle_count=len(parent_execution_bundles),
+                        )
+                        parent_font_detection_result = apply_parent_font_detection(
+                            page_id=page_id,
+                            image_path=source_path,
+                            parent_execution_bundles=parent_execution_bundles,
+                            mode=parent_font_mode,
+                            default_font_name=self._settings.font_name,
+                            use_gpu=self._settings.use_gpu,
+                            models_dir=os.path.join(os.getcwd(), "models"),
+                        )
+                        execution_regions = parent_execution_region_records(parent_execution_bundles)
+                        _page014_timeout_checkpoint(
+                            "parent_font_detection",
+                            "end",
+                            page_id=page_id,
+                            applied_count=parent_font_detection_result.applied_count,
+                            fallback_count=parent_font_detection_result.fallback_count,
+                            skipped_count=parent_font_detection_result.skipped_count,
+                            elapsed_ms=round((time.time() - parent_font_start) * 1000.0, 3),
+                        )
+                        if debug_context is not None:
+                            if not debug_context.get("perf_telemetry_only"):
+                                debug_context["parent_font_detection"] = parent_font_detection_result.to_audit_dict()
+                            set_timing(debug_context, "parent_font_detection_time", time.time() - parent_font_start)
+                            set_count(debug_context, "parent_font_detection_applied", parent_font_detection_result.applied_count)
+                            set_count(debug_context, "parent_font_detection_fallback", parent_font_detection_result.fallback_count)
+                            for record in parent_font_detection_result.records:
+                                rid = str(record.get("bundle_id") or "")
+                                if rid:
+                                    mark_render_region(debug_context, rid, parent_font_detection=record)
+                    elif debug_context is not None and not debug_context.get("perf_telemetry_only"):
+                        debug_context["parent_font_detection"] = {
+                            "parent_font_detection_version": "parent_font_detection_v1",
+                            "page_id": page_id,
+                            "mode": parent_font_mode,
+                            "enabled": False,
+                        }
+                except Exception as exc:
+                    _page014_timeout_checkpoint(
+                        "parent_font_detection",
+                        "error",
+                        page_id=page_id,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                    if debug_context is not None and not debug_context.get("perf_telemetry_only"):
+                        debug_context["parent_font_detection"] = {
+                            "parent_font_detection_version": "parent_font_detection_v1",
+                            "page_id": page_id,
+                            "mode": str(self._settings.font_detection or "off"),
+                            "enabled": False,
+                            "errors": [f"{type(exc).__name__}: {exc}"],
                         }
 
                 cleanup_job_contract_result = None

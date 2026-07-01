@@ -125,6 +125,8 @@ class MainWindow(QtWidgets.QMainWindow):
             missing.append("cleanup_inpaint")
         if not downloader.check_ner(models_dir):
             missing.append("ner")
+        if not downloader.check_font_detection(models_dir):
+            missing.append("font_detection")
             
         if missing:
             reply = QtWidgets.QMessageBox.warning(
@@ -183,6 +185,8 @@ class MainWindow(QtWidgets.QMainWindow):
              downloader.prepare_qwen(models_dir)
         if "ner" in model_keys:
              downloader.prepare_ner(models_dir)
+        if "font_detection" in model_keys:
+             downloader.prepare_font_detection(models_dir)
 
         downloader.moveToThread(self._download_thread)
         
@@ -1178,7 +1182,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.font_name.setCurrentText(self._defaults.font_name)
         layout.addRow("Font", self.font_name)
         self.font_detection = QtWidgets.QComboBox()
-        self.font_detection.addItems(["off", "heuristic"])
+        self.font_detection.addItems(["off", "heuristic", "yuzumarker"])
         self.font_detection.setCurrentText(self._defaults.font_detection)
         layout.addRow("Font Detection", self.font_detection)
         self.filter_background = QtWidgets.QCheckBox("Ignore background/onoma text")

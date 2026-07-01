@@ -12,6 +12,8 @@ from app.config.defaults import (
     KITSUMED_SPEECH_BUBBLE_REPO_ID,
     MANGA_OCR_BASE_URL,
     MANGA_OCR_FILES,
+    NOTO_CJK_SC_FONT_BASE_URL,
+    NOTO_CJK_SC_FONT_FILES,
     OGKALU_TEXT_BUBBLE_CONFIG_FILE,
     OGKALU_TEXT_BUBBLE_MODEL_FILE,
     OGKALU_TEXT_BUBBLE_REPO_ID,
@@ -20,6 +22,12 @@ from app.config.defaults import (
     PADDLE_OCR_VL_REPO_ID,
     QWEN_GGUF,
     SAKURA_GGUF,
+    SIL_OFL_TEXT_URL,
+    YUZUMARKER_FONT_LABELS_FALLBACK_FILE,
+    YUZUMARKER_FONT_LABELS_FILE,
+    YUZUMARKER_FONT_LABELS_REPO_ID,
+    YUZUMARKER_FONT_ONNX_FILE,
+    YUZUMARKER_FONT_ONNX_REPO_ID,
 )
 
 import hashlib
@@ -32,7 +40,9 @@ import zipfile
 from app.models.resolution import (
     has_bubble_detection_runtime,
     has_cleanup_inpaint_model,
+    has_font_style_runtime,
     has_paddle_ocr_vl_runtime,
+    noto_cjk_sc_font_dir,
     resolve_manga_ocr_local_dir,
     resolve_manga_ocr_system_ref,
     resolve_ner_local_dir,
@@ -172,6 +182,10 @@ class ModelDownloader(QtCore.QObject):
         """Check if PaddleOCR-VL GGUF model and native runtime are installed."""
         return has_paddle_ocr_vl_runtime(base_dir=models_dir)
 
+    def check_font_detection(self, models_dir: str = "models") -> bool:
+        """Check if YuzuMarker font detection and local CJK fallback fonts exist."""
+        return has_font_style_runtime(base_dir=models_dir)
+
     def prepare_ner(self, models_dir: str):
         """Queue NER model download."""
         self._ner_target_dir = os.path.join(models_dir, "ner")
@@ -229,6 +243,48 @@ class ModelDownloader(QtCore.QObject):
                 label="Downloading text/bubble detector config...",
             ),
         ]
+        self.queue_targets(targets)
+
+    def prepare_font_detection(self, models_dir: str):
+        """Queue YuzuMarker font detection and local CJK fallback font assets."""
+        onnx_dir = os.path.join(models_dir, "YuzuMarker", "onnx")
+        labels_dir = os.path.join(models_dir, "YuzuMarker", "safetensors")
+        font_dir = noto_cjk_sc_font_dir(models_dir)
+        onnx_url = f"https://huggingface.co/{YUZUMARKER_FONT_ONNX_REPO_ID}/resolve/main"
+        labels_url = f"https://huggingface.co/{YUZUMARKER_FONT_LABELS_REPO_ID}/resolve/main"
+        targets = [
+            DownloadTarget(
+                url=f"{onnx_url}/{YUZUMARKER_FONT_ONNX_FILE}",
+                save_path=os.path.join(onnx_dir, YUZUMARKER_FONT_ONNX_FILE),
+                label="Downloading YuzuMarker font detector ONNX model...",
+                sha256="99dd351e94f06e31397113602ae000a24c1d38ad76275066e844a0c836f75d4f",
+            ),
+            DownloadTarget(
+                url=f"{labels_url}/{YUZUMARKER_FONT_LABELS_FILE}",
+                save_path=os.path.join(labels_dir, YUZUMARKER_FONT_LABELS_FILE),
+                label="Downloading YuzuMarker font labels...",
+            ),
+            DownloadTarget(
+                url=f"{labels_url}/{YUZUMARKER_FONT_LABELS_FALLBACK_FILE}",
+                save_path=os.path.join(labels_dir, YUZUMARKER_FONT_LABELS_FALLBACK_FILE),
+                label="Downloading YuzuMarker fallback font labels...",
+            ),
+        ]
+        for relative_path in NOTO_CJK_SC_FONT_FILES:
+            targets.append(
+                DownloadTarget(
+                    url=f"{NOTO_CJK_SC_FONT_BASE_URL}/{relative_path}",
+                    save_path=os.path.join(font_dir, os.path.basename(relative_path)),
+                    label=f"Downloading Noto CJK SC font: {os.path.basename(relative_path)}",
+                )
+            )
+        targets.append(
+            DownloadTarget(
+                url=SIL_OFL_TEXT_URL,
+                save_path=os.path.join(font_dir, "OFL.txt"),
+                label="Downloading SIL Open Font License text...",
+            )
+        )
         self.queue_targets(targets)
 
     def _perform_ner_download(self) -> bool:

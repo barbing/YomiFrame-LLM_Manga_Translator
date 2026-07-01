@@ -19,6 +19,20 @@ CLEANUP_INPAINT_MODEL_FILE = "anime-manga-big-lama.pt"
 PADDLE_OCR_VL_REPO_ID = "PaddlePaddle/PaddleOCR-VL-1.6-GGUF"
 PADDLE_OCR_VL_MODEL_FILE = "PaddleOCR-VL-1.6-GGUF.gguf"
 PADDLE_OCR_VL_MMPROJ_FILE = "PaddleOCR-VL-1.6-GGUF-mmproj.gguf"
+YUZUMARKER_FONT_ONNX_REPO_ID = "ogkalu/yuzumarker-font-detection-onnx"
+YUZUMARKER_FONT_ONNX_FILE = "font-detector.onnx"
+YUZUMARKER_FONT_LABELS_REPO_ID = "fffonion/yuzumarker-font-detection"
+YUZUMARKER_FONT_LABELS_FILE = "font-labels-ex.json"
+YUZUMARKER_FONT_LABELS_FALLBACK_FILE = "font-labels.json"
+NOTO_CJK_SC_FONT_BASE_URL = "https://raw.githubusercontent.com/notofonts/noto-cjk/main"
+NOTO_CJK_SC_FONT_FILES = [
+    "Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
+    "Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Bold.otf",
+    "Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Black.otf",
+    "Serif/OTF/SimplifiedChinese/NotoSerifCJKsc-Regular.otf",
+    "Serif/OTF/SimplifiedChinese/NotoSerifCJKsc-Bold.otf",
+]
+SIL_OFL_TEXT_URL = "https://openfontlicense.org/documents/OFL.txt"
 MANGA_OCR_BASE_URL = "https://huggingface.co/kha-white/manga-ocr-base/resolve/main/"
 MANGA_OCR_FILES = [
     "config.json",
@@ -40,7 +54,7 @@ class AppDefaults:
     import_dir: str = ""
     export_dir: str = ""
     font_name: str = "Microsoft YaHei"
-    font_detection: str = "heuristic"
+    font_detection: str = "yuzumarker"
     detector_input_size: int = 1024
     detector_engine: str = "ComicTextDetector"
     ocr_engine: str = "PaddleOCR-VL"

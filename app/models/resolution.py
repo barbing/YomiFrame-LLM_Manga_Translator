@@ -9,11 +9,17 @@ from app.config.defaults import (
     CLEANUP_INPAINT_MODEL_FILE,
     MANGA_OCR_FILES,
     KITSUMED_SPEECH_BUBBLE_MODEL_FILE,
+    NOTO_CJK_SC_FONT_FILES,
     OGKALU_TEXT_BUBBLE_CONFIG_FILE,
     OGKALU_TEXT_BUBBLE_MODEL_FILE,
     PADDLE_OCR_VL_MMPROJ_FILE,
     PADDLE_OCR_VL_MODEL_FILE,
     PADDLE_OCR_VL_REPO_ID,
+    YUZUMARKER_FONT_LABELS_FALLBACK_FILE,
+    YUZUMARKER_FONT_LABELS_FILE,
+    YUZUMARKER_FONT_LABELS_REPO_ID,
+    YUZUMARKER_FONT_ONNX_FILE,
+    YUZUMARKER_FONT_ONNX_REPO_ID,
 )
 
 
@@ -174,6 +180,122 @@ def has_paddle_ocr_vl_runtime(base_dir: Optional[str] = None) -> bool:
         resolve_paddle_ocr_vl_model_file(base_dir)
         and resolve_paddle_ocr_vl_mmproj_file(base_dir)
         and resolve_llama_server_executable(base_dir)
+    )
+
+
+def _yuzumarker_onnx_local_dir(base_dir: Optional[str] = None) -> str:
+    return os.path.join(base_dir or models_root(), "YuzuMarker", "onnx")
+
+
+def _yuzumarker_labels_local_dir(base_dir: Optional[str] = None) -> str:
+    return os.path.join(base_dir or models_root(), "YuzuMarker", "safetensors")
+
+
+def _yuzumarker_onnx_snapshot_dirs() -> list[str]:
+    user, repo = YUZUMARKER_FONT_ONNX_REPO_ID.split("/", 1)
+    return _hf_snapshot_dirs(user, repo)
+
+
+def _yuzumarker_labels_snapshot_dirs() -> list[str]:
+    user, repo = YUZUMARKER_FONT_LABELS_REPO_ID.split("/", 1)
+    return _hf_snapshot_dirs(user, repo)
+
+
+def resolve_yuzumarker_font_onnx_file(base_dir: Optional[str] = None) -> Optional[str]:
+    override = os.environ.get("MT_YUZUMARKER_FONT_ONNX")
+    if override and os.path.isfile(override):
+        return override
+    local_path = os.path.join(_yuzumarker_onnx_local_dir(base_dir), YUZUMARKER_FONT_ONNX_FILE)
+    if os.path.isfile(local_path):
+        return local_path
+    snapshot = _first_dir_with_files(_yuzumarker_onnx_snapshot_dirs(), [YUZUMARKER_FONT_ONNX_FILE])
+    if snapshot:
+        return os.path.join(snapshot, YUZUMARKER_FONT_ONNX_FILE)
+    return None
+
+
+def resolve_yuzumarker_font_labels_file(base_dir: Optional[str] = None) -> Optional[str]:
+    override = os.environ.get("MT_YUZUMARKER_FONT_LABELS")
+    if override and os.path.isfile(override):
+        return override
+    local_dir = _yuzumarker_labels_local_dir(base_dir)
+    for filename in (YUZUMARKER_FONT_LABELS_FILE, YUZUMARKER_FONT_LABELS_FALLBACK_FILE):
+        local_path = os.path.join(local_dir, filename)
+        if os.path.isfile(local_path):
+            return local_path
+    for filename in (YUZUMARKER_FONT_LABELS_FILE, YUZUMARKER_FONT_LABELS_FALLBACK_FILE):
+        snapshot = _first_dir_with_files(_yuzumarker_labels_snapshot_dirs(), [filename])
+        if snapshot:
+            return os.path.join(snapshot, filename)
+    return None
+
+
+def has_yuzumarker_font_detection_runtime(base_dir: Optional[str] = None) -> bool:
+    return bool(
+        resolve_yuzumarker_font_onnx_file(base_dir)
+        and resolve_yuzumarker_font_labels_file(base_dir)
+    )
+
+
+def _noto_cjk_sc_font_dir(base_dir: Optional[str] = None) -> str:
+    return os.path.join(base_dir or models_root(), "fonts", "noto-cjk-sc-core")
+
+
+def noto_cjk_sc_font_dir(base_dir: Optional[str] = None) -> str:
+    return _noto_cjk_sc_font_dir(base_dir)
+
+
+def has_noto_cjk_sc_font_pack(base_dir: Optional[str] = None) -> bool:
+    directory = _noto_cjk_sc_font_dir(base_dir)
+    required = [os.path.basename(path) for path in NOTO_CJK_SC_FONT_FILES]
+    return all(os.path.isfile(os.path.join(directory, filename)) for filename in required)
+
+
+def resolve_noto_cjk_sc_font_file(
+    *,
+    base_dir: Optional[str] = None,
+    serif: bool = False,
+    weight: str = "regular",
+) -> Optional[str]:
+    directory = _noto_cjk_sc_font_dir(base_dir)
+    normalized_weight = str(weight or "regular").strip().lower()
+    if serif:
+        candidates = (
+            "NotoSerifCJKsc-Bold.otf",
+            "NotoSerifCJKsc-Regular.otf",
+        ) if normalized_weight in {"bold", "black", "heavy"} else (
+            "NotoSerifCJKsc-Regular.otf",
+            "NotoSerifCJKsc-Bold.otf",
+        )
+    elif normalized_weight in {"black", "heavy"}:
+        candidates = (
+            "NotoSansCJKsc-Black.otf",
+            "NotoSansCJKsc-Bold.otf",
+            "NotoSansCJKsc-Regular.otf",
+        )
+    elif normalized_weight == "bold":
+        candidates = (
+            "NotoSansCJKsc-Bold.otf",
+            "NotoSansCJKsc-Black.otf",
+            "NotoSansCJKsc-Regular.otf",
+        )
+    else:
+        candidates = (
+            "NotoSansCJKsc-Regular.otf",
+            "NotoSansCJKsc-Bold.otf",
+            "NotoSansCJKsc-Black.otf",
+        )
+    for filename in candidates:
+        path = os.path.join(directory, filename)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def has_font_style_runtime(base_dir: Optional[str] = None) -> bool:
+    return bool(
+        has_yuzumarker_font_detection_runtime(base_dir)
+        and has_noto_cjk_sc_font_pack(base_dir)
     )
 
 
