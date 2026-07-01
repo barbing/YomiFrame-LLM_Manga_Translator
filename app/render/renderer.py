@@ -37,7 +37,7 @@ _RENDERER_CANDIDATE_SHADOW_FLAG = "MT_RENDERER_CANDIDATE_SHADOW"
 _RENDERER_FAST_LAYOUT_FLAG = "MT_RENDERER_FAST_LAYOUT"
 _RENDERER_FAST_LAYOUT_SHADOW_FLAG = "MT_RENDERER_FAST_LAYOUT_SHADOW"
 _RENDERER_CLEANUP_MUTATION_ENABLED = False
-_RENDERER_FAST_LAYOUT_FINALIST_CAP = 128
+_RENDERER_FAST_LAYOUT_FINALIST_CAP = 48
 _RENDERER_LAYOUT_HOT_HELPER_TIMING_KEYS = {
     "renderer_text_wrap_measure_time",
 }
@@ -8096,8 +8096,14 @@ def _choose_render_readability_v5_candidate(
     source_columns: dict[str, object],
 ) -> dict[str, object]:
     boxes = _render_readability_v5_boxes(current, expanded, allowed, shape_box, source_columns, source_size_hint)
+    fast_layout_enabled = _renderer_fast_layout_enabled()
     line_heights = [float(line_height_scale)]
-    for scale in (1.0, 0.98, 0.96, 0.94, 0.92, 0.88, 0.84, 0.80, 0.76, 0.72):
+    line_height_scales = (
+        (1.0, 0.96, 0.92, 0.84, 0.76)
+        if fast_layout_enabled
+        else (1.0, 0.98, 0.96, 0.94, 0.92, 0.88, 0.84, 0.80, 0.76, 0.72)
+    )
+    for scale in line_height_scales:
         candidate = max(0.72, min(1.2, float(line_height_scale) * scale))
         if all(abs(candidate - existing) > 0.01 for existing in line_heights):
             line_heights.append(candidate)
@@ -8116,7 +8122,6 @@ def _choose_render_readability_v5_candidate(
     best["shape_source"] = shape_source
     candidate_count = 0
     micro_start = _renderer_micro_start()
-    fast_layout_enabled = _renderer_fast_layout_enabled()
     if fast_layout_enabled:
         if shadow_candidates is None:
             shadow_candidates = _renderer_shadow_build_candidates(
@@ -8179,7 +8184,11 @@ def _choose_render_readability_v5_candidate(
         shadow_loop_time = time.perf_counter() - shadow_loop_start if shadow_loop_start > 0 else 0.0
     _renderer_micro_add("renderer_v5_candidate_scoring_loop_time", micro_start)
     best["candidate_count"] = candidate_count
-    if shadow_candidates is not None:
+    shadow_recording_enabled = (
+        _renderer_shadow_context() is not None
+        or _renderer_fast_layout_shadow_context() is not None
+    )
+    if shadow_candidates is not None and shadow_recording_enabled:
         selected_box = _renderer_shadow_box(best.get("bbox") or current) or _renderer_shadow_box(current)
         source_fp = _renderer_shadow_source_columns_fp(source_columns)
         selected_shadow = {

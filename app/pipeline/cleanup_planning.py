@@ -563,6 +563,7 @@ def prove_cleanup_result(
     cleanup_result: CleanupResult,
     cleanup_plan: CleanupPlan,
     cleanup_mask: CleanupMask,
+    proof_context: Mapping[str, Any] | None = None,
 ) -> CleanupProof:
     """Proof one cleanup result before translated text drawing."""
 
@@ -598,8 +599,31 @@ def prove_cleanup_result(
     try:
         if np is None:
             raise RuntimeError("numpy_unavailable")
-        source_np = np.asarray(source_image.convert("RGB") if hasattr(source_image, "convert") else source_image)
-        before_np = np.asarray(before_image.convert("RGB") if hasattr(before_image, "convert") else before_image)
+        source_np = (
+            proof_context.get("source_np")
+            if isinstance(proof_context, Mapping)
+            else None
+        )
+        source_gray = (
+            proof_context.get("source_gray")
+            if isinstance(proof_context, Mapping)
+            else None
+        )
+        source_hash = (
+            str(proof_context.get("source_image_hash") or "")
+            if isinstance(proof_context, Mapping)
+            else ""
+        )
+        if source_np is None:
+            source_np = np.asarray(source_image.convert("RGB") if hasattr(source_image, "convert") else source_image)
+        if source_gray is None:
+            source_gray = _gray(source_np)
+        if source_hash and str(cleanup_result.input_image_hash or "") == source_hash:
+            before_np = source_np
+            before_gray = source_gray
+        else:
+            before_np = np.asarray(before_image.convert("RGB") if hasattr(before_image, "convert") else before_image)
+            before_gray = _gray(before_np)
         cleaned_image = cleanup_result.cleaned_image
         cleaned_np = np.asarray(cleaned_image.convert("RGB") if hasattr(cleaned_image, "convert") else cleaned_image)
         foreground = _binary_mask(getattr(cleanup_result, "commit_foreground_mask", None), source_np.shape[:2])
@@ -633,9 +657,7 @@ def prove_cleanup_result(
         erase_foreground_overlap = int(np.count_nonzero((erase > 0) & (foreground > 0)))
         mask_source_overlap_ratio = erase_foreground_overlap / max(1, foreground_pixels)
 
-        source_gray = _gray(source_np)
         cleaned_gray = _gray(cleaned_np)
-        before_gray = _gray(before_np)
         diff_gray = np.abs(cleaned_gray.astype(np.int16) - before_gray.astype(np.int16))
         changed = diff_gray > 8
         legacy_residual = _source_residual_mask(source_gray, cleaned_gray, foreground)
@@ -1313,6 +1335,21 @@ def prove_cleanup_result(
     )
 
 
+def _cleanup_proof_page_context(source_image: Any) -> dict[str, Any]:
+    if np is None or source_image is None:
+        return {}
+    try:
+        source_np = np.asarray(source_image.convert("RGB") if hasattr(source_image, "convert") else source_image)
+        source_np = np.ascontiguousarray(source_np)
+    except Exception:
+        return {}
+    return {
+        "source_np": source_np,
+        "source_gray": _gray(source_np),
+        "source_image_hash": _hash_array(source_np),
+    }
+
+
 def _proof_scope_metadata(cleanup_plan: CleanupPlan, cleanup_mask: CleanupMask) -> dict[str, Any]:
     params = cleanup_plan.backend_parameters or {}
     visual_scope = _normalise_cleanup_visual_scope(getattr(cleanup_mask, "visual_scope", ""))
@@ -1399,6 +1436,7 @@ def run_cleanup_runtime_contract(
     for cleanup_mask in masks:
         masks_by_job_id.setdefault(str(cleanup_mask.cleanup_job_id), []).append(cleanup_mask)
     render_eligibility_by_region = _render_eligibility_by_region_id(render_eligibility)
+    proof_context = _cleanup_proof_page_context(source_image)
     _page014_timeout_checkpoint(
         "cleanup_runtime_contract",
         "start",
@@ -1751,6 +1789,7 @@ def run_cleanup_runtime_contract(
                 use_gpu=use_gpu,
                 model_id=model_id,
                 artifact_dir=artifact_dir,
+                proof_context=proof_context,
             )
             _page014_timeout_checkpoint(
                 "adaptive_cleanup_attempts",
@@ -5212,6 +5251,7 @@ def _run_adaptive_cleanup_attempts(
     use_gpu: bool,
     model_id: str,
     artifact_dir: str | None,
+    proof_context: Mapping[str, Any] | None = None,
 ) -> tuple[list[CleanupResult], list[CleanupProof], list[dict[str, Any]]]:
     adaptive_started = time.time()
     region_id = _canonical_parent_region_id(cleanup_plan, cleanup_mask, fallback_region_id=region_id) or region_id
@@ -5264,6 +5304,7 @@ def _run_adaptive_cleanup_attempts(
             attempt_index=0,
             strategy="model_required_full_mask_inpaint",
             retry_reason="model_required_by_ai_mode",
+            proof_context=proof_context,
         )
         results.append(model_result)
         proofs.append(model_proof)
@@ -5335,6 +5376,7 @@ def _run_adaptive_cleanup_attempts(
             attempt_index=0,
             strategy="current_conservative",
             retry_reason="initial_attempt",
+            proof_context=proof_context,
         )
         results.append(first_result)
         proofs.append(first_proof)
@@ -5404,6 +5446,7 @@ def _run_adaptive_cleanup_attempts(
                 attempt_index=attempt_index,
                 strategy=strategy,
                 retry_reason=last_proof.failure_reason or last_result.failure_reason or "backend_noop_or_error",
+                proof_context=proof_context,
             )
             results.append(noop_result)
             proofs.append(noop_proof)
@@ -5482,6 +5525,7 @@ def _run_adaptive_cleanup_attempts(
             attempt_index=attempt_index,
             strategy="mask_faithful_root_inpaint_retry",
             retry_reason=last_proof.failure_reason or last_result.failure_reason or "background_cleanup_incomplete",
+            proof_context=proof_context,
         )
         results.append(inpaint_result)
         proofs.append(inpaint_proof)
@@ -5596,6 +5640,7 @@ def _run_adaptive_cleanup_attempts(
                 attempt_index=attempt_index,
                 strategy="residual_retry",
                 retry_reason=last_proof.failure_reason or "source_residual_remaining",
+                proof_context=proof_context,
             )
             results.append(residual_result)
             proofs.append(residual_proof)
@@ -5643,6 +5688,7 @@ def _run_adaptive_cleanup_attempts(
                 cleanup_result=combined_result,
                 cleanup_plan=combined_plan,
                 cleanup_mask=cleanup_mask,
+                proof_context=proof_context,
             )
             results.append(combined_result)
             proofs.append(combined_proof)
@@ -5704,6 +5750,7 @@ def _run_adaptive_cleanup_attempts(
             attempt_index=attempt_index,
             strategy="restoration_scale_back_retry",
             retry_reason=last_proof.failure_reason or "collateral_or_destructive_fill",
+            proof_context=proof_context,
         )
         results.append(restoration_result)
         proofs.append(restoration_proof)
@@ -5770,6 +5817,7 @@ def _run_adaptive_cleanup_attempts(
             attempt_index=attempt_index,
             strategy="authorized_ai_inpaint_full_mask_retry",
             retry_reason=last_proof.failure_reason or "caption_background_cleanup_incomplete",
+            proof_context=proof_context,
         )
         results.append(ai_result)
         proofs.append(ai_proof)
@@ -5878,6 +5926,7 @@ def _run_adaptive_cleanup_attempts(
                     attempt_index=attempt_index + 1,
                     strategy="authorized_ai_residual_retry",
                     retry_reason=ai_proof.failure_reason or "source_residual_remaining_after_ai",
+                    proof_context=proof_context,
                 )
                 results.append(residual_result)
                 proofs.append(residual_proof)
@@ -5928,6 +5977,7 @@ def _run_adaptive_cleanup_attempts(
                     cleanup_result=combined_result,
                     cleanup_plan=combined_plan,
                     cleanup_mask=cleanup_mask,
+                    proof_context=proof_context,
                 )
                 results.append(combined_result)
                 proofs.append(combined_proof)
@@ -5978,6 +6028,7 @@ def _execute_cleanup_attempt(
     attempt_index: int,
     strategy: str,
     retry_reason: str,
+    proof_context: Mapping[str, Any] | None = None,
 ) -> tuple[CleanupResult, CleanupProof]:
     attempt_started = time.time()
     canonical_region_id = _canonical_parent_region_id(cleanup_plan, cleanup_mask, fallback_region_id=region_id)
@@ -6059,6 +6110,7 @@ def _execute_cleanup_attempt(
         cleanup_result=result,
         cleanup_plan=cleanup_plan,
         cleanup_mask=cleanup_mask,
+        proof_context=proof_context,
     )
     _page014_timeout_checkpoint(
         "cleanup_attempt_execute",
@@ -7355,22 +7407,62 @@ def _background_flatness_metrics(source_np: Any, allowed_area: Sequence[int] | N
     }
 
 
+def _active_mask_bbox(mask: Any, shape: tuple[int, int], *, pad: int = 0) -> tuple[int, int, int, int] | None:
+    try:
+        active = np.asarray(mask) > 0
+    except Exception:
+        return None
+    if active.shape[:2] != shape[:2] or not np.any(active):
+        return None
+    ys, xs = np.where(active)
+    height, width = shape[:2]
+    x0 = max(0, int(xs.min()) - int(pad))
+    x1 = min(width, int(xs.max()) + 1 + int(pad))
+    y0 = max(0, int(ys.min()) - int(pad))
+    y1 = min(height, int(ys.max()) + 1 + int(pad))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1, y1
+
+
 def _source_residual_mask(source_gray: Any, cleaned_gray: Any, foreground: Any) -> Any:
-    diff = np.abs(source_gray.astype(np.int16) - cleaned_gray.astype(np.int16))
-    source_dark = source_gray < 210
-    cleaned_still_dark = cleaned_gray < 230
-    source_light = source_gray > 190
-    cleaned_still_light = cleaned_gray > 170
+    shape = source_gray.shape[:2]
+    output = np.zeros(shape, dtype=bool)
+    box = _active_mask_bbox(foreground, shape)
+    if box is None:
+        return output
+    x0, y0, x1, y1 = box
+    source_crop = source_gray[y0:y1, x0:x1]
+    cleaned_crop = cleaned_gray[y0:y1, x0:x1]
+    foreground_crop = np.asarray(foreground)[y0:y1, x0:x1] > 0
+    diff = np.abs(source_crop.astype(np.int16) - cleaned_crop.astype(np.int16))
+    source_dark = source_crop < 210
+    cleaned_still_dark = cleaned_crop < 230
+    source_light = source_crop > 190
+    cleaned_still_light = cleaned_crop > 170
     unchanged = diff < 45
-    return (foreground > 0) & unchanged & ((source_dark & cleaned_still_dark) | (source_light & cleaned_still_light))
+    output[y0:y1, x0:x1] = foreground_crop & unchanged & (
+        (source_dark & cleaned_still_dark) | (source_light & cleaned_still_light)
+    )
+    return output
 
 
 def _dark_source_residual_mask(source_gray: Any, cleaned_gray: Any, foreground: Any) -> Any:
-    diff = np.abs(source_gray.astype(np.int16) - cleaned_gray.astype(np.int16))
-    source_dark = source_gray < 210
-    cleaned_still_dark = cleaned_gray < 230
+    shape = source_gray.shape[:2]
+    output = np.zeros(shape, dtype=bool)
+    box = _active_mask_bbox(foreground, shape)
+    if box is None:
+        return output
+    x0, y0, x1, y1 = box
+    source_crop = source_gray[y0:y1, x0:x1]
+    cleaned_crop = cleaned_gray[y0:y1, x0:x1]
+    foreground_crop = np.asarray(foreground)[y0:y1, x0:x1] > 0
+    diff = np.abs(source_crop.astype(np.int16) - cleaned_crop.astype(np.int16))
+    source_dark = source_crop < 210
+    cleaned_still_dark = cleaned_crop < 230
     source_like = diff < 45
-    return (foreground > 0) & source_dark & cleaned_still_dark & source_like
+    output[y0:y1, x0:x1] = foreground_crop & source_dark & cleaned_still_dark & source_like
+    return output
 
 
 def _source_light_foreground_context(source_gray: Any, foreground: Any) -> dict[str, Any]:
@@ -7382,6 +7474,7 @@ def _source_light_foreground_context(source_gray: Any, foreground: Any) -> dict[
             "dark_ratio": 0.0,
         }
     try:
+        source_arr = np.asarray(source_gray)
         foreground_bool = np.asarray(foreground) > 0
         if not np.any(foreground_bool):
             return {
@@ -7389,19 +7482,28 @@ def _source_light_foreground_context(source_gray: Any, foreground: Any) -> dict[
                 "median_luma": None,
                 "dark_ratio": 0.0,
             }
+        box = _active_mask_bbox(foreground_bool, source_arr.shape[:2], pad=16)
+        if box is None:
+            return {
+                "dark_context": False,
+                "median_luma": None,
+                "dark_ratio": 0.0,
+            }
+        x0, y0, x1, y1 = box
+        foreground_crop = foreground_bool[y0:y1, x0:x1]
         if cv2 is not None:
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-            context = cv2.dilate(foreground_bool.astype(np.uint8), kernel, iterations=2) > 0
-            context = context & ~foreground_bool
+            context = cv2.dilate(foreground_crop.astype(np.uint8), kernel, iterations=2) > 0
+            context = context & ~foreground_crop
         else:
-            context = np.zeros_like(foreground_bool, dtype=bool)
+            context = np.zeros_like(foreground_crop, dtype=bool)
         if not np.any(context):
             return {
                 "dark_context": False,
                 "median_luma": None,
                 "dark_ratio": 0.0,
             }
-        values = np.asarray(source_gray)[context]
+        values = source_arr[y0:y1, x0:x1][context]
         if values.size <= 0:
             return {
                 "dark_context": False,
@@ -7454,16 +7556,27 @@ def _outside_accepted_mask_boundary_residual_mask(
         return np.zeros(source_arr.shape[:2], dtype=bool)
     if source_light_foreground_ratio < 0.25:
         return np.zeros(source_arr.shape[:2], dtype=bool)
+    output = np.zeros(source_arr.shape[:2], dtype=bool)
+    box = _active_mask_bbox(foreground_bool, source_arr.shape[:2], pad=8)
+    if box is None:
+        return output
+    x0, y0, x1, y1 = box
+    source_crop = source_arr[y0:y1, x0:x1]
+    cleaned_crop = cleaned_arr[y0:y1, x0:x1]
+    foreground_crop = foreground_bool[y0:y1, x0:x1]
+    erase_crop = erase_bool[y0:y1, x0:x1]
+    allowed_crop = allowed_bool[y0:y1, x0:x1]
     if cv2 is not None:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        near_foreground = cv2.dilate(foreground_bool.astype(np.uint8), kernel, iterations=2) > 0
-        boundary = near_foreground & ~erase_bool & allowed_bool
+        near_foreground = cv2.dilate(foreground_crop.astype(np.uint8), kernel, iterations=2) > 0
+        boundary = near_foreground & ~erase_crop & allowed_crop
     else:
-        boundary = np.zeros(source_arr.shape[:2], dtype=bool)
+        boundary = np.zeros(foreground_crop.shape[:2], dtype=bool)
     if not np.any(boundary):
-        return np.zeros(source_arr.shape[:2], dtype=bool)
-    unchanged = np.abs(cleaned_arr.astype(np.int16) - source_arr.astype(np.int16)) < 45
-    return boundary & (source_arr < 120) & (cleaned_arr < 140) & unchanged
+        return output
+    unchanged = np.abs(cleaned_crop.astype(np.int16) - source_crop.astype(np.int16)) < 45
+    output[y0:y1, x0:x1] = boundary & (source_crop < 120) & (cleaned_crop < 140) & unchanged
+    return output
 
 
 def _source_erasure_box_residual_mask(source_gray: Any, cleaned_gray: Any, bbox: Sequence[int]) -> Any:
